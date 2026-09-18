@@ -1,0 +1,25 @@
+{
+  "_provenance": "Position/velocity values copied verbatim from tcppver.out, the official SGP4 verification output published with Vallado, Crawford, Hujsak & Kelso, 'Revisiting Spacetrack Report #3' (2006). Redistributed here via the python-sgp4 package (MIT license, Brandon Rhodes, https://github.com/brandon-rhodes/python-sgp4), file sgp4/tcppver.out, satellite catalog number 5. This is an independent published reference, not a value computed by this project's own implementation (.ai/backend-prompt.md §8).",
+  "norad_id": "00005",
+  "tle_file": "vallado_sgp4_verification_sat5.tle",
+  "coordinate_system": "TEME",
+  "position_unit": "km",
+  "velocity_unit": "km/s",
+  "cases": [
+    {
+      "tsince_minutes": 0.0,
+      "position_km": [7022.46529266, -1400.08296755, 0.03995155],
+      "velocity_km_s": [1.893841015, 6.405893759, 4.534807250]
+    },
+    {
+      "tsince_minutes": 360.0,
+      "position_km": [-7154.03120202, -3783.17682504, -3536.19412294],
+      "velocity_km_s": [4.741887409, -4.151817765, -2.093935425]
+    },
+    {
+      "tsince_minutes": 720.0,
+      "position_km": [-7134.59340119, 6531.68641334, 3260.27186483],
+      "velocity_km_s": [-4.113793027, -2.911922039, -2.557327851]
+    }
+  ]
+}
