@@ -1,1 +1,2 @@
-print("prikol")
+if __name__ == "__main__":
+    print("prikol")
