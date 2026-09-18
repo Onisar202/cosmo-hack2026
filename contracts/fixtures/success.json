@@ -116,7 +116,6 @@
       "message": "Прогноз NOAA SWPC (G2 Watch, опубликован 2024-05-09T20:00Z) ожидает геомагнитную бурю Kp≈6 — расширяет широтный интервал применимости уровня S2/S3 солнечных частиц; собственного вклада в уровень не даёт.",
       "record_ids": ["rec-swx-watch-0002"],
       "fetch_attempt_id": null,
-      "no_evidence_reason": null,
       "window_id": null
     },
     {
@@ -126,7 +125,6 @@
       "message": "Прогноз DONKI (опубликован 2024-05-09T18:00Z, до отсечения as_of) предсказывает выход потока протонов >10 МэВ на уровень S3 в окне B и удержание не менее 4.0 ч.",
       "record_ids": ["rec-swx-donki-forecast-0001"],
       "fetch_attempt_id": null,
-      "no_evidence_reason": null,
       "window_id": "win-b"
     },
     {
@@ -136,7 +134,6 @@
       "message": "Оценка MMOD ведётся в относительных единицах к фону; абсолютная калибровка потока для используемого источника недоступна.",
       "record_ids": ["rec-mmod-stream-0004"],
       "fetch_attempt_id": null,
-      "no_evidence_reason": null,
       "window_id": null
     }
   ],
