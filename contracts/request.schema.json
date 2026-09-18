@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vkd-risk.local/contracts/request.schema.json",
   "title": "CalculationRequest",
-  "description": "Запрос на расчёт окна(-он) ВКД. См. .ai/main-prompt.md §11–12 и .ai/backend-prompt.md §6. Часть этой схемы (границы обязательного исторического периода 1 мая — 30 июня 2024, арифметика search_end_at = start_at + search_window_hours <= 32ч от start_at) не выражается в JSON Schema и enforced на уровне сервиса — см. contracts/README.md.",
+  "description": "Запрос на расчёт окна(-он) ВКД. См. .ai/main-prompt.md §11–12 и .ai/backend-prompt.md §6. Часть этой схемы (границы обязательного исторического периода 1 мая — 30 июня 2024, арифметика search_end_at = start_at + search_window_hours <= 32ч от start_at, правило as_of <= start_at для historical_forecast) не выражается в JSON Schema — там нужно сравнение двух дат, а JSON Schema это не умеет — и enforced на уровне сервиса — см. contracts/README.md.",
   "type": "object",
   "additionalProperties": false,
   "required": ["mode", "start_at", "duration_hours", "search_window_hours"],
@@ -28,7 +28,7 @@
     },
     "as_of": {
       "$ref": "#/$defs/utcDateTime",
-      "description": "Момент отсечения для строгого прогноза из прошлого: во вход расчёта попадают только записи с published_at <= as_of и replay_eligible == true. Обязателен только для mode = historical_forecast, запрещён для mode = current и mode = historical_analysis (см. contracts/README.md)."
+      "description": "Момент отсечения для строгого прогноза из прошлого: во вход расчёта попадают только записи с published_at <= as_of и replay_eligible == true. Обязателен только для mode = historical_forecast, запрещён для mode = current и mode = historical_analysis (см. contracts/README.md). ОБЯЗАТЕЛЬНОЕ правило сервисного валидатора (не выражается в JSON Schema — сравнение двух дат): as_of <= start_at. Иначе отсечение оказывается позже начала окна (а зачастую и позже всего расчётного интервала), и в расчёт может попасть запись, опубликованная уже после того, как события окна произошли, — получится ретроспективный разбор по факту, выданный за прогноз из прошлого. См. contracts/README.md, раздел «Три режима и as_of»."
     },
     "lighting_constraint": {
       "$ref": "#/$defs/lightingConstraint"

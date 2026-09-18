@@ -35,7 +35,7 @@
           "mechanism": "space_weather",
           "status": "missing_data",
           "max_level": null,
-          "exceedance_hours": null,
+          "exceedance_hours_by_level": null,
           "coverage_fraction": 0.0,
           "critical_gap": true,
           "notes": [
@@ -47,7 +47,7 @@
           "mechanism": "mmod",
           "status": "not_implemented",
           "max_level": null,
-          "exceedance_hours": null,
+          "exceedance_hours_by_level": null,
           "coverage_fraction": 0.0,
           "critical_gap": true,
           "notes": [
@@ -70,7 +70,7 @@
           "mechanism": "space_weather",
           "status": "ok",
           "max_level": "background",
-          "exceedance_hours": 0,
+          "exceedance_hours_by_level": { "S1": 0, "S2": 0, "S3": 0 },
           "coverage_fraction": 0.6,
           "critical_gap": false,
           "notes": [
@@ -82,7 +82,7 @@
           "mechanism": "mmod",
           "status": "not_implemented",
           "max_level": null,
-          "exceedance_hours": null,
+          "exceedance_hours_by_level": null,
           "coverage_fraction": 0.0,
           "critical_gap": true,
           "notes": [
@@ -111,6 +111,7 @@
       "mechanism": "space_weather",
       "message": "Источник NOAA SWPC не вернул ожидаемые записи потока протонов за интервал окна A — это расценено как «оценить невозможно», а не как отсутствие воздействия.",
       "record_ids": [],
+      "fetch_attempt_id": "fa-noaa-swpc-proton-flux-2026-09-18T08:15:00Z",
       "window_id": "win-a"
     },
     {
@@ -119,6 +120,7 @@
       "mechanism": "mmod",
       "message": "Механизм MMOD не реализован — оценка не имитирует готовый механизм и явно помечена not_implemented для обоих окон.",
       "record_ids": [],
+      "fetch_attempt_id": null,
       "window_id": null
     },
     {
@@ -126,7 +128,8 @@
       "severity": "advisory",
       "mechanism": "lighting",
       "message": "Окно B частично приходится на теневой участок орбиты станции — нарушено требование освещённости фазы выхода.",
-      "record_ids": [],
+      "record_ids": ["rec-cur-orbit-0001"],
+      "fetch_attempt_id": null,
       "window_id": "win-b"
     }
   ],

@@ -34,7 +34,7 @@
           "mechanism": "space_weather",
           "status": "source_error",
           "max_level": null,
-          "exceedance_hours": null,
+          "exceedance_hours_by_level": null,
           "coverage_fraction": 0.0,
           "critical_gap": true,
           "notes": [
@@ -46,7 +46,7 @@
           "mechanism": "mmod",
           "status": "ok",
           "max_level": "background",
-          "exceedance_hours": 0,
+          "exceedance_hours_by_level": { "elevated": 0, "pronounced": 0 },
           "coverage_fraction": 1.0,
           "critical_gap": false,
           "notes": [
@@ -69,7 +69,7 @@
           "mechanism": "space_weather",
           "status": "source_error",
           "max_level": null,
-          "exceedance_hours": null,
+          "exceedance_hours_by_level": null,
           "coverage_fraction": 0.0,
           "critical_gap": true,
           "notes": [
@@ -81,7 +81,7 @@
           "mechanism": "mmod",
           "status": "ok",
           "max_level": "elevated",
-          "exceedance_hours": 1.5,
+          "exceedance_hours_by_level": { "elevated": 1.5, "pronounced": 0 },
           "coverage_fraction": 1.0,
           "critical_gap": false,
           "notes": [
@@ -118,6 +118,7 @@
       "mechanism": "space_weather",
       "message": "Архив NOAA NCEI вернул HTTP 429 (исчерпана квота) для обоих окон — это расценено как «оценить невозможно», а не как «фон». Отказ источника не превращается в благоприятную оценку.",
       "record_ids": [],
+      "fetch_attempt_id": "fa-noaa-ncei-swpc-archive-2026-09-18T07:55:00Z",
       "window_id": null
     },
     {
@@ -126,6 +127,7 @@
       "mechanism": "space_weather",
       "message": "В архиве отсутствует часовой интервал 07:00–08:00 UTC 15 июня 2024 независимо от текущей ошибки квоты — явное непокрытие охвата архива.",
       "record_ids": [],
+      "fetch_attempt_id": null,
       "window_id": null
     }
   ],

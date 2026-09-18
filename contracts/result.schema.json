@@ -37,11 +37,11 @@
     },
     "mode": {
       "$ref": "#/$defs/mode",
-      "description": "Дублирует request.mode на верхнем уровне для быстрого доступа без разбора вложенного объекта. Должно совпадать с request.mode."
+      "description": "Дублирует request.mode на верхнем уровне для быстрого доступа без разбора вложенного объекта. Схема принудительно требует mode == request.mode (см. allOf ниже: каждая ветка по значению mode требует то же значение внутри request.mode)."
     },
     "as_of": {
       "oneOf": [{ "$ref": "#/$defs/utcDateTime" }, { "type": "null" }],
-      "description": "Дублирует request.as_of. null для current и historical_analysis, обязателен для historical_forecast. Должно совпадать с request.as_of."
+      "description": "Дублирует request.as_of. null для current и historical_analysis, обязателен для historical_forecast. Присутствие/отсутствие синхронизировано схемой с request.mode так же, как mode (см. allOf). Точное строковое равенство as_of == request.as_of JSON Schema не выражает (нужно сравнение значений в двух разных точках документа) — это проверяет сервисный валидатор перед сохранением результата."
     },
     "algorithm_version": {
       "type": "string",
@@ -192,21 +192,37 @@
         "properties": { "mode": { "const": "historical_forecast" } },
         "required": ["mode"]
       },
-      "then": { "required": ["as_of"], "properties": { "as_of": { "$ref": "#/$defs/utcDateTime" } } }
+      "then": {
+        "required": ["as_of"],
+        "properties": {
+          "as_of": { "$ref": "#/$defs/utcDateTime" },
+          "request": { "properties": { "mode": { "const": "historical_forecast" } }, "required": ["mode"] }
+        }
+      }
     },
     {
       "if": {
         "properties": { "mode": { "const": "current" } },
         "required": ["mode"]
       },
-      "then": { "properties": { "as_of": { "const": null } } }
+      "then": {
+        "properties": {
+          "as_of": { "const": null },
+          "request": { "properties": { "mode": { "const": "current" } }, "required": ["mode"] }
+        }
+      }
     },
     {
       "if": {
         "properties": { "mode": { "const": "historical_analysis" } },
         "required": ["mode"]
       },
-      "then": { "properties": { "as_of": { "const": null } } }
+      "then": {
+        "properties": {
+          "as_of": { "const": null },
+          "request": { "properties": { "mode": { "const": "historical_analysis" } }, "required": ["mode"] }
+        }
+      }
     }
   ],
   "$defs": {
@@ -243,7 +259,7 @@
         "mechanism",
         "status",
         "max_level",
-        "exceedance_hours",
+        "exceedance_hours_by_level",
         "coverage_fraction",
         "critical_gap",
         "notes",
@@ -255,9 +271,8 @@
         "max_level": {
           "description": "Максимальный уровень внутри окна. null, если status != ok (не имитируется значение, которого нет)."
         },
-        "exceedance_hours": {
-          "oneOf": [{ "type": "number", "minimum": 0 }, { "type": "null" }],
-          "description": "Суммарная длительность превышения максимального достигнутого порога в пределах окна. null, если status != ok."
+        "exceedance_hours_by_level": {
+          "description": "Суммарная длительность превышения КАЖДОГО применимого порога механизма в пределах окна (.ai/main-prompt.md §11: 'суммарная длительность превышения каждого порога', не только максимального). null, если status != ok. Точный набор ключей и их количество зависят от mechanism — см. allOf ниже: для space_weather — {S1, S2, S3} (шкала NOAA), для mmod — {elevated, pronounced}. Значения не обязаны быть монотонными в схеме (это проверяется на уровне расчёта: время выше S3 — подмножество времени выше S2 и т.д.)."
         },
         "coverage_fraction": {
           "type": "number",
@@ -286,7 +301,7 @@
           "then": {
             "properties": {
               "max_level": { "const": null },
-              "exceedance_hours": { "const": null }
+              "exceedance_hours_by_level": { "const": null }
             }
           }
         },
@@ -295,6 +310,45 @@
           "then": {
             "properties": {
               "max_level": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "mechanism": { "const": "space_weather" }, "status": { "const": "ok" } },
+            "required": ["mechanism", "status"]
+          },
+          "then": {
+            "properties": {
+              "exceedance_hours_by_level": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["S1", "S2", "S3"],
+                "properties": {
+                  "S1": { "type": "number", "minimum": 0 },
+                  "S2": { "type": "number", "minimum": 0 },
+                  "S3": { "type": "number", "minimum": 0 }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "mechanism": { "const": "mmod" }, "status": { "const": "ok" } },
+            "required": ["mechanism", "status"]
+          },
+          "then": {
+            "properties": {
+              "exceedance_hours_by_level": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["elevated", "pronounced"],
+                "properties": {
+                  "elevated": { "type": "number", "minimum": 0 },
+                  "pronounced": { "type": "number", "minimum": 0 }
+                }
+              }
             }
           }
         }
@@ -381,7 +435,7 @@
     "warning": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "severity", "mechanism", "message", "record_ids", "window_id"],
+      "required": ["code", "severity", "mechanism", "message", "record_ids", "fetch_attempt_id", "window_id"],
       "properties": {
         "code": { "type": "string", "minLength": 1 },
         "severity": { "type": "string", "enum": ["info", "advisory", "critical"] },
@@ -399,12 +453,28 @@
         "record_ids": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
-          "description": "От предупреждения — к значению и первоисточнику (record_id)."
+          "description": "От предупреждения — к значению и первоисточнику (record_id). Например для предупреждения о нарушении освещённости — record_id использованной орбитальной записи."
+        },
+        "fetch_attempt_id": {
+          "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }],
+          "description": "Устойчивый идентификатор сохранённой (в т.ч. неуспешной) попытки обращения к источнику — используется, когда предупреждение не может сослаться на record_id (например отказ источника или архивный пробел: сама запись не создана, но попытка получения залогирована и её результат/тело ответа сохранены наравне с успешными). Обязателен для severity = critical, если record_ids пуст."
         },
         "window_id": {
           "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "severity": { "const": "critical" } }, "required": ["severity"] },
+          "then": {
+            "anyOf": [
+              { "properties": { "record_ids": { "minItems": 1 } } },
+              { "properties": { "fetch_attempt_id": { "type": "string", "minLength": 1 } } }
+            ]
+          }
+        }
+      ],
+      "description": "Критическое предупреждение (severity = critical) всегда доказуемо: ссылается либо на record_id, либо на fetch_attempt_id залогированной попытки получения — от вывода можно дойти до значения или до причины отказа (.ai/main-prompt.md §3)."
     },
     "recommendation": {
       "type": "object",

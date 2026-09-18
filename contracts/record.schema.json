@@ -7,6 +7,7 @@
   "additionalProperties": false,
   "required": [
     "record_id",
+    "provider_record_id",
     "source_id",
     "source_url",
     "record_kind",
@@ -28,7 +29,12 @@
     "record_id": {
       "type": "string",
       "minLength": 1,
-      "description": "Устойчивый идентификатор записи внутри хранилища (не идентификатор поставщика — дедупликация ведётся по нему отдельно на уровне sources/)."
+      "description": "Устойчивый идентификатор записи внутри хранилища (суррогатный ключ хранилища, не идентификатор поставщика)."
+    },
+    "provider_record_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Устойчивый идентификатор продукта/сообщения у поставщика (например номер уведомления DONKI, идентификатор бюллетеня NOAA). Дедупликация повторных сообщений ведётся по паре (source_id, provider_record_id) — не по record_id хранилища и не по времени получения (.ai/main-prompt.md §2). Позднее уточнение того же продукта — новая запись с тем же provider_record_id, но новым source_version; хранилище обязано обеспечить уникальность (source_id, provider_record_id, source_version)."
     },
     "source_id": {
       "type": "string",
@@ -66,11 +72,10 @@
       "description": "Когда мы это получили. Никогда не подставляется вместо published_at."
     },
     "value": {
-      "description": "Значение записи. Для orbital_elements — структурированный объект (строки TLE/GP и производные), для остальных record_kind — число или null (отсутствие значения не заменяется нулём)."
+      "description": "Значение записи. Для record_kind = orbital_elements — структурированный объект (см. $defs/orbitalElementsValue), для остальных record_kind — число или null (отсутствие значения не заменяется нулём). Точный тип по record_kind зафиксирован ниже в allOf."
     },
     "unit": {
-      "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }],
-      "description": "Единица измерения рядом со значением (например pfu, ratio_to_background, kp_index). null допустим только когда value тоже null."
+      "description": "Единица измерения рядом со значением (например pfu, ratio_to_background, kp_index). null допустим только когда value тоже null; для orbital_elements unit всегда null (у структурированных элементов нет единственной единицы измерения). Точное правило — ниже в allOf."
     },
     "spatial_context": {
       "type": "object",
@@ -113,16 +118,33 @@
       }
     },
     {
-      "if": { "properties": { "value": { "const": null } } },
-      "then": { "properties": { "unit": { "const": null } } }
-    },
-    {
       "if": {
         "properties": { "record_kind": { "const": "orbital_elements" } },
         "required": ["record_kind"]
       },
-      "then": { "required": ["orbital_elements_meta"] },
-      "else": { "not": { "required": ["orbital_elements_meta"] } }
+      "then": {
+        "required": ["orbital_elements_meta"],
+        "properties": {
+          "value": { "$ref": "#/$defs/orbitalElementsValue" },
+          "unit": { "const": null }
+        }
+      },
+      "else": {
+        "not": { "required": ["orbital_elements_meta"] },
+        "properties": {
+          "value": { "oneOf": [{ "type": "number" }, { "type": "null" }] }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "value": { "type": "number" } }, "required": ["value"] },
+            "then": { "properties": { "unit": { "type": "string", "minLength": 1 } } }
+          },
+          {
+            "if": { "properties": { "value": { "const": null } } },
+            "then": { "properties": { "unit": { "const": null } } }
+          }
+        ]
+      }
     }
   ],
   "$defs": {
@@ -151,6 +173,19 @@
           "type": "string",
           "minLength": 1,
           "description": "Система координат элементов (например TEME)."
+        }
+      }
+    },
+    "orbitalElementsValue": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["raw"],
+      "description": "Структурированное представление орбитальных элементов. raw хранит исходный текст в формате из orbital_elements_meta.format (две строки TLE либо сериализованный GP/OMM) для точного воспроизведения расчёта; разобранные поля (наклонение, эксцентриситет и т.п.) — необязательное дополнение сверх raw.",
+      "properties": {
+        "raw": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Исходный текст элементов как получен от источника (например две строки TLE, разделённые \\n)."
         }
       }
     }
