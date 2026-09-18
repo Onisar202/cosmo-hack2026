@@ -14,8 +14,12 @@ health-проверку и воспроизводимые проверки ка�
 МКС с CelesTrak (`src/sources/orbit.py`) и первый расчётный модуль —
 распространение орбиты по SGP4 (`src/domain/orbit/propagate.py`). Оба
 коннектора регистрируют свои источники в общем реестре `sources.yaml`.
-Расчётных эндпоинтов ещё нет — API, объединяющий эти модули с остальными
-механизмами, появится вместе с задачей S1-07.
+FN-26 (S1-07) добавляет расчётный API (`src/api/`): запуск задания, статус,
+сохранённый результат, список результатов, статусы и принудительное
+обновление источников — с реестром задач в процессе и изоляцией конкурентных
+запросов. Интерпретация обоих обязательных механизмов воздействия
+(космическая погода, MMOD) и строгий исторический режим орбиты (Space-Track
+GP_HISTORY) ещё не реализованы — см. раздел «API» ниже.
 
 ## Стек
 
@@ -39,7 +43,9 @@ cp .env.example .env
 
 Обязательные и необязательные переменные окружения описаны с
 комментариями в `.env.example`. Значений ключей и других секретов там
-нет — на этом этапе сервис не обращается к внешним источникам.
+нет — источники, подключённые на этом этапе (NOAA SWPC, CelesTrak), не
+требуют учётных данных; переменные Space-Track появятся вместе с
+коннектором `space-track-gp-history`.
 Обязательные настройки (например, `APP_ENV`) проверяются при создании
 `Settings` (`src/config.py`), то есть при старте приложения: некорректный
 или неполный `.env` не даёт сервису запуститься.
@@ -79,9 +85,33 @@ $ uv run ruff check .
 All checks passed!
 
 $ uv run mypy src
-Success: no issues found in 21 source files
+Success: no issues found in 25 source files
 
 $ uv run pytest -v
+tests/api/test_isolation.py::test_concurrent_calculations_do_not_mix_parameters_statuses_or_data PASSED
+tests/api/test_isolation.py::test_concurrent_calculations_have_independent_task_status PASSED
+tests/api/test_isolation.py::test_recompute_with_same_parameters_creates_a_new_immutable_result PASSED
+tests/api/test_requests.py::test_create_calculation_returns_202_pending PASSED
+tests/api/test_requests.py::test_get_calculation_status_unknown_task_is_404 PASSED
+tests/api/test_requests.py::test_get_result_unknown_id_is_404 PASSED
+tests/api/test_requests.py::test_current_mode_full_flow_returns_real_orbit_and_not_implemented_mechanisms PASSED
+tests/api/test_requests.py::test_historical_modes_fail_with_clear_not_implemented[historical_analysis] PASSED
+tests/api/test_requests.py::test_historical_modes_fail_with_clear_not_implemented[historical_forecast] PASSED
+tests/api/test_requests.py::test_orbit_source_failure_fails_the_job_not_a_fake_success PASSED
+tests/api/test_requests.py::test_swpc_source_failure_does_not_fail_the_job PASSED
+tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides0] PASSED
+tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides1] PASSED
+tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides2] PASSED
+tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides3] PASSED
+tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides4] PASSED
+tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides5] PASSED
+tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides6] PASSED
+tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides7] PASSED
+tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides8] PASSED
+tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides9] PASSED
+tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides10] PASSED
+tests/api/test_requests.py::test_list_results_and_sources_status PASSED
+tests/api/test_requests.py::test_refresh_sources_forces_a_fetch PASSED
 tests/orbit/test_propagation.py::test_propagate_matches_independently_published_reference PASSED
 tests/orbit/test_propagation.py::test_load_elements_epoch_matches_independently_parsed_epoch PASSED
 tests/orbit/test_propagation.py::test_propagate_rejects_naive_datetime PASSED
@@ -187,37 +217,7 @@ tests/test_health.py::test_health_returns_200_ok PASSED
 tests/test_health.py::test_health_time_is_utc_aware PASSED
 tests/test_health.py::test_settings_requires_app_env PASSED
 tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
-tests/store/test_as_of.py::test_publication_after_cutoff_is_excluded PASSED
-tests/store/test_as_of.py::test_records_without_published_at_never_selected PASSED
-tests/store/test_as_of.py::test_newer_publication_after_cutoff_does_not_leak_even_as_a_refinement PASSED
-tests/store/test_as_of.py::test_select_as_of_returns_latest_eligible_version_of_the_same_product PASSED
-tests/store/test_as_of.py::test_select_as_of_filters_by_source_id_and_record_kind PASSED
-tests/store/test_as_of.py::test_select_as_of_at_exact_cutoff_is_inclusive PASSED
-tests/store/test_versions.py::test_later_refinement_does_not_overwrite_old PASSED
-tests/store/test_versions.py::test_duplicate_insert_is_idempotent_and_no_double_impact PASSED
-tests/store/test_versions.py::test_missing_published_at_is_not_replay_eligible PASSED
-tests/store/test_versions.py::test_null_value_is_preserved_not_replaced_with_zero PASSED
-tests/store/test_versions.py::test_original_is_recoverable_by_record_id_with_matching_checksum PASSED
-tests/store/test_versions.py::test_checksum_mismatch_is_detected PASSED
-tests/store/test_versions.py::test_store_module_exposes_no_update_or_delete PASSED
-tests/store/test_versions.py::test_result_is_immutable_recompute_creates_new_result_id PASSED
-tests/store/test_versions.py::test_store_result_rejects_manifest_referencing_unknown_record PASSED
-tests/store/test_versions.py::test_different_results_parameters_are_isolated PASSED
-tests/store/test_versions.py::test_records_and_results_survive_restart PASSED
-tests/store/test_versions.py::test_record_input_rejects_naive_datetime PASSED
-tests/store/test_versions.py::test_record_input_rejects_empty_source_version PASSED
-tests/store/test_versions.py::test_duplicate_key_with_different_content_is_a_conflict_not_a_duplicate PASSED
-tests/store/test_versions.py::test_duplicate_key_with_identical_content_is_idempotent PASSED
-tests/store/test_versions.py::test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict[override0] PASSED
-tests/store/test_versions.py::test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict[override1] PASSED
-tests/store/test_versions.py::test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict[override2] PASSED
-tests/store/test_versions.py::test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict[override3] PASSED
-tests/store/test_versions.py::test_published_at_offset_is_normalized_to_utc_before_comparison PASSED
-tests/test_health.py::test_health_returns_200_ok PASSED
-tests/test_health.py::test_health_time_is_utc_aware PASSED
-tests/test_health.py::test_settings_requires_app_env PASSED
-tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
-104 passed, 1 skipped
+128 passed, 1 skipped
 ```
 
 `test_live_smoke` пропускается намеренно: детерминированные тесты парсера
@@ -385,13 +385,92 @@ NOAA SWPC, интегральный поток протонов `>=10 МэВ` (�
   единицами, охватом, частотой обновления, наличием `published_at` и
   пригодностью для строгого replay (.ai/main-prompt.md §7, §10).
 
+## API (`src/api/`)
+
+Расчётный API S1-07: пути и формы — `contracts/README.md`, раздел «Endpoint
+shapes для S1-07»; тонкие роутеры — `src/api/routes.py`, вся логика —
+`src/api/service.py`, реестр задач в процессе — `src/api/jobs.py`, форма
+запроса и ответов — `src/api/schemas.py`.
+
+- **`POST /api/calculations`** — валидирует тело по
+  `contracts/request.schema.json` (плюс правила, не выражаемые JSON Schema:
+  `as_of <= start_at`, обязательный исторический период, см.
+  `src/api/schemas.py`) и сразу отвечает `202 {"task_id", "status": "pending"}`.
+  Сам расчёт выполняется в отдельном потоке (`loop.run_in_executor`) — long
+  расчёта здесь нет (SGP4 — миллисекунды, сеть к источникам — секунды),
+  поэтому отдельный брокер очередей не нужен (.ai/main-prompt.md §6).
+- **`GET /api/calculations/{task_id}`** — статус задачи
+  (`pending`/`running`/`done`/`failed`), `result_id` при успехе,
+  `{"code", "message"}` при отказе — без трассировок.
+- **`GET /api/results/{result_id}`** / **`GET /api/results`** — сохранённый
+  результат целиком или постранично урезанный список.
+- **`POST /api/sources/refresh`** / **`GET /api/sources/status`** —
+  принудительное обновление и статусы источников (`celestrak-gp`,
+  `noaa-swpc-proton-flux`).
+
+**Объём этой задачи — API и хранение, не интерпретация механизмов.**
+`src/domain/spaceweather` и `src/domain/mmod` ещё не реализованы (пустые
+модули-заглушки), поэтому в `mode=current` каждое окно несёт
+`mechanisms[*].status = "not_implemented"` для обоих обязательных
+механизмов — контракт прямо предусматривает это значение для «механизм ещё
+не реализован, не имитируется готовым» (`contracts/result.schema.json`,
+демонстрация — `contracts/fixtures/incomplete.json`). При этом:
+
+- орбитальные элементы МКС реально получены с CelesTrak, сохранены в
+  хранилище и участвуют в расчёте (SGP4-распространение по сетке текущего
+  запроса) — `result.orbit` несёт реальные источник/эпоху/давность;
+  `elements_epoch`/`is_reconstructed` не выдуманы;
+  `result.data_manifest` содержит ровно эту фактически использованную
+  запись (main-prompt.md §3 «манифест собирается фактически
+  использованными записями»);
+  поток протонов NOAA SWPC при доступности тоже получается и сохраняется
+  (виден в `source_status`), но не входит в манифест: ни одна интерпретация
+  его пока не использует;
+- `recommendation.status = "all_windows_excluded"` всегда для `current` в
+  этой версии — оба окна исключены критическим пробелом по обоим
+  механизмам (main-prompt.md §11, правило предпочтения окон, п.1), а не
+  потому что «в окне спокойно»;
+- отказ источника потока протонов не роняет расчёт и не подменяется
+  благоприятной оценкой (main-prompt.md §2, приёмка FN-26 «при отказе
+  одного источника остальные доступны») — он остаётся виден в
+  `source_status`/`warnings`, а орбита и форма результата не страдают;
+  отказ источника орбитальных элементов, наоборот, фатален для расчёта
+  (без орбиты контракт `result.orbit` невыполним) — задача завершается
+  понятной ошибкой (`orbit_error_source`/`orbit_error_quota`/
+  `orbit_error_corrupted`), а не пустым или придуманным результатом;
+- `mode ∈ {historical_analysis, historical_forecast}` внутри поддерживаемого
+  периода (1 мая — 30 июня 2024) сейчас всегда завершается понятной ошибкой
+  задачи `historical_mode_not_implemented`: строгий исторический режим
+  требует исторических орбитальных элементов (Space-Track `GP_HISTORY`),
+  коннектор которых ещё не реализован (`src/sources/orbit.py`,
+  `sources.yaml`), а современные элементы CelesTrak не подставляются вместо
+  исторических ни при каких обстоятельствах (main-prompt.md §11
+  «Траектория») — это осознанный `not_implemented`-отказ задачи, а не
+  фиктивный успех;
+- `lighting_constraint` в теле запроса отклоняется `422`: `src/domain/lighting`
+  не реализован, а `contracts/result.schema.json` → `window.lighting.status`
+  не имеет значения «не реализовано» (только
+  `not_requested`/`satisfied`/`violated`) — придумать `satisfied` без
+  проверки было бы тем самым ложным благоприятным выводом, который
+  main-prompt.md §2 запрещает для отказов источников.
+
+**Изоляция конкурентных запросов** (`tests/api/test_isolation.py`,
+main-prompt.md §9 п.7, backend-prompt.md §2): каждая фоновая задача открывает
+собственное соединение SQLite (не делит его с другими); реестр задач и
+реестр статусов источников потокобезопасны и не хранят параметры расчёта в
+модульных переменных — параметры и промежуточные данные передаются явно по
+вызовам. Файл/схема хранилища создаются один раз при старте приложения
+(`ensure_store_ready`), чтобы первый набор конкурентных запросов не гонялся
+за созданием файла БД.
+
 ## Структура проекта
 
 Полное описание слоёв и границ между ними — `.ai/main-prompt.md`, §8.
 
 ```text
 src/
-├── api/        # FastAPI: тонкие роутеры, валидация — сейчас только /health
+├── api/        # FastAPI: app.py (сборка), routes.py (тонкие роутеры),
+│               # service.py (оркестрация), jobs.py (реестр задач), schemas.py
 ├── config.py   # Настройки из env, без секретов
 ├── sources/    # Получение и нормализация — http.py/swpc.py/status.py (NOAA SWPC),
 │               # orbit.py (CelesTrak GP/TLE)
@@ -401,6 +480,7 @@ src/
 sources.yaml    # Реестр источников (main-prompt.md §7): space_weather (noaa-swpc-proton-flux),
                 # sources (celestrak-gp, space-track-gp-history, MMOD)
 tests/
+├── api/        # test_requests.py, test_isolation.py (S1-07)
 ├── sources/    # test_swpc.py + fixtures/sources/swpc/ (сохранённые реальные ответы)
 ├── orbit/      # test_propagation.py
 ├── fixtures/orbit/  # TLE-фикстуры и независимый эталон SGP4 verification
