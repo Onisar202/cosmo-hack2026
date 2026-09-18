@@ -6,14 +6,15 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115,<1",
+    "httpx>=0.27,<1",
     "pydantic>=2.9,<3",
     "pydantic-settings>=2.5,<3",
+    "sgp4>=2.27",
     "uvicorn[standard]>=0.30,<1",
 ]
 
 [dependency-groups]
 dev = [
-    "httpx>=0.27,<1",
     "mypy>=1.11,<2",
     "pytest>=8.3,<9",
     "ruff>=0.6,<1",
@@ -39,3 +40,9 @@ ignore = ["UP017"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+
+# sgp4 не публикует типовые заглушки (py.typed) — .ai/backend-prompt.md §9
+# требует проверку типов без ошибок, а не подавление всего модуля.
+[[tool.mypy.overrides]]
+module = "sgp4.*"
+ignore_missing_imports = true

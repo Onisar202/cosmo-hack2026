@@ -3,12 +3,13 @@
 # .ai/docs-prompt.md §4). Читается рантаймом (src/domain/mmod) и
 # документацией (docs/mechanisms.md).
 #
-# Эта версия файла регистрирует источники параметров Механизма 2 (MMOD) —
-# задача FN-25 (S1-09), исследовательская часть. Источники Механизма 1
-# (космическая погода: NOAA SWPC, NASA CCMC DONKI, архив NOAA NCEI) и
-# орбитальных элементов станции (CelesTrak, Space-Track) регистрируются
-# отдельными задачами соответствующих зон ответственности и добавляются в
-# этот же файл без удаления записей ниже.
+# Источники параметров Механизма 2 (MMOD) зарегистрированы задачей FN-25
+# (S1-09), исследовательская часть. FN-24 (S1-06) добавляет ниже источники
+# орбитальных элементов станции (CelesTrak, Space-Track) — без удаления
+# записей выше, как и требует этот же комментарий. Источники Механизма 1
+# (космическая погода: NOAA SWPC, NASA CCMC DONKI, архив NOAA NCEI)
+# регистрируются отдельной задачей соответствующей зоны ответственности и
+# добавляются в этот же файл тем же способом.
 #
 # Обязательные поля на источник — .ai/docs-prompt.md §4: source_id, name,
 # url, величины и их единицы, пространственная область применимости,
@@ -126,3 +127,43 @@ sources:
     replay_eligible_note: "Постоянная величина, не подвержена утечке времени."
     license: "Не применимо (физическая константа, не защищаемые авторским правом данные)."
     is_duplicate_of: null
+
+  # --- Орбитальные элементы станции — FN-24 (S1-06) -----------------------
+
+  - source_id: celestrak-gp
+    name: "CelesTrak GP (General Perturbations) — текущие орбитальные элементы МКС"
+    provider: "CelesTrak (T.S. Kelso)"
+    url: "https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=TLE"
+    quantities:
+      orbital_elements: { format: TLE, coordinate_system: TEME, norad_id: "25544", note: "структурированный объект (contracts/record.schema.json, $defs/orbitalElementsValue) — у набора элементов нет единственной единицы измерения, record.unit всегда null. Единицы результата распространения (не самого источника) — src/domain/orbit/propagate.py: км для положения, км/с для скорости." }
+    spatial_scope: "МКС (NORAD 25544); элементы заданы в TEME (True Equator, Mean Equinox) — собственная система выхода SGP4, без преобразования в этом источнике."
+    temporal_coverage: "Только текущий момент — последний известный у поставщика набор элементов; истории элементов CelesTrak не отдаёт (для истории — space-track-gp-history ниже)."
+    update_frequency: "Несколько раз в сутки по решению поставщика; точная периодичность публично не документирована CelesTrak. Порог устаревания для этого продукта — параметр вызывающей стороны (планировщик обновления, вне объёма этой задачи), а не константа реестра."
+    published_at_available: false
+    published_at_note: "CelesTrak не публикует отдельное время выпуска набора элементов (в отличие от Space-Track GP_HISTORY, где есть CREATION_DATE) — src.sources.orbit.build_orbital_elements_record сохраняет published_at = null для каждой записи этого источника."
+    versioning: "source_version — ISO8601-эпоха набора элементов (src/sources/orbit.py:build_orbital_elements_record); новый набор элементов CelesTrak — это всегда новая эпоха, то есть новая версия рядом со старой (src/store/records.py), а не перезапись."
+    access_restrictions: "Без ключа/регистрации, публичный HTTP-эндпоинт. Жёсткий таймаут на соединение и чтение на каждый вызов (.ai/backend-prompt.md §3); повторов на этом уровне нет — решение о повторе и лимите попыток за планировщиком обновления."
+    replay_eligible_for_historical_forecast: false
+    replay_eligible_note: "published_at всегда null для этого источника (см. published_at_note), поэтому src/store/records.py всегда вычисляет replay_eligible=false — текущие элементы CelesTrak не могут быть тихо использованы вместо исторических в строгом historical_forecast (.ai/main-prompt.md §1, §11). Это сознательное свойство источника, а не временная недоработка: строгий historical_forecast орбиты ждёт space-track-gp-history ниже."
+    license: "Общедоступные данные CelesTrak предоставляются для использования с указанием источника (https://celestrak.org/NORAD/elements/); локальное хранение оригинала ответа (src/store/records.py, RawOriginalStore) разрешено условиями сайта."
+    is_duplicate_of: null
+    implementation_note: "Реализовано: src/sources/orbit.py (fetch_current_tle, parse_tle_response, build_orbital_elements_record); распространение — src/domain/orbit/propagate.py."
+
+  - source_id: space-track-gp-history
+    name: "Space-Track GP_HISTORY — исторические орбитальные элементы МКС"
+    provider: "18th Space Defense Squadron / Space-Track.org"
+    url: "https://www.space-track.org/basicspacedata/query/class/gp_history/NORAD_CAT_ID/25544/orderby/EPOCH%20asc/format/json"
+    quantities:
+      orbital_elements: { format: "TLE или GP/OMM", coordinate_system: TEME, norad_id: "25544", note: "как у celestrak-gp выше — структурированный объект, unit всегда null." }
+    spatial_scope: "МКС (NORAD 25544); TEME, как и у celestrak-gp."
+    temporal_coverage: "Архив выпусков элементов; конкретная глубина архива и охват обязательного исторического периода (1 мая — 30 июня 2024) подтверждаются при реализации коннектора."
+    update_frequency: "По факту публикации новых элементов поставщиком."
+    published_at_available: true
+    published_at_note: "CREATION_DATE поставщика используется как published_at (.ai/main-prompt.md §11 «Траектория»: «исторические — Space-Track GP_HISTORY с CREATION_DATE как временем публикации»)."
+    versioning: "source_version — эпоха элементов; CREATION_DATE отличает более позднее уточнение той же эпохи от предыдущего."
+    access_restrictions: "Требуется учётная запись Space-Track: SPACETRACK_USERNAME/SPACETRACK_PASSWORD в .env (значения не хранятся в репозитории — .ai/main-prompt.md §7); появятся в .env.example вместе с реализацией коннектора. Квоты обрабатываются отдельно от прочих ошибок (.ai/backend-prompt.md §3), по аналогии с OrbitSourceQuotaError в src/sources/orbit.py."
+    replay_eligible_for_historical_forecast: true
+    replay_eligible_note: "При известной версии (CREATION_DATE, source_version) записи этого источника пригодны для replay_eligible=true — в отличие от celestrak-gp выше. Коннектор ещё не реализован (см. implementation_note): до его появления исторический запрос орбиты явно отказывает (HistoricalElementsUnsupportedError, src/sources/orbit.py:require_supported_mode), а не подставляет текущие элементы CelesTrak (.ai/main-prompt.md §11 «современные орбитальные элементы не подставляются вместо исторических ни при каких обстоятельствах»)."
+    license: "Использование регулируется пользовательским соглашением Space-Track (User Agreement). Локальное кеширование архивных ответов разрешено и бессрочно — архивные данные не меняются (.ai/main-prompt.md §5); дальнейшее распространение — по условиям сайта."
+    is_duplicate_of: null
+    implementation_note: "Не реализовано — задача следующего этапа зоны 1. До реализации src.sources.orbit.fetch_elements_for_request поднимает HistoricalElementsUnsupportedError для любого mode, кроме \"current\"."
