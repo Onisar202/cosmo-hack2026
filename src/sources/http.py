@@ -18,6 +18,8 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -54,16 +56,28 @@ class SourceQuotaLimitedError(SourceHttpError):
         self.retry_after_seconds = retry_after_seconds
 
 
-def _parse_retry_after(value: str | None) -> float | None:
+def _parse_retry_after(value: str | None, *, now: datetime) -> float | None:
+    """Разбирает ``Retry-After`` в обеих форме RFC 9110: секунды или HTTP-дата.
+
+    Возвращает секунды до допустимого повтора, не позднее (round 1 ревью
+    PR #16): вызывающий слой (``src/sources/swpc.py``) хранит это как
+    крайний срок следующей попытки — без разбора HTTP-даты квотная пауза
+    источника, присылающего её в этой форме, просто игнорировалась бы.
+    """
     if value is None:
         return None
+    text = value.strip()
     try:
-        return max(0.0, float(value))
+        return max(0.0, float(text))
     except ValueError:
-        # Retry-After как HTTP-дата не разбирается здесь: значение — не
-        # секунды до повтора, а подсказка человеку в логе; отсутствие
-        # разобранного значения не должно ронять обработку 429.
+        pass
+    try:
+        parsed = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, (parsed - now).total_seconds())
 
 
 def fetch(
@@ -75,6 +89,7 @@ def fetch(
     backoff_base_seconds: float,
     client: httpx.Client | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    now: datetime | None = None,
 ) -> HttpFetchResult:
     """Выполняет GET с раздельными таймаутами и ограниченными повторами.
 
@@ -82,7 +97,12 @@ def fetch(
     ошибок (сетевая ошибка, таймаут, 5xx); ``429`` и прочие 4xx не
     повторяются. Между повторами — экспоненциальная задержка
     ``backoff_base_seconds * 2**attempt``.
+
+    ``now`` — момент, относительно которого разбирается ``Retry-After`` в
+    форме HTTP-даты (по умолчанию — реальное текущее время); передаётся
+    явно вызывающим слоем для детерминизма в тестах.
     """
+    moment = now if now is not None else datetime.now(timezone.utc)
     timeout = httpx.Timeout(
         connect=connect_timeout_seconds,
         read=read_timeout_seconds,
@@ -118,7 +138,9 @@ def fetch(
             elapsed = time.monotonic() - started
 
             if response.status_code == 429:
-                retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+                retry_after = _parse_retry_after(
+                    response.headers.get("Retry-After"), now=moment
+                )
                 raise SourceQuotaLimitedError(
                     f"{url} responded 429 (quota limited)"
                     + (f", Retry-After={retry_after}s" if retry_after is not None else ""),

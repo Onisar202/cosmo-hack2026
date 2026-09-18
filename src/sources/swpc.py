@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -57,10 +58,12 @@ Outcome = Literal[
     "skipped_disabled",
     "skipped_frozen",
     "skipped_fresh",
+    "skipped_quota_cooldown",
     "error_timeout",
     "error_quota",
     "error_format",
     "error_http",
+    "error_conflict",
 ]
 
 
@@ -92,12 +95,18 @@ class SwpcSourceConfig:
 
 @dataclass(frozen=True)
 class SwpcSample:
-    """Один нормализованный отсчёт потока после парсинга и фильтрации по каналу."""
+    """Один нормализованный отсчёт потока после парсинга и фильтрации по каналу.
+
+    ``raw_entry`` — исходный объект этой записи как он был получен (до
+    нормализации значений) — источник для канонического ``raw_bytes``
+    записи, см. :func:`to_record_input`.
+    """
 
     satellite: str
     observed_at: datetime
     value: float | None
     degraded: bool
+    raw_entry: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -197,14 +206,32 @@ def parse_response(raw_bytes: bytes) -> list[SwpcSample]:
         value: float | None
         if flux is None:
             value = None
-        elif isinstance(flux, (int, float)) and flux >= 0:
-            value = float(flux)
+        elif isinstance(flux, bool):
+            # bool — подтип int в Python: без этой проверки isinstance(flux,
+            # (int, float)) ниже приняла бы flux=true/false как 1.0/0.0 pfu
+            # — искажённый формат тихо стал бы благоприятным номинальным
+            # значением (round 1 ревью PR #16).
+            raise SwpcFormatError(
+                f"entry #{index} has a boolean flux value: {flux!r} (not a real reading)"
+            )
+        elif isinstance(flux, (int, float)):
+            if not math.isfinite(flux):
+                # Python допускает Infinity/-Infinity/NaN как расширение
+                # JSON (allow_nan=True по умолчанию) — без этой проверки они
+                # прошли бы ниже как «нечисловой» случай или, для +Infinity,
+                # даже как «валидный» неотрицательный отсчёт.
+                raise SwpcFormatError(
+                    f"entry #{index} has a non-finite flux value: {flux!r}"
+                )
+            # Отрицательный отсчёт — задокументированный признак невалидного
+            # измерения у этого продукта (sources.yaml quality_notes):
+            # сохраняется как «нет данных», а не как правдоподобное
+            # отрицательное число.
+            value = float(flux) if flux >= 0 else None
         else:
-            # Отрицательный/нечисловой отсчёт — задокументированный признак
-            # невалидного измерения у этого продукта (sources.yaml
-            # quality_notes): сохраняется как «нет данных», а не как
-            # правдоподобное отрицательное число и не отбрасывается целиком.
-            value = None
+            raise SwpcFormatError(
+                f"entry #{index} has a non-numeric flux value: {flux!r}"
+            )
 
         degraded = bool(entry.get("yaw_flip"))
         samples.append(
@@ -213,6 +240,7 @@ def parse_response(raw_bytes: bytes) -> list[SwpcSample]:
                 observed_at=observed_at,
                 value=value,
                 degraded=degraded,
+                raw_entry=entry,
             )
         )
 
@@ -239,9 +267,26 @@ def _source_version(sample: SwpcSample) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def to_record_input(
-    sample: SwpcSample, *, source_url: str, fetched_at: datetime, raw_bytes: bytes
-) -> RecordInput:
+def _canonical_raw_bytes(entry: dict[str, Any]) -> bytes:
+    """Детерминированная сериализация ОДНОЙ записи ответа (не всего массива).
+
+    NOAA отдаёт этот продукт как скользящее окно: один и тот же ``time_tag``
+    попадает во множество последовательных ответов, каждый раз в массиве с
+    другим составом соседних отсчётов. До round 1 ревью PR #16 сюда
+    передавались байты всего ответа — тогда контрольная сумма записи
+    менялась между опросами только из-за соседних отсчётов, и
+    ``insert_record`` закономерно считал повторную выборку того же
+    измерения конфликтом версии, хотя нормализованное содержание не
+    менялось. Сериализация только своей записи с сортировкой ключей даёт
+    стабильную контрольную сумму для одного и того же измерения независимо
+    от того, каким по счёту опросом оно снято — то есть именно то
+    свойство, которого требует идемпотентная дедупликация в
+    ``src/store/records.py``.
+    """
+    return json.dumps(entry, sort_keys=True, ensure_ascii=False).encode("utf-8")
+
+
+def to_record_input(sample: SwpcSample, *, source_url: str, fetched_at: datetime) -> RecordInput:
     """Нормализует один отсчёт в :class:`RecordInput` готовый к ``insert_record``."""
     unit = "pfu" if sample.value is not None else None
     quality: Literal["nominal", "degraded", "unknown"]
@@ -276,7 +321,7 @@ def to_record_input(
         },
         source_version=_source_version(sample),
         quality=quality,
-        raw_bytes=raw_bytes,
+        raw_bytes=_canonical_raw_bytes(sample.raw_entry),
     )
 
 
@@ -299,8 +344,13 @@ def fetch_and_store(
     - заморожен в реестре — то же самое, но переключатель оперативный;
     - иначе, если не ``force`` и последний успех моложе ``ttl_seconds`` —
       периодический refresh: вызов дешёвый no-op, сеть не трогается;
+    - активная квотная пауза (``Retry-After`` предыдущего 429) — сеть не
+      трогается даже при ``force=True``: квота — не удобство, которое можно
+      обойти принудительным обновлением, а ограничение самого источника
+      (main-prompt.md §5);
     - иначе — реальное обращение к источнику; таймаут/квота/неожиданный
-      формат дают явный статус источника, а не тихий пропуск.
+      формат/конфликт сохранения дают явный статус источника, а не тихий
+      пропуск или ложный успех.
     """
     moment = now if now is not None else datetime.now(timezone.utc)
     if moment.tzinfo is None:
@@ -335,6 +385,15 @@ def fetch_and_store(
                 status=status,
             )
 
+    cooldown_until = registry.quota_cooldown_until(cfg.source_id)
+    if cooldown_until is not None and moment < cooldown_until:
+        return FetchOutcome(
+            outcome="skipped_quota_cooldown",
+            message=f"quota cooldown active until {cooldown_until.isoformat()}",
+            stored_record_ids=(),
+            status=status,
+        )
+
     try:
         result = fetch(
             cfg.url,
@@ -343,10 +402,15 @@ def fetch_and_store(
             max_retries=cfg.max_retries,
             backoff_base_seconds=cfg.backoff_base_seconds,
             client=http_client,
+            now=moment,
         )
     except SourceQuotaLimitedError as exc:
         updated = registry.record_error(
-            cfg.source_id, at=moment, message=str(exc), quota_limited=True
+            cfg.source_id,
+            at=moment,
+            message=str(exc),
+            quota_limited=True,
+            retry_after_seconds=exc.retry_after_seconds,
         )
         return FetchOutcome(
             outcome="error_quota", message=str(exc), stored_record_ids=(), status=updated
@@ -379,19 +443,32 @@ def fetch_and_store(
     stored_ids: list[str] = []
     conflicts: list[str] = []
     for sample in samples:
-        record_input = to_record_input(
-            sample, source_url=cfg.url, fetched_at=moment, raw_bytes=result.body
-        )
+        record_input = to_record_input(sample, source_url=cfg.url, fetched_at=moment)
         try:
             record_id = insert_record(conn, raw_store, record_input)
         except DuplicateKeyConflictError as exc:
-            # Не должно происходить при версии, производной от содержания
-            # (см. _source_version), но не должно и обрушивать весь пакет
-            # из-за одной аномальной записи — остальные отсчёты в ответе
-            # сохраняются.
+            # Не должно происходить теперь, когда raw_bytes канонический на
+            # отдельную запись (см. _canonical_raw_bytes) — но обрушивать
+            # весь пакет из-за одной аномальной записи всё равно не стоит,
+            # остальные отсчёты в ответе сохраняются.
             conflicts.append(str(exc))
             continue
         stored_ids.append(record_id)
+
+    if not stored_ids:
+        # Ничего реально не сохранено — конфликт сохранения не может
+        # выдаваться за успешное получение (round 1 ревью PR #16): без этой
+        # ветки last_success_at обновился бы, хотя store не принял ни
+        # одной записи.
+        message = f"all {len(conflicts)} sample(s) conflicted, nothing stored"
+        if conflicts:
+            message += f": {conflicts[0]}"
+        updated = registry.record_error(
+            cfg.source_id, at=moment, message=message, quota_limited=False
+        )
+        return FetchOutcome(
+            outcome="error_conflict", message=message, stored_record_ids=(), status=updated
+        )
 
     updated = registry.record_success(cfg.source_id, at=moment)
     message = f"stored {len(stored_ids)} sample(s)"

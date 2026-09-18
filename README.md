@@ -80,6 +80,11 @@ $ uv run pytest -v
 tests/sources/test_swpc.py::test_parse_response_filters_to_target_energy_channel PASSED
 tests/sources/test_swpc.py::test_parse_response_keeps_plausible_flux_value PASSED
 tests/sources/test_swpc.py::test_parse_response_maps_negative_sentinel_to_none_not_zero PASSED
+tests/sources/test_swpc.py::test_parse_response_rejects_boolean_flux PASSED
+tests/sources/test_swpc.py::test_parse_response_rejects_string_flux PASSED
+tests/sources/test_swpc.py::test_parse_response_rejects_non_finite_flux[Infinity] PASSED
+tests/sources/test_swpc.py::test_parse_response_rejects_non_finite_flux[-Infinity] PASSED
+tests/sources/test_swpc.py::test_parse_response_rejects_non_finite_flux[NaN] PASSED
 tests/sources/test_swpc.py::test_parse_response_flags_yaw_flip_period_as_degraded PASSED
 tests/sources/test_swpc.py::test_parse_response_rejects_empty_array PASSED
 tests/sources/test_swpc.py::test_parse_response_rejects_empty_body PASSED
@@ -92,9 +97,11 @@ tests/sources/test_swpc.py::test_to_record_input_missing_value_has_no_unit PASSE
 tests/sources/test_swpc.py::test_to_record_input_degraded_quality_for_yaw_flip PASSED
 tests/sources/test_swpc.py::test_content_derived_source_version_allows_later_correction_as_new_row PASSED
 tests/sources/test_swpc.py::test_repeated_fetch_of_same_value_is_idempotent PASSED
+tests/sources/test_swpc.py::test_raw_bytes_are_canonical_per_entry_not_whole_rolling_response PASSED
 tests/sources/test_swpc.py::test_http_fetch_retries_transient_5xx_then_succeeds PASSED
 tests/sources/test_swpc.py::test_http_fetch_gives_up_after_max_retries PASSED
 tests/sources/test_swpc.py::test_http_fetch_429_is_not_retried_and_raises_quota_error PASSED
+tests/sources/test_swpc.py::test_http_fetch_429_retry_after_as_http_date_is_parsed_relative_to_now PASSED
 tests/sources/test_swpc.py::test_http_fetch_timeout_after_retries_raises_timeout_error PASSED
 tests/sources/test_swpc.py::test_http_fetch_does_not_retry_permanent_4xx PASSED
 tests/sources/test_swpc.py::test_fetch_and_store_success_stores_records_and_updates_status PASSED
@@ -103,8 +110,10 @@ tests/sources/test_swpc.py::test_fetch_and_store_force_bypasses_ttl PASSED
 tests/sources/test_swpc.py::test_fetch_and_store_frozen_never_touches_network_even_when_forced PASSED
 tests/sources/test_swpc.py::test_fetch_and_store_disabled_source_never_touches_network PASSED
 tests/sources/test_swpc.py::test_fetch_and_store_quota_429_gives_explicit_status_not_a_favorable_one PASSED
+tests/sources/test_swpc.py::test_fetch_and_store_respects_quota_cooldown_until_retry_after_expires PASSED
 tests/sources/test_swpc.py::test_fetch_and_store_timeout_gives_explicit_status PASSED
 tests/sources/test_swpc.py::test_fetch_and_store_unexpected_format_gives_explicit_status_not_favorable PASSED
+tests/sources/test_swpc.py::test_fetch_and_store_reports_error_when_every_sample_conflicts PASSED
 tests/sources/test_swpc.py::test_fetch_and_store_error_preserved_after_later_recovery PASSED
 tests/sources/test_swpc.py::test_staleness_seconds_is_none_without_any_success PASSED
 tests/sources/test_swpc.py::test_never_succeeded_source_counts_as_critically_stale PASSED
@@ -112,7 +121,7 @@ tests/sources/test_swpc.py::test_is_critically_stale_true_past_threshold_false_b
 tests/sources/test_swpc.py::test_effective_status_disabled_config_forces_frozen_true PASSED
 tests/sources/test_swpc.py::test_load_source_config_reads_real_sources_yaml PASSED
 tests/sources/test_swpc.py::test_load_source_config_raises_for_unknown_source_id PASSED
-tests/sources/test_swpc.py::test_live_smoke SKIPPED (live-smoke: реальное обращение к сети, см. .ai/main-prompt.md §9 — не часть детерминированного набора)
+tests/sources/test_swpc.py::test_live_smoke SKIPPED (live-smoke: реа...)
 tests/store/test_as_of.py::test_publication_after_cutoff_is_excluded PASSED
 tests/store/test_as_of.py::test_records_without_published_at_never_selected PASSED
 tests/store/test_as_of.py::test_newer_publication_after_cutoff_does_not_leak_even_as_a_refinement PASSED
@@ -143,7 +152,7 @@ tests/test_health.py::test_health_returns_200_ok PASSED
 tests/test_health.py::test_health_time_is_utc_aware PASSED
 tests/test_health.py::test_settings_requires_app_env PASSED
 tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
-65 passed, 1 skipped
+74 passed, 1 skipped
 ```
 
 `test_live_smoke` пропускается намеренно: детерминированные тесты парсера

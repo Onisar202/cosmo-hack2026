@@ -76,6 +76,40 @@ def test_parse_response_maps_negative_sentinel_to_none_not_zero() -> None:
     assert by_minute[20].value != 0
 
 
+def test_parse_response_rejects_boolean_flux() -> None:
+    """bool — подтип int в Python: без явного исключения flux=true/false
+    прошёл бы как 1.0/0.0 pfu — искажённый формат читался бы как валидное
+    благоприятное измерение (round 1 ревью PR #16)."""
+    payload = (
+        b'[{"time_tag": "2024-05-10T12:00:00Z", "satellite": 18, "flux": true, '
+        b'"energy": ">=10 MeV", "yaw_flip": 0}]'
+    )
+    with pytest.raises(SwpcFormatError):
+        parse_response(payload)
+
+
+def test_parse_response_rejects_string_flux() -> None:
+    payload = (
+        b'[{"time_tag": "2024-05-10T12:00:00Z", "satellite": 18, "flux": "n/a", '
+        b'"energy": ">=10 MeV", "yaw_flip": 0}]'
+    )
+    with pytest.raises(SwpcFormatError):
+        parse_response(payload)
+
+
+@pytest.mark.parametrize("literal", [b"Infinity", b"-Infinity", b"NaN"])
+def test_parse_response_rejects_non_finite_flux(literal: bytes) -> None:
+    """Python допускает Infinity/-Infinity/NaN как расширение JSON
+    (json.loads(allow_nan=True) по умолчанию) — без math.isfinite() эти
+    значения прошли бы через парсер не отброшенными (round 1 ревью PR #16)."""
+    payload = (
+        b'[{"time_tag": "2024-05-10T12:00:00Z", "satellite": 18, "flux": ' + literal + b", "
+        b'"energy": ">=10 MeV", "yaw_flip": 0}]'
+    )
+    with pytest.raises(SwpcFormatError):
+        parse_response(payload)
+
+
 def test_parse_response_flags_yaw_flip_period_as_degraded() -> None:
     samples = parse_response(SAMPLE)
     by_minute = {s.observed_at.minute: s for s in samples}
@@ -143,7 +177,6 @@ def test_to_record_input_has_no_published_at_and_is_not_replay_eligible(
         samples[0],
         source_url="https://services.swpc.noaa.gov/json/goes/primary/x.json",
         fetched_at=fetched_at,
-        raw_bytes=SAMPLE,
     )
     assert record_input.published_at is None
 
@@ -167,7 +200,6 @@ def test_to_record_input_missing_value_has_no_unit(
         missing,
         source_url="https://services.swpc.noaa.gov/json/goes/primary/x.json",
         fetched_at=datetime(2024, 5, 10, 12, 30, tzinfo=UTC),
-        raw_bytes=SAMPLE,
     )
     assert record_input.unit is None
     assert record_input.quality == "unknown"
@@ -188,7 +220,6 @@ def test_to_record_input_degraded_quality_for_yaw_flip(
         degraded_sample,
         source_url="https://services.swpc.noaa.gov/json/goes/primary/x.json",
         fetched_at=datetime(2024, 5, 10, 12, 30, tzinfo=UTC),
-        raw_bytes=SAMPLE,
     )
     assert record_input.quality == "degraded"
 
@@ -203,8 +234,16 @@ def test_content_derived_source_version_allows_later_correction_as_new_row(
     from src.store import insert_record
 
     observed_at = datetime(2024, 5, 10, 12, 0, tzinfo=UTC)
-    original = SwpcSample(satellite="18", observed_at=observed_at, value=9.0, degraded=False)
-    corrected = SwpcSample(satellite="18", observed_at=observed_at, value=11.0, degraded=False)
+    original = SwpcSample(
+        satellite="18", observed_at=observed_at, value=9.0, degraded=False,
+        raw_entry={"time_tag": "2024-05-10T12:00:00Z", "satellite": 18, "flux": 9.0,
+                   "energy": ">=10 MeV", "yaw_flip": 0},
+    )
+    corrected = SwpcSample(
+        satellite="18", observed_at=observed_at, value=11.0, degraded=False,
+        raw_entry={"time_tag": "2024-05-10T12:00:00Z", "satellite": 18, "flux": 11.0,
+                   "energy": ">=10 MeV", "yaw_flip": 0},
+    )
     id_1 = insert_record(
         db_conn,
         raw_store,
@@ -212,7 +251,6 @@ def test_content_derived_source_version_allows_later_correction_as_new_row(
             original,
             source_url="https://x.invalid",
             fetched_at=datetime(2024, 5, 10, 12, 1, tzinfo=UTC),
-            raw_bytes=b"a",
         ),
     )
     id_2 = insert_record(
@@ -222,7 +260,6 @@ def test_content_derived_source_version_allows_later_correction_as_new_row(
             corrected,
             source_url="https://x.invalid",
             fetched_at=datetime(2024, 5, 10, 13, 0, tzinfo=UTC),
-            raw_bytes=b"b",
         ),
     )
     assert id_1 != id_2
@@ -237,17 +274,67 @@ def test_repeated_fetch_of_same_value_is_idempotent(
 
     samples = parse_response(SAMPLE)
     record_input = to_record_input(
-        samples[0], source_url="https://x.invalid",
-        fetched_at=datetime(2024, 5, 10, 12, 30, tzinfo=UTC), raw_bytes=SAMPLE,
+        samples[0],
+        source_url="https://x.invalid",
+        fetched_at=datetime(2024, 5, 10, 12, 30, tzinfo=UTC),
     )
     id_1 = insert_record(db_conn, raw_store, record_input)
     # Повторное получение того же значения позже — тот же дедуп-ключ, тот же
     # record_id, второй раз не создаёт воздействия.
     record_input_again = to_record_input(
-        samples[0], source_url="https://x.invalid",
-        fetched_at=datetime(2024, 5, 10, 12, 35, tzinfo=UTC), raw_bytes=SAMPLE,
+        samples[0],
+        source_url="https://x.invalid",
+        fetched_at=datetime(2024, 5, 10, 12, 35, tzinfo=UTC),
     )
     id_2 = insert_record(db_conn, raw_store, record_input_again)
+    assert id_1 == id_2
+
+
+def test_raw_bytes_are_canonical_per_entry_not_whole_rolling_response(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    """Round 1 ревью PR #16: тот же time_tag снова появляется в следующем
+    опросе внутри другого по составу скользящего окна (другие соседние
+    отсчёты вокруг него) — это не должно читаться как конфликт версии,
+    потому что raw_bytes записи производится только из своей записи, а не
+    из всего ответа."""
+    from src.store import insert_record
+
+    first_poll = (
+        b'[{"time_tag": "2024-05-10T12:00:00Z", "satellite": 18, "flux": 5.0, '
+        b'"energy": ">=10 MeV", "yaw_flip": 0},'
+        b'{"time_tag": "2024-05-10T12:05:00Z", "satellite": 18, "flux": 6.0, '
+        b'"energy": ">=10 MeV", "yaw_flip": 0}]'
+    )
+    second_poll = (
+        b'[{"time_tag": "2024-05-10T12:05:00Z", "satellite": 18, "flux": 6.0, '
+        b'"energy": ">=10 MeV", "yaw_flip": 0},'
+        b'{"time_tag": "2024-05-10T12:10:00Z", "satellite": 18, "flux": 7.0, '
+        b'"energy": ">=10 MeV", "yaw_flip": 0}]'
+    )
+    shared_from_first = parse_response(first_poll)[1]  # time_tag 12:05, flux 6.0
+    shared_from_second = parse_response(second_poll)[0]  # same measurement, different window
+    assert shared_from_first.observed_at == shared_from_second.observed_at
+    assert shared_from_first.value == shared_from_second.value
+
+    id_1 = insert_record(
+        db_conn,
+        raw_store,
+        to_record_input(
+            shared_from_first, source_url="https://x.invalid",
+            fetched_at=datetime(2024, 5, 10, 12, 6, tzinfo=UTC),
+        ),
+    )
+    # Не должно поднять DuplicateKeyConflictError — тот же дедуп-ключ, то же
+    # каноническое содержание, несмотря на другой полный ответ источника.
+    id_2 = insert_record(
+        db_conn,
+        raw_store,
+        to_record_input(
+            shared_from_second, source_url="https://x.invalid",
+            fetched_at=datetime(2024, 5, 10, 12, 11, tzinfo=UTC),
+        ),
+    )
     assert id_1 == id_2
 
 
@@ -324,6 +411,29 @@ def test_http_fetch_429_is_not_retried_and_raises_quota_error() -> None:
         )
     assert calls["n"] == 1
     assert excinfo.value.retry_after_seconds == 30.0
+
+
+def test_http_fetch_429_retry_after_as_http_date_is_parsed_relative_to_now() -> None:
+    """RFC 9110 допускает Retry-After и как секунды, и как HTTP-дату — без
+    разбора второй формы квотная пауза источника, присылающего её так,
+    просто игнорировалась бы (round 1 ревью PR #16)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": "Fri, 10 May 2024 12:00:30 GMT"})
+
+    now = datetime(2024, 5, 10, 12, 0, 0, tzinfo=UTC)
+    with pytest.raises(SourceQuotaLimitedError) as excinfo:
+        fetch(
+            "https://services.swpc.noaa.gov/x.json",
+            connect_timeout_seconds=1.0,
+            read_timeout_seconds=1.0,
+            max_retries=0,
+            backoff_base_seconds=0.0,
+            client=_mock_client(handler),
+            sleep=lambda _seconds: None,
+            now=now,
+        )
+    assert excinfo.value.retry_after_seconds == pytest.approx(30.0)
 
 
 def test_http_fetch_timeout_after_retries_raises_timeout_error() -> None:
@@ -529,6 +639,50 @@ def test_fetch_and_store_quota_429_gives_explicit_status_not_a_favorable_one(
     assert outcome.status.last_success_at is None  # ни разу не было успеха — не выдумываем его
 
 
+def test_fetch_and_store_respects_quota_cooldown_until_retry_after_expires(
+    db_conn: sqlite3.Connection,
+    raw_store: RawOriginalStore,
+    registry: SourceStatusRegistry,
+    swpc_config: SwpcSourceConfig,
+) -> None:
+    """После 429 c Retry-After следующий вызов не должен снова обращаться к
+    источнику до истечения указанной паузы — иначе квота обрабатывается не
+    отдельно от прочих ошибок, а как обычный повтор (round 1 ревью PR #16)."""
+    calls = {"n": 0}
+
+    def quota_handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, headers={"Retry-After": "30"})
+
+    t0 = datetime(2024, 5, 10, 12, 0, 0, tzinfo=UTC)
+    first = fetch_and_store(
+        db_conn, raw_store, config=swpc_config, registry=registry, now=t0,
+        http_client=_mock_client(quota_handler),
+    )
+    assert first.outcome == "error_quota"
+    assert calls["n"] == 1
+
+    def must_not_be_called(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("must not fetch again before quota cooldown expires")
+
+    t1 = t0 + timedelta(seconds=10)  # внутри 30s Retry-After
+    second = fetch_and_store(
+        db_conn, raw_store, config=swpc_config, registry=registry, now=t1, force=True,
+        http_client=_mock_client(must_not_be_called),
+    )
+    assert second.outcome == "skipped_quota_cooldown"
+
+    def success_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=SAMPLE)
+
+    t2 = t0 + timedelta(seconds=31)  # после истечения паузы
+    third = fetch_and_store(
+        db_conn, raw_store, config=swpc_config, registry=registry, now=t2, force=True,
+        http_client=_mock_client(success_handler),
+    )
+    assert third.outcome == "stored"
+
+
 def test_fetch_and_store_timeout_gives_explicit_status(
     db_conn: sqlite3.Connection,
     raw_store: RawOriginalStore,
@@ -568,6 +722,45 @@ def test_fetch_and_store_unexpected_format_gives_explicit_status_not_favorable(
     assert outcome.outcome == "error_format"
     assert outcome.stored_record_ids == ()
     assert "empty" in (outcome.message or "").lower()
+
+
+def test_fetch_and_store_reports_error_when_every_sample_conflicts(
+    db_conn: sqlite3.Connection,
+    raw_store: RawOriginalStore,
+    registry: SourceStatusRegistry,
+    swpc_config: SwpcSourceConfig,
+) -> None:
+    """Если ни одна запись не сохранилась (конфликт версии в store), это не
+    может выглядеть как успешное получение — иначе last_success_at
+    обновился бы, хотя ничего реально не сохранено (round 1 ревью PR #16)."""
+    from dataclasses import replace as dc_replace
+
+    from src.store import insert_record
+
+    payload = (
+        b'[{"time_tag": "2024-05-10T12:00:00Z", "satellite": 18, "flux": 5.0, '
+        b'"energy": ">=10 MeV", "yaw_flip": 0}]'
+    )
+    [sample] = parse_response(payload)
+    record_input = to_record_input(
+        sample, source_url=swpc_config.url, fetched_at=datetime(2024, 5, 10, 12, 0, tzinfo=UTC)
+    )
+    # Пред-заполняем тот же дедуп-ключ (source_id/provider_record_id/
+    # source_version) записью с другим оригиналом — insert_record внутри
+    # fetch_and_store для этой же выборки закономерно сочтёт её конфликтом.
+    insert_record(db_conn, raw_store, dc_replace(record_input, raw_bytes=b"different content"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload)
+
+    now = datetime(2024, 5, 10, 12, 30, tzinfo=UTC)
+    outcome = fetch_and_store(
+        db_conn, raw_store, config=swpc_config, registry=registry, now=now,
+        http_client=_mock_client(handler),
+    )
+    assert outcome.outcome == "error_conflict"
+    assert outcome.stored_record_ids == ()
+    assert outcome.status.last_success_at is None
 
 
 def test_fetch_and_store_error_preserved_after_later_recovery(

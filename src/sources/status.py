@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 @dataclass(frozen=True)
@@ -74,10 +74,21 @@ class SourceStatusRegistry:
         # выборки), отдельно от status.last_success_at (то же значение) —
         # хранится явно, чтобы staleness_seconds не пересчитывал его из
         # публичного объекта, форма которого зафиксирована контрактом.
+        # Крайний срок следующей допустимой попытки после 429 — тоже вне
+        # публичной формы SourceStatus (round 1 ревью PR #16): без него
+        # следующий вызов fetch_and_store игнорировал бы Retry-After и снова
+        # обращался бы к источнику немедленно, что и есть повтор «через
+        # секунду», прямо запрещённый main-prompt.md §5.
+        self._quota_cooldown_until: dict[str, datetime] = {}
 
     def get(self, source_id: str) -> SourceStatus:
         with self._lock:
             return self._by_source.get(source_id, _empty_status(source_id))
+
+    def quota_cooldown_until(self, source_id: str) -> datetime | None:
+        """Крайний срок следующей допустимой попытки после 429, если он есть."""
+        with self._lock:
+            return self._quota_cooldown_until.get(source_id)
 
     def record_success(self, source_id: str, *, at: datetime) -> SourceStatus:
         """Обновляет только ``last_success_at``.
@@ -86,21 +97,36 @@ class SourceStatusRegistry:
         стираются успехом: последняя ошибка остаётся видна в статусе даже
         после восстановления источника (полезно для разбора инцидентов),
         обновляется только при следующей ошибке (см. :meth:`record_error`).
+        Успешное получение снимает активную квотную паузу — источник уже
+        отвечает, дальше ждать нечего.
         """
         with self._lock:
             current = self._by_source.get(source_id, _empty_status(source_id))
             updated = replace(current, last_success_at=at)
             self._by_source[source_id] = updated
+            self._quota_cooldown_until.pop(source_id, None)
             return updated
 
     def record_error(
-        self, source_id: str, *, at: datetime, message: str, quota_limited: bool
+        self,
+        source_id: str,
+        *,
+        at: datetime,
+        message: str,
+        quota_limited: bool,
+        retry_after_seconds: float | None = None,
     ) -> SourceStatus:
         """Обновляет ``last_error_at``/``last_error_message``/``quota_limited`` вместе.
 
         Три поля выставляются одним вызовом, потому что описывают одну и ту
         же последнюю ошибку: обновлять их порознь позволило бы
         ``quota_limited`` отстать от фактической причины последнего отказа.
+
+        ``retry_after_seconds`` (только для ``quota_limited=True``, когда
+        источник прислал разбираемый ``Retry-After``) фиксирует крайний срок
+        следующей допустимой попытки — до него ``fetch_and_store`` не
+        обращается к источнику вовсе, даже при ``force=True``
+        (main-prompt.md §5).
         """
         with self._lock:
             current = self._by_source.get(source_id, _empty_status(source_id))
@@ -111,6 +137,10 @@ class SourceStatusRegistry:
                 quota_limited=quota_limited,
             )
             self._by_source[source_id] = updated
+            if quota_limited and retry_after_seconds is not None:
+                self._quota_cooldown_until[source_id] = at + timedelta(
+                    seconds=retry_after_seconds
+                )
             return updated
 
     def freeze(self, source_id: str) -> SourceStatus:
