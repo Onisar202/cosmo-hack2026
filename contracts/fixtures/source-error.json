@@ -119,6 +119,7 @@
       "message": "Архив NOAA NCEI вернул HTTP 429 (исчерпана квота) для обоих окон — это расценено как «оценить невозможно», а не как «фон». Отказ источника не превращается в благоприятную оценку.",
       "record_ids": [],
       "fetch_attempt_id": "fa-noaa-ncei-swpc-archive-2026-09-18T07:55:00Z",
+      "no_evidence_reason": null,
       "window_id": null
     },
     {
@@ -127,7 +128,8 @@
       "mechanism": "space_weather",
       "message": "В архиве отсутствует часовой интервал 07:00–08:00 UTC 15 июня 2024 независимо от текущей ошибки квоты — явное непокрытие охвата архива.",
       "record_ids": [],
-      "fetch_attempt_id": null,
+      "fetch_attempt_id": "fa-noaa-ncei-swpc-archive-coverage-check-2026-09-10T00:10:00Z",
+      "no_evidence_reason": null,
       "window_id": null
     }
   ],

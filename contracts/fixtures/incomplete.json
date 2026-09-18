@@ -112,6 +112,7 @@
       "message": "Источник NOAA SWPC не вернул ожидаемые записи потока протонов за интервал окна A — это расценено как «оценить невозможно», а не как отсутствие воздействия.",
       "record_ids": [],
       "fetch_attempt_id": "fa-noaa-swpc-proton-flux-2026-09-18T08:15:00Z",
+      "no_evidence_reason": null,
       "window_id": "win-a"
     },
     {
@@ -121,6 +122,7 @@
       "message": "Механизм MMOD не реализован — оценка не имитирует готовый механизм и явно помечена not_implemented для обоих окон.",
       "record_ids": [],
       "fetch_attempt_id": null,
+      "no_evidence_reason": "Механизм not_implemented: обращение к источнику не выполнялось и запись не создавалась — пробовать было нечего, доказательства не существует по построению.",
       "window_id": null
     },
     {
@@ -130,6 +132,7 @@
       "message": "Окно B частично приходится на теневой участок орбиты станции — нарушено требование освещённости фазы выхода.",
       "record_ids": ["rec-cur-orbit-0001"],
       "fetch_attempt_id": null,
+      "no_evidence_reason": null,
       "window_id": "win-b"
     }
   ],

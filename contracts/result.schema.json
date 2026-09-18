@@ -435,7 +435,7 @@
     "warning": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "severity", "mechanism", "message", "record_ids", "fetch_attempt_id", "window_id"],
+      "required": ["code", "severity", "mechanism", "message", "record_ids", "fetch_attempt_id", "no_evidence_reason", "window_id"],
       "properties": {
         "code": { "type": "string", "minLength": 1 },
         "severity": { "type": "string", "enum": ["info", "advisory", "critical"] },
@@ -457,24 +457,22 @@
         },
         "fetch_attempt_id": {
           "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }],
-          "description": "Устойчивый идентификатор сохранённой (в т.ч. неуспешной) попытки обращения к источнику — используется, когда предупреждение не может сослаться на record_id (например отказ источника или архивный пробел: сама запись не создана, но попытка получения залогирована и её результат/тело ответа сохранены наравне с успешными). Обязателен для severity = critical, если record_ids пуст."
+          "description": "Устойчивый идентификатор сохранённой (в т.ч. неуспешной) попытки обращения к источнику или проверки архива — используется, когда предупреждение не может сослаться на record_id (например отказ источника, архивный пробел или плановая сверка покрытия архива: сама запись не создана, но попытка/проверка залогирована и её результат сохранён наравне с успешными)."
+        },
+        "no_evidence_reason": {
+          "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }],
+          "description": "Явное объяснение, почему у предупреждения в принципе не может быть ни record_ids, ни fetch_attempt_id — например для not_implemented (обращения к источнику не было, пробовать было нечего). Заполняется, только если оба поля выше пусты; так исключение из правила прослеживаемости видно в самом контракте, а не подразумевается молча."
         },
         "window_id": {
           "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
         }
       },
-      "allOf": [
-        {
-          "if": { "properties": { "severity": { "const": "critical" } }, "required": ["severity"] },
-          "then": {
-            "anyOf": [
-              { "properties": { "record_ids": { "minItems": 1 } } },
-              { "properties": { "fetch_attempt_id": { "type": "string", "minLength": 1 } } }
-            ]
-          }
-        }
+      "anyOf": [
+        { "properties": { "record_ids": { "minItems": 1 } } },
+        { "properties": { "fetch_attempt_id": { "type": "string", "minLength": 1 } } },
+        { "properties": { "no_evidence_reason": { "type": "string", "minLength": 1 } } }
       ],
-      "description": "Критическое предупреждение (severity = critical) всегда доказуемо: ссылается либо на record_id, либо на fetch_attempt_id залогированной попытки получения — от вывода можно дойти до значения или до причины отказа (.ai/main-prompt.md §3)."
+      "description": "Каждое предупреждение доказуемо: ссылается на record_id, на fetch_attempt_id залогированной попытки/проверки, либо явно объясняет через no_evidence_reason, почему доказательства в принципе не существует (например not_implemented). Ровно одно из трёх обязано быть заполнено — от вывода нельзя молча остаться без пути к значению, к причине отказа или к объяснению отсутствия того и другого (.ai/main-prompt.md §3)."
     },
     "recommendation": {
       "type": "object",
