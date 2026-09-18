@@ -114,6 +114,7 @@ tests/sources/test_swpc.py::test_fetch_and_store_respects_quota_cooldown_until_r
 tests/sources/test_swpc.py::test_fetch_and_store_timeout_gives_explicit_status PASSED
 tests/sources/test_swpc.py::test_fetch_and_store_unexpected_format_gives_explicit_status_not_favorable PASSED
 tests/sources/test_swpc.py::test_fetch_and_store_reports_error_when_every_sample_conflicts PASSED
+tests/sources/test_swpc.py::test_fetch_and_store_reports_error_on_partial_conflict_not_stored PASSED
 tests/sources/test_swpc.py::test_fetch_and_store_error_preserved_after_later_recovery PASSED
 tests/sources/test_swpc.py::test_staleness_seconds_is_none_without_any_success PASSED
 tests/sources/test_swpc.py::test_never_succeeded_source_counts_as_critically_stale PASSED
@@ -152,7 +153,7 @@ tests/test_health.py::test_health_returns_200_ok PASSED
 tests/test_health.py::test_health_time_is_utc_aware PASSED
 tests/test_health.py::test_settings_requires_app_env PASSED
 tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
-74 passed, 1 skipped
+75 passed, 1 skipped
 ```
 
 `test_live_smoke` пропускается намеренно: детерминированные тесты парсера

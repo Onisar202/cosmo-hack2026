@@ -763,6 +763,54 @@ def test_fetch_and_store_reports_error_when_every_sample_conflicts(
     assert outcome.status.last_success_at is None
 
 
+def test_fetch_and_store_reports_error_on_partial_conflict_not_stored(
+    db_conn: sqlite3.Connection,
+    raw_store: RawOriginalStore,
+    registry: SourceStatusRegistry,
+    swpc_config: SwpcSourceConfig,
+) -> None:
+    """Round 2 ревью PR #16: даже когда конфликтует только часть пакета, а
+    остальное реально сохранилось, исход не должен читаться как
+    «stored» — это молча прячет потерю части ответа и продвигает TTL,
+    откладывая повторную попытку. Уже сохранённые id всё же возвращаются
+    (store не даёт их отозвать — main-prompt.md §2), но outcome — error."""
+    from dataclasses import replace as dc_replace
+
+    from src.store import insert_record
+
+    payload = (
+        b'[{"time_tag": "2024-05-10T12:00:00Z", "satellite": 18, "flux": 5.0, '
+        b'"energy": ">=10 MeV", "yaw_flip": 0},'
+        b'{"time_tag": "2024-05-10T12:05:00Z", "satellite": 18, "flux": 6.0, '
+        b'"energy": ">=10 MeV", "yaw_flip": 0}]'
+    )
+    conflicting_sample = parse_response(payload)[0]
+    conflicting_input = to_record_input(
+        conflicting_sample, source_url=swpc_config.url,
+        fetched_at=datetime(2024, 5, 10, 12, 0, tzinfo=UTC),
+    )
+    # Только первый отсчёт пред-занят конфликтующим содержимым; второй ляжет
+    # чисто.
+    insert_record(
+        db_conn, raw_store, dc_replace(conflicting_input, raw_bytes=b"different content")
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload)
+
+    now = datetime(2024, 5, 10, 12, 30, tzinfo=UTC)
+    outcome = fetch_and_store(
+        db_conn, raw_store, config=swpc_config, registry=registry, now=now,
+        http_client=_mock_client(handler),
+    )
+    assert outcome.outcome == "error_conflict"
+    assert len(outcome.stored_record_ids) == 1  # чистый отсчёт всё же сохранён
+    assert outcome.status.last_success_at is None  # но исход в целом не "stored"
+
+    # Реально сохранённая запись доступна по возвращённому id.
+    assert get_record(db_conn, outcome.stored_record_ids[0]) is not None
+
+
 def test_fetch_and_store_error_preserved_after_later_recovery(
     db_conn: sqlite3.Connection,
     raw_store: RawOriginalStore,

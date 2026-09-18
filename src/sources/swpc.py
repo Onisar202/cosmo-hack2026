@@ -450,30 +450,39 @@ def fetch_and_store(
             # Не должно происходить теперь, когда raw_bytes канонический на
             # отдельную запись (см. _canonical_raw_bytes) — но обрушивать
             # весь пакет из-за одной аномальной записи всё равно не стоит,
-            # остальные отсчёты в ответе сохраняются.
+            # остальные отсчёты в ответе обрабатываются.
             conflicts.append(str(exc))
             continue
         stored_ids.append(record_id)
 
-    if not stored_ids:
-        # Ничего реально не сохранено — конфликт сохранения не может
-        # выдаваться за успешное получение (round 1 ревью PR #16): без этой
-        # ветки last_success_at обновился бы, хотя store не принял ни
-        # одной записи.
-        message = f"all {len(conflicts)} sample(s) conflicted, nothing stored"
-        if conflicts:
-            message += f": {conflicts[0]}"
+    if conflicts:
+        # Любой конфликт — даже частичный, когда часть пакета сохранилась —
+        # не может выдаваться за успешное получение (round 1 и round 2
+        # ревью PR #16): полный успех молчаливо скрыл бы потерю части
+        # ответа за той же записью в store и продвинул бы TTL, отложив
+        # повторную попытку. record_error (не record_success) — следующий
+        # вызов без force увидит источник неосвежённым и попробует снова
+        # раньше, чем через полный TTL. store — только-дополняющий и не
+        # даёт удалить уже вставленные записи (main-prompt.md §2), поэтому
+        # откат невозможен и не нужен: реально сохранённые id возвращаются
+        # в stored_record_ids, чтобы вызывающая сторона не потеряла их из
+        # виду, а исход всё равно однозначно error, не stored.
+        message = (
+            f"{len(conflicts)} of {len(samples)} sample(s) conflicted "
+            f"({len(stored_ids)} stored anyway): {conflicts[0]}"
+        )
         updated = registry.record_error(
             cfg.source_id, at=moment, message=message, quota_limited=False
         )
         return FetchOutcome(
-            outcome="error_conflict", message=message, stored_record_ids=(), status=updated
+            outcome="error_conflict",
+            message=message,
+            stored_record_ids=tuple(stored_ids),
+            status=updated,
         )
 
     updated = registry.record_success(cfg.source_id, at=moment)
     message = f"stored {len(stored_ids)} sample(s)"
-    if conflicts:
-        message += f"; {len(conflicts)} conflict(s): {conflicts[0]}"
     return FetchOutcome(
         outcome="stored",
         message=message,
