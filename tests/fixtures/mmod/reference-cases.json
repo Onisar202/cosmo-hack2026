@@ -29,7 +29,9 @@
     "v_station_vector_kms": [0.0, 7.672598648385013, 0.0],
     "v_station_note": "Идеализация: реальная орбита МКС слегка эллиптична, фактическая скорость колеблется около 7.66 км/с; для эталонного случая используется точное значение круговой орбиты, выведенное по формуле, а не округлённая справочная цифра — так результат полностью воспроизводим по двум документированным константам (R_earth, GM_earth).",
     "shower_geocentric_velocity_kms": 66.0,
-    "shower_geocentric_velocity_source": "sources.yaml#imo-shower-calendar-eta-aquariids (эта-Аквариды, 66 км/с, сверено с iau-mdc-shower-database: 65.64±1.59 км/с)",
+    "shower_geocentric_velocity_source": "sources.yaml#imo-shower-calendar-eta-aquariids (эта-Аквариды, 66 км/с, сверено с sources.yaml#iau-mdc-shower-database.specific_observation_source: CBET 5259, Egal et al. 2023 — 65.64±1.59 км/с)",
+    "shower_geocentric_velocity_replay_note": "Оба источника отмечены sources.yaml#replay_eligible_for_historical_forecast=false (round-1 ревью PR #15) — значение годится для геометрической/кинематической демонстрации ниже, не для использования как запись в строгом historical_forecast без отдельно сохранённой версии источника.",
+    "radiant_coordinate_system_note": "Радианты этого файла заданы напрямую как единичные векторы в демонстрационной системе координат станции (не через RA/Dec) — преобразование реальных геоцентрических экваториальных RA/Dec (sources.yaml) в систему вектора станции здесь не выполняется и не проверяется, см. docs/mechanisms.md §9-§10.",
     "shower_used_for_reference_cases": "эта-Аквариды (031 ETA)",
     "shower_choice_note": "Для эталонных случаев геометрии/скорости выбран поток с непротиворечивыми (перепроверенными) параметрами. Дневные Ариетиды тоже обязательны по main-prompt.md §11, задокументированы в docs/mechanisms.md и sources.yaml, но их скорость/ZHR не сошлись между независимыми вторичными источниками (см. sources.yaml#cams-jenniskens-daytime-arietids) — использовать их для количественного эталонного случая значило бы закрепить неподтверждённое число, что запрещено постановкой задачи ('не выдумывать числа')."
   },
