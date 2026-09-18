@@ -1,0 +1,142 @@
+{
+  "result_id": "res-fx-source-error-0001",
+  "computed_at": "2026-09-18T11:00:00Z",
+  "request": {
+    "mode": "historical_analysis",
+    "start_at": "2024-06-15T06:00:00Z",
+    "duration_hours": 3,
+    "search_window_hours": 4
+  },
+  "mode": "historical_analysis",
+  "as_of": null,
+  "algorithm_version": "0.1.0",
+  "data_manifest": [
+    { "record_id": "rec-hist-orbit-0001", "source_id": "space-track-gp-history", "source_version": "2024-06-14T22:00:00Z", "record_kind": "orbital_elements" },
+    { "record_id": "rec-mmod-stream-0002", "source_id": "meteor-stream-static-ref", "source_version": "2024.1", "record_kind": "observation" }
+  ],
+  "orbit": {
+    "source": "space-track",
+    "norad_id": "25544",
+    "elements_epoch": "2024-06-14T22:00:00Z",
+    "elements_age_hours": 9.0,
+    "coordinate_system": "TEME",
+    "is_reconstructed": false,
+    "record_id": "rec-hist-orbit-0001"
+  },
+  "windows": [
+    {
+      "window_id": "win-a",
+      "start_at": "2024-06-15T06:00:00Z",
+      "end_at": "2024-06-15T09:00:00Z",
+      "duration_hours": 3,
+      "mechanisms": [
+        {
+          "mechanism": "space_weather",
+          "status": "source_error",
+          "max_level": null,
+          "exceedance_hours": null,
+          "coverage_fraction": 0.0,
+          "critical_gap": true,
+          "notes": [
+            "Архив NOAA NCEI вернул ошибку квоты (429) на весь интервал окна; статус источника — quota_limited, не подставляется как «фон»."
+          ],
+          "record_ids": []
+        },
+        {
+          "mechanism": "mmod",
+          "status": "ok",
+          "max_level": "background",
+          "exceedance_hours": 0,
+          "coverage_fraction": 1.0,
+          "critical_gap": false,
+          "notes": [
+            "Оценка ведётся в относительных единицах к спорадическому фону — абсолютная калибровка источника недоступна."
+          ],
+          "record_ids": ["rec-mmod-stream-0002", "rec-hist-orbit-0001"]
+        }
+      ],
+      "lighting": { "requested": false, "status": "not_requested", "note": null },
+      "excluded_from_comparison": true,
+      "exclusion_reason": "Критический пробел по механизму 1 из-за отказа источника (квота 429) — хорошее покрытие механизма 2 не компенсирует пробел в механизме 1."
+    },
+    {
+      "window_id": "win-b",
+      "start_at": "2024-06-15T08:00:00Z",
+      "end_at": "2024-06-15T11:00:00Z",
+      "duration_hours": 3,
+      "mechanisms": [
+        {
+          "mechanism": "space_weather",
+          "status": "source_error",
+          "max_level": null,
+          "exceedance_hours": null,
+          "coverage_fraction": 0.0,
+          "critical_gap": true,
+          "notes": [
+            "Архив NOAA NCEI вернул ошибку квоты (429) на весь интервал окна; статус источника — quota_limited, не подставляется как «фон»."
+          ],
+          "record_ids": []
+        },
+        {
+          "mechanism": "mmod",
+          "status": "ok",
+          "max_level": "elevated",
+          "exceedance_hours": 1.5,
+          "coverage_fraction": 1.0,
+          "critical_gap": false,
+          "notes": [
+            "Оценка ведётся в относительных единицах к спорадическому фону — абсолютная калибровка источника недоступна."
+          ],
+          "record_ids": ["rec-mmod-stream-0002", "rec-hist-orbit-0001"]
+        }
+      ],
+      "lighting": { "requested": false, "status": "not_requested", "note": null },
+      "excluded_from_comparison": true,
+      "exclusion_reason": "Критический пробел по механизму 1 из-за отказа источника (квота 429) — хорошее покрытие механизма 2 не компенсирует пробел в механизме 1."
+    }
+  ],
+  "coverage": {
+    "requested_period_supported": true,
+    "archive_gaps": [
+      {
+        "source_id": "noaa-ncei-swpc-archive",
+        "gap_start": "2024-06-15T07:00:00Z",
+        "gap_end": "2024-06-15T08:00:00Z",
+        "note": "Часовой интервал полностью отсутствует в архиве NOAA NCEI (охват продукта не распространяется на этот час) — помечено как непокрытие, а не как «фон». Не связано с текущей ошибкой квоты."
+      }
+    ]
+  },
+  "limitations": [
+    "Архив NOAA NCEI вернул ошибку квоты (429) на весь интервал обоих окон — оценка механизма 1 невозможна для этого расчёта.",
+    "Часть архивного покрытия отсутствует независимо от текущей ошибки квоты (см. coverage.archive_gaps).",
+    "Фикстура носит демонстрационный характер и не является результатом научного расчёта."
+  ],
+  "warnings": [
+    {
+      "code": "source-error-quota",
+      "severity": "critical",
+      "mechanism": "space_weather",
+      "message": "Архив NOAA NCEI вернул HTTP 429 (исчерпана квота) для обоих окон — это расценено как «оценить невозможно», а не как «фон». Отказ источника не превращается в благоприятную оценку.",
+      "record_ids": [],
+      "window_id": null
+    },
+    {
+      "code": "archive-coverage-gap",
+      "severity": "advisory",
+      "mechanism": "space_weather",
+      "message": "В архиве отсутствует часовой интервал 07:00–08:00 UTC 15 июня 2024 независимо от текущей ошибки квоты — явное непокрытие охвата архива.",
+      "record_ids": [],
+      "window_id": null
+    }
+  ],
+  "recommendation": {
+    "status": "all_windows_excluded",
+    "window_id": null,
+    "explanation": "Оба окна исключены: критический пробел по механизму 1 из-за отказа источника (квота 429), несмотря на доступность оценки по механизму 2 — хорошее покрытие одного механизма не компенсирует пробел в другом."
+  },
+  "source_status": [
+    { "source_id": "space-track-gp-history", "last_success_at": "2024-06-14T22:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
+    { "source_id": "noaa-ncei-swpc-archive", "last_success_at": "2026-09-10T00:00:00Z", "last_error_at": "2026-09-18T07:55:00Z", "last_error_message": "HTTP 429 Too Many Requests — исчерпана квота обращений к архиву за интервал запроса.", "frozen": false, "quota_limited": true },
+    { "source_id": "meteor-stream-static-ref", "last_success_at": "2024-01-01T00:00:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false }
+  ]
+}

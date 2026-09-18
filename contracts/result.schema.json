@@ -1,0 +1,439 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vkd-risk.local/contracts/result.schema.json",
+  "title": "CalculationResult",
+  "description": "Неизменяемый сохранённый результат расчёта. Пересчёт создаёт новый result_id; правка существующего результата запрещена (.ai/main-prompt.md §3, .ai/backend-prompt.md §1). Интерфейс и оба формата выгрузки (HTML/JSON) читают этот же объект.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "result_id",
+    "computed_at",
+    "request",
+    "mode",
+    "as_of",
+    "algorithm_version",
+    "data_manifest",
+    "orbit",
+    "windows",
+    "coverage",
+    "limitations",
+    "warnings",
+    "recommendation",
+    "source_status"
+  ],
+  "properties": {
+    "result_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Устойчивый идентификатор сохранённого результата."
+    },
+    "computed_at": {
+      "$ref": "#/$defs/utcDateTime",
+      "description": "Когда расчёт был выполнен и сохранён."
+    },
+    "request": {
+      "$ref": "./request.schema.json",
+      "description": "Исходный запрос, породивший этот результат, сохранённый как есть."
+    },
+    "mode": {
+      "$ref": "#/$defs/mode",
+      "description": "Дублирует request.mode на верхнем уровне для быстрого доступа без разбора вложенного объекта. Должно совпадать с request.mode."
+    },
+    "as_of": {
+      "oneOf": [{ "$ref": "#/$defs/utcDateTime" }, { "type": "null" }],
+      "description": "Дублирует request.as_of. null для current и historical_analysis, обязателен для historical_forecast. Должно совпадать с request.as_of."
+    },
+    "algorithm_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Версия алгоритма расчёта (semver). Одинаковые данные, параметры и версия дают одинаковый результат (.ai/main-prompt.md §3)."
+    },
+    "data_manifest": {
+      "type": "array",
+      "description": "Перечень конкретных записей (с версиями), фактически попавших в расчёт. Собирается использованными записями, а не повторной выборкой «примерно за тот же период».",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["record_id", "source_id", "source_version", "record_kind"],
+        "properties": {
+          "record_id": { "type": "string", "minLength": 1 },
+          "source_id": { "type": "string", "minLength": 1 },
+          "source_version": { "type": "string", "minLength": 1 },
+          "record_kind": {
+            "type": "string",
+            "enum": ["observation", "forecast", "warning", "orbital_elements"]
+          }
+        }
+      }
+    },
+    "orbit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "norad_id",
+        "elements_epoch",
+        "elements_age_hours",
+        "coordinate_system",
+        "is_reconstructed",
+        "record_id"
+      ],
+      "description": "Траектория участвует хотя бы в одном расчёте; видны источник, эпоха и давность элементов (.ai/main-prompt.md §11–12).",
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": ["celestrak", "space-track"],
+          "description": "Текущие элементы — CelesTrak; исторические — Space-Track GP_HISTORY."
+        },
+        "norad_id": { "type": "string", "minLength": 1 },
+        "elements_epoch": { "$ref": "#/$defs/utcDateTime" },
+        "elements_age_hours": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Давность элементов относительно момента расчёта."
+        },
+        "coordinate_system": { "type": "string", "minLength": 1 },
+        "is_reconstructed": {
+          "type": "boolean",
+          "description": "true, если элементы на момент as_of/расчёта не подтверждены и геометрия помечена как реконструкция. Современные элементы вместо исторических не подставляются."
+        },
+        "record_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "record_id использованной записи орбитальных элементов — для прослеживаемости к первоисточнику."
+        }
+      }
+    },
+    "windows": {
+      "type": "array",
+      "minItems": 2,
+      "description": "Минимум два сравниваемых окна одинаковой длительности (.ai/main-prompt.md §12).",
+      "items": { "$ref": "#/$defs/window" }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested_period_supported", "archive_gaps"],
+      "description": "Полнота данных на уровне всего результата. Успешный ответ без coverage и limitations считается неполным контрактом (.ai/backend-prompt.md §6).",
+      "properties": {
+        "requested_period_supported": {
+          "type": "boolean",
+          "description": "Для historical_* — попадает ли start_at в обязательный охваченный период (1 мая — 30 июня 2024, границы включены). Для current — всегда true."
+        },
+        "archive_gaps": {
+          "type": "array",
+          "description": "Явные пробелы архива, обнаруженные при выборке (не маскируются под «спокойный» период).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source_id", "gap_start", "gap_end", "note"],
+            "properties": {
+              "source_id": { "type": "string", "minLength": 1 },
+              "gap_start": { "$ref": "#/$defs/utcDateTime" },
+              "gap_end": { "$ref": "#/$defs/utcDateTime" },
+              "note": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Текстовые ограничения применимости результата (например калибровка MMOD в относительных единицах, реконструкция геометрии)."
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/warning" }
+    },
+    "recommendation": {
+      "$ref": "#/$defs/recommendation"
+    },
+    "source_status": {
+      "type": "array",
+      "description": "Статус каждого использованного источника (.ai/backend-prompt.md §3).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_id",
+          "last_success_at",
+          "last_error_at",
+          "last_error_message",
+          "frozen",
+          "quota_limited"
+        ],
+        "properties": {
+          "source_id": { "type": "string", "minLength": 1 },
+          "last_success_at": {
+            "oneOf": [{ "$ref": "#/$defs/utcDateTime" }, { "type": "null" }]
+          },
+          "last_error_at": {
+            "oneOf": [{ "$ref": "#/$defs/utcDateTime" }, { "type": "null" }]
+          },
+          "last_error_message": {
+            "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+          },
+          "frozen": {
+            "type": "boolean",
+            "description": "Действует ли документированная заморозка источника."
+          },
+          "quota_limited": {
+            "type": "boolean",
+            "description": "Отказ по квоте/429 отличается от прочих ошибок источника."
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "mode": { "const": "historical_forecast" } },
+        "required": ["mode"]
+      },
+      "then": { "required": ["as_of"], "properties": { "as_of": { "$ref": "#/$defs/utcDateTime" } } }
+    },
+    {
+      "if": {
+        "properties": { "mode": { "const": "current" } },
+        "required": ["mode"]
+      },
+      "then": { "properties": { "as_of": { "const": null } } }
+    },
+    {
+      "if": {
+        "properties": { "mode": { "const": "historical_analysis" } },
+        "required": ["mode"]
+      },
+      "then": { "properties": { "as_of": { "const": null } } }
+    }
+  ],
+  "$defs": {
+    "mode": {
+      "type": "string",
+      "enum": ["current", "historical_analysis", "historical_forecast"]
+    },
+    "utcDateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "mechanism": {
+      "type": "string",
+      "enum": ["space_weather", "mmod"],
+      "description": "Два обязательных разных механизма воздействия (.ai/main-prompt.md §11). Освещённость — не механизм, см. window.lighting."
+    },
+    "mechanismStatus": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "not_implemented",
+        "missing_data",
+        "stale_data",
+        "source_error",
+        "beyond_horizon"
+      ],
+      "description": "ok — оценка выполнена; not_implemented — механизм ещё не реализован в этой версии сервиса (не имитируется готовым); missing_data — данных для окна нет; stale_data — данные устарели; source_error — отказ/квота источника; beyond_horizon — окно вне горизонта прогноза («не покрыто», не «спокойно»)."
+    },
+    "mechanismAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mechanism",
+        "status",
+        "max_level",
+        "exceedance_hours",
+        "coverage_fraction",
+        "critical_gap",
+        "notes",
+        "record_ids"
+      ],
+      "properties": {
+        "mechanism": { "$ref": "#/$defs/mechanism" },
+        "status": { "$ref": "#/$defs/mechanismStatus" },
+        "max_level": {
+          "description": "Максимальный уровень внутри окна. null, если status != ok (не имитируется значение, которого нет)."
+        },
+        "exceedance_hours": {
+          "oneOf": [{ "type": "number", "minimum": 0 }, { "type": "null" }],
+          "description": "Суммарная длительность превышения максимального достигнутого порога в пределах окна. null, если status != ok."
+        },
+        "coverage_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Доля окна, покрытая пригодными записями для этого механизма."
+        },
+        "critical_gap": {
+          "type": "boolean",
+          "description": "Критический пробел данных по этому механизму — окно выводится из сравнения (правило предпочтения окон, .ai/main-prompt.md §11)."
+        },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Свободные пояснения без собственного вклада в уровень: например расширение применимости при Kp>=5, контекст шкалы R, отметка об относительных единицах MMOD."
+        },
+        "record_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "record_id записей, на которых основана оценка — для прослеживаемости (О4)."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "not": { "properties": { "status": { "const": "ok" } }, "required": ["status"] } },
+          "then": {
+            "properties": {
+              "max_level": { "const": null },
+              "exceedance_hours": { "const": null }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "ok" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "max_level": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "lighting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "status"],
+      "description": "Ограничение по освещённости — не механизм воздействия и не риск (.ai/main-prompt.md §11).",
+      "properties": {
+        "requested": { "type": "boolean" },
+        "status": {
+          "type": "string",
+          "enum": ["not_requested", "satisfied", "violated"]
+        },
+        "note": {
+          "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "requested": { "const": false } } },
+          "then": { "properties": { "status": { "const": "not_requested" } } }
+        }
+      ]
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "window_id",
+        "start_at",
+        "end_at",
+        "duration_hours",
+        "mechanisms",
+        "lighting",
+        "excluded_from_comparison",
+        "exclusion_reason"
+      ],
+      "properties": {
+        "window_id": { "type": "string", "minLength": 1 },
+        "start_at": { "$ref": "#/$defs/utcDateTime" },
+        "end_at": { "$ref": "#/$defs/utcDateTime" },
+        "duration_hours": { "type": "number", "minimum": 1, "maximum": 8 },
+        "mechanisms": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/mechanismAssessment" },
+          "allOf": [
+            {
+              "contains": {
+                "properties": { "mechanism": { "const": "space_weather" } },
+                "required": ["mechanism"]
+              }
+            },
+            {
+              "contains": {
+                "properties": { "mechanism": { "const": "mmod" } },
+                "required": ["mechanism"]
+              }
+            }
+          ],
+          "description": "Ровно две оценки: по одной на space_weather и mmod. Два вложенных contains (по одному на каждый механизм) вместе с maxItems=2 гарантируют присутствие обоих без дублей."
+        },
+        "lighting": { "$ref": "#/$defs/lighting" },
+        "excluded_from_comparison": {
+          "type": "boolean",
+          "description": "true, если окно выведено из сравнения по правилу критического пробела (не проигрывает по баллам — main-prompt §11 п.1)."
+        },
+        "exclusion_reason": {
+          "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "excluded_from_comparison": { "const": true } } },
+          "then": { "properties": { "exclusion_reason": { "type": "string", "minLength": 1 } } },
+          "else": { "properties": { "exclusion_reason": { "const": null } } }
+        }
+      ]
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "mechanism", "message", "record_ids", "window_id"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string", "enum": ["info", "advisory", "critical"] },
+        "mechanism": {
+          "oneOf": [
+            { "type": "string", "enum": ["space_weather", "mmod", "lighting", "orbit", "source"] },
+            { "type": "null" }
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Воздействие и его значение для ВКД, период, данные и единицы, применённое правило, ограничения — текстом (О4)."
+        },
+        "record_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "От предупреждения — к значению и первоисточнику (record_id)."
+        },
+        "window_id": {
+          "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+        }
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "window_id", "explanation"],
+      "description": "Схема выражает и равенство окон, и отсутствие оснований для рекомендации — не только успешный выбор.",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["selected", "tie", "insufficient_basis", "all_windows_excluded"],
+          "description": "selected — выбрано окно; tie — окна равнозначны по правилу предпочтения, различий нет; insufficient_basis — оснований для рекомендации недостаточно; all_windows_excluded — все окна выведены из сравнения (критический пробел)."
+        },
+        "window_id": {
+          "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }],
+          "description": "Обязателен и не null только при status = selected."
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Что повлияло на выбор либо почему рекомендация не выдана."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "selected" } }, "required": ["status"] },
+          "then": { "properties": { "window_id": { "type": "string", "minLength": 1 } } },
+          "else": { "properties": { "window_id": { "const": null } } }
+        }
+      ]
+    }
+  }
+}

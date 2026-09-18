@@ -1,0 +1,149 @@
+{
+  "result_id": "res-fx-success-0001",
+  "computed_at": "2026-09-18T12:00:00Z",
+  "request": {
+    "mode": "historical_forecast",
+    "start_at": "2024-05-10T12:00:00Z",
+    "duration_hours": 6,
+    "search_window_hours": 6,
+    "as_of": "2024-05-11T00:00:00Z",
+    "lighting_constraint": { "requires_sunlight": false }
+  },
+  "mode": "historical_forecast",
+  "as_of": "2024-05-11T00:00:00Z",
+  "algorithm_version": "0.1.0",
+  "data_manifest": [
+    { "record_id": "rec-orbit-histelem-0001", "source_id": "space-track-gp-history", "source_version": "2024-05-09T21:03:11Z", "record_kind": "orbital_elements" },
+    { "record_id": "rec-swx-donki-0001", "source_id": "nasa-ccmc-donki", "source_version": "2024-05-10T13:22:00Z", "record_kind": "forecast" },
+    { "record_id": "rec-swx-ncei-0002", "source_id": "noaa-ncei-swpc-archive", "source_version": "2024-05-10T18:05:00Z", "record_kind": "observation" },
+    { "record_id": "rec-swx-geomag-0003", "source_id": "noaa-swpc-geomag", "source_version": "2024-05-10T15:00:00Z", "record_kind": "observation" },
+    { "record_id": "rec-mmod-stream-0004", "source_id": "meteor-stream-static-ref", "source_version": "2024.1", "record_kind": "observation" }
+  ],
+  "orbit": {
+    "source": "space-track",
+    "norad_id": "25544",
+    "elements_epoch": "2024-05-09T21:03:11Z",
+    "elements_age_hours": 14.5,
+    "coordinate_system": "TEME",
+    "is_reconstructed": false,
+    "record_id": "rec-orbit-histelem-0001"
+  },
+  "windows": [
+    {
+      "window_id": "win-a",
+      "start_at": "2024-05-10T12:00:00Z",
+      "end_at": "2024-05-10T18:00:00Z",
+      "duration_hours": 6,
+      "mechanisms": [
+        {
+          "mechanism": "space_weather",
+          "status": "ok",
+          "max_level": "S2",
+          "exceedance_hours": 2.5,
+          "coverage_fraction": 1.0,
+          "critical_gap": false,
+          "notes": [
+            "Геомагнитная буря Kp=6 (G2) расширяет широтный интервал применимости уровня S2; собственного вклада в уровень не даёт."
+          ],
+          "record_ids": ["rec-swx-donki-0001", "rec-swx-ncei-0002", "rec-swx-geomag-0003"]
+        },
+        {
+          "mechanism": "mmod",
+          "status": "ok",
+          "max_level": "background",
+          "exceedance_hours": 0,
+          "coverage_fraction": 1.0,
+          "critical_gap": false,
+          "notes": [
+            "Оценка ведётся в относительных единицах к спорадическому фону — абсолютная калибровка источника недоступна."
+          ],
+          "record_ids": ["rec-mmod-stream-0004", "rec-orbit-histelem-0001"]
+        }
+      ],
+      "lighting": { "requested": false, "status": "not_requested", "note": null },
+      "excluded_from_comparison": false,
+      "exclusion_reason": null
+    },
+    {
+      "window_id": "win-b",
+      "start_at": "2024-05-10T15:00:00Z",
+      "end_at": "2024-05-10T21:00:00Z",
+      "duration_hours": 6,
+      "mechanisms": [
+        {
+          "mechanism": "space_weather",
+          "status": "ok",
+          "max_level": "S3",
+          "exceedance_hours": 4.0,
+          "coverage_fraction": 1.0,
+          "critical_gap": false,
+          "notes": [
+            "Геомагнитная буря Kp=6 (G2) расширяет широтный интервал применимости уровня; собственного вклада в уровень не даёт."
+          ],
+          "record_ids": ["rec-swx-donki-0001", "rec-swx-ncei-0002", "rec-swx-geomag-0003"]
+        },
+        {
+          "mechanism": "mmod",
+          "status": "ok",
+          "max_level": "background",
+          "exceedance_hours": 0,
+          "coverage_fraction": 1.0,
+          "critical_gap": false,
+          "notes": [
+            "Оценка ведётся в относительных единицах к спорадическому фону — абсолютная калибровка источника недоступна."
+          ],
+          "record_ids": ["rec-mmod-stream-0004", "rec-orbit-histelem-0001"]
+        }
+      ],
+      "lighting": { "requested": false, "status": "not_requested", "note": null },
+      "excluded_from_comparison": false,
+      "exclusion_reason": null
+    }
+  ],
+  "coverage": {
+    "requested_period_supported": true,
+    "archive_gaps": []
+  },
+  "limitations": [
+    "Оценка MMOD ведётся в относительных единицах к фону, абсолютная калибровка потока не выполнена.",
+    "Фикстура носит демонстрационный характер и не является результатом научного расчёта."
+  ],
+  "warnings": [
+    {
+      "code": "geomagnetic-storm-context",
+      "severity": "info",
+      "mechanism": "space_weather",
+      "message": "Геомагнитная буря Kp=6 (G2) в окне A расширяет широтный интервал применимости уровня S2 солнечных частиц; собственного вклада в уровень не даёт.",
+      "record_ids": ["rec-swx-geomag-0003"],
+      "window_id": "win-a"
+    },
+    {
+      "code": "elevated-proton-flux",
+      "severity": "critical",
+      "mechanism": "space_weather",
+      "message": "Поток протонов >10 МэВ достиг уровня S3 (>=1000 pfu) в окне B и удерживался 4.0 ч.",
+      "record_ids": ["rec-swx-ncei-0002", "rec-swx-donki-0001"],
+      "window_id": "win-b"
+    },
+    {
+      "code": "mmod-relative-calibration",
+      "severity": "advisory",
+      "mechanism": "mmod",
+      "message": "Оценка MMOD ведётся в относительных единицах к фону; абсолютная калибровка потока для используемого источника недоступна.",
+      "record_ids": ["rec-mmod-stream-0004"],
+      "window_id": null
+    }
+  ],
+  "recommendation": {
+    "status": "selected",
+    "window_id": "win-a",
+    "explanation": "Окно A выбрано по правилу предпочтения: меньший максимальный уровень механизма 1 (S2 против S3 в окне B) при равном механизме 2 (оба — фон) и равной полноте данных."
+  },
+  "source_status": [
+    { "source_id": "space-track-gp-history", "last_success_at": "2024-05-09T21:10:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
+    { "source_id": "nasa-ccmc-donki", "last_success_at": "2024-05-10T13:25:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
+    { "source_id": "noaa-ncei-swpc-archive", "last_success_at": "2024-05-10T18:10:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
+    { "source_id": "noaa-swpc-geomag", "last_success_at": "2024-05-10T15:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
+    { "source_id": "meteor-stream-static-ref", "last_success_at": "2024-01-01T00:00:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false }
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vkd-risk.local/contracts/request.schema.json",
+  "title": "CalculationRequest",
+  "description": "Запрос на расчёт окна(-он) ВКД. См. .ai/main-prompt.md §11–12 и .ai/backend-prompt.md §6. Часть этой схемы (границы обязательного исторического периода 1 мая — 30 июня 2024, арифметика search_end_at = start_at + search_window_hours <= 32ч от start_at) не выражается в JSON Schema и enforced на уровне сервиса — см. contracts/README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode", "start_at", "duration_hours", "search_window_hours"],
+  "properties": {
+    "mode": {
+      "$ref": "#/$defs/mode"
+    },
+    "start_at": {
+      "$ref": "#/$defs/utcDateTime",
+      "description": "Заявленное аналитиком время начала ВКД. Точка отсчёта периода поиска альтернативных начал."
+    },
+    "duration_hours": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 8,
+      "description": "Длительность ВКД в часах."
+    },
+    "search_window_hours": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 24,
+      "description": "Насколько далеко после start_at искать альтернативные начала окна (0 — только заявленное начало). search_end_at = start_at + search_window_hours."
+    },
+    "as_of": {
+      "$ref": "#/$defs/utcDateTime",
+      "description": "Момент отсечения для строгого прогноза из прошлого: во вход расчёта попадают только записи с published_at <= as_of и replay_eligible == true. Обязателен только для mode = historical_forecast, запрещён для mode = current и mode = historical_analysis (см. contracts/README.md)."
+    },
+    "lighting_constraint": {
+      "$ref": "#/$defs/lightingConstraint"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "mode": { "const": "historical_forecast" } },
+        "required": ["mode"]
+      },
+      "then": { "required": ["as_of"] }
+    },
+    {
+      "if": {
+        "properties": { "mode": { "const": "current" } },
+        "required": ["mode"]
+      },
+      "then": { "not": { "required": ["as_of"] } }
+    },
+    {
+      "if": {
+        "properties": { "mode": { "const": "historical_analysis" } },
+        "required": ["mode"]
+      },
+      "then": { "not": { "required": ["as_of"] } }
+    }
+  ],
+  "$defs": {
+    "mode": {
+      "type": "string",
+      "enum": ["current", "historical_analysis", "historical_forecast"],
+      "description": "current — текущий расчёт по свежим данным; historical_analysis — разбор произвольной прошлой даты по полному архиву без отсечения; historical_forecast — строгий прогноз из прошлого с отсечением as_of."
+    },
+    "utcDateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 с обязательным явным смещением часового пояса. Naive datetime (без Z/±HH:MM) не проходит валидацию."
+    },
+    "lightingConstraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Необязательное ограничение операции по освещённости (не механизм воздействия, см. .ai/main-prompt.md §11).",
+      "required": ["requires_sunlight"],
+      "properties": {
+        "requires_sunlight": {
+          "type": "boolean",
+          "description": "Какая фаза ВКД требует солнечного освещения — влияет только на предупреждение о нарушении, не на risk-оценку."
+        }
+      }
+    }
+  }
+}

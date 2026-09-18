@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vkd-risk.local/contracts/record.schema.json",
+  "title": "SourceRecord",
+  "description": "Неизменяемая запись источника (наблюдение / прогноз / предупреждение / орбитальные элементы). См. .ai/backend-prompt.md §1. Запись только добавляется: новая версия того же продукта — новая запись рядом с прежней, не перезапись.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_id",
+    "source_id",
+    "source_url",
+    "record_kind",
+    "observed_at",
+    "valid_from",
+    "valid_to",
+    "published_at",
+    "fetched_at",
+    "value",
+    "unit",
+    "spatial_context",
+    "source_version",
+    "raw_ref",
+    "checksum",
+    "quality",
+    "replay_eligible"
+  ],
+  "properties": {
+    "record_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Устойчивый идентификатор записи внутри хранилища (не идентификатор поставщика — дедупликация ведётся по нему отдельно на уровне sources/)."
+    },
+    "source_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Идентификатор источника из sources.yaml (например noaa-swpc-proton-flux, celestrak-gp, space-track-gp-history)."
+    },
+    "source_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "URL, с которого получена запись, без встроенных секретов (ключ API маскируется на уровне логгера/хранения)."
+    },
+    "record_kind": {
+      "type": "string",
+      "enum": ["observation", "forecast", "warning", "orbital_elements"],
+      "description": "Наблюдение / внешний прогноз / предупреждение / орбитальные элементы — разные типы данных, не разные подписи одного типа (см. .ai/main-prompt.md §4)."
+    },
+    "observed_at": {
+      "$ref": "#/$defs/utcDateTime",
+      "description": "Когда измерено (для warning/forecast — момент, к которому относится содержимое, а не момент выпуска)."
+    },
+    "valid_from": {
+      "$ref": "#/$defs/utcDateTime",
+      "description": "Начало интервала, на который распространяется продукт."
+    },
+    "valid_to": {
+      "$ref": "#/$defs/utcDateTime",
+      "description": "Конец интервала, на который распространяется продукт."
+    },
+    "published_at": {
+      "oneOf": [{ "$ref": "#/$defs/utcDateTime" }, { "type": "null" }],
+      "description": "Когда поставщик выпустил продукт. null — время публикации неизвестно; в этом случае replay_eligible обязан быть false (неизвестное время публикации не значит «вероятно, было доступно» — .ai/main-prompt.md §1)."
+    },
+    "fetched_at": {
+      "$ref": "#/$defs/utcDateTime",
+      "description": "Когда мы это получили. Никогда не подставляется вместо published_at."
+    },
+    "value": {
+      "description": "Значение записи. Для orbital_elements — структурированный объект (строки TLE/GP и производные), для остальных record_kind — число или null (отсутствие значения не заменяется нулём)."
+    },
+    "unit": {
+      "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }],
+      "description": "Единица измерения рядом со значением (например pfu, ratio_to_background, kp_index). null допустим только когда value тоже null."
+    },
+    "spatial_context": {
+      "type": "object",
+      "description": "Место/геометрия, к которой относится значение (например платформа-наблюдатель, географическая широта отсечения, либо система координат станции). Состав полей зависит от record_kind, поэтому объект не фиксирован жёстко.",
+      "additionalProperties": true
+    },
+    "source_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Версия продукта у поставщика. Позднее уточнение того же продукта — новая запись с новым source_version, а не перезапись."
+    },
+    "raw_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Ссылка на сохранённый оригинал ответа источника (путь/BLOB-идентификатор)."
+    },
+    "checksum": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA-256 контрольная сумма сохранённого оригинала ответа."
+    },
+    "quality": {
+      "type": "string",
+      "enum": ["nominal", "degraded", "reconstructed", "unknown"],
+      "description": "nominal — штатное качество; degraded — источник указывает на пониженное качество; reconstructed — восстановлено косвенно (например геометрия по неподтверждённым элементам); unknown — источник не сообщает качество."
+    },
+    "replay_eligible": {
+      "type": "boolean",
+      "description": "Вычисляется при записи, не при чтении. false, если published_at или source_version неизвестны. Не восстанавливается задним числом по дате измерения."
+    },
+    "orbital_elements_meta": {
+      "$ref": "#/$defs/orbitalElementsMeta"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "published_at": { "const": null } } },
+      "then": {
+        "properties": { "replay_eligible": { "const": false } }
+      }
+    },
+    {
+      "if": { "properties": { "value": { "const": null } } },
+      "then": { "properties": { "unit": { "const": null } } }
+    },
+    {
+      "if": {
+        "properties": { "record_kind": { "const": "orbital_elements" } },
+        "required": ["record_kind"]
+      },
+      "then": { "required": ["orbital_elements_meta"] },
+      "else": { "not": { "required": ["orbital_elements_meta"] } }
+    }
+  ],
+  "$defs": {
+    "utcDateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 с обязательным явным смещением часового пояса."
+    },
+    "orbitalElementsMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["epoch", "format", "coordinate_system"],
+      "description": "Обязателен для record_kind = orbital_elements (см. .ai/backend-prompt.md §1: 'для орбитальных данных дополнительно — эпоха элементов, формат и система координат').",
+      "properties": {
+        "epoch": {
+          "$ref": "#/$defs/utcDateTime",
+          "description": "Эпоха орбитальных элементов."
+        },
+        "format": {
+          "type": "string",
+          "enum": ["TLE", "GP_OMM"],
+          "description": "Формат представления элементов."
+        },
+        "coordinate_system": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Система координат элементов (например TEME)."
+        }
+      }
+    }
+  }
+}
