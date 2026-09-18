@@ -231,3 +231,163 @@ space_weather:
       # «спокойно» (main-prompt.md §2, приёмка FN-22).
       critical_staleness_seconds: 3600
     enabled: true
+
+  # --- Строгий прогноз из прошлого по космопогоде — задача FN-23 (S1-05). --
+  # Доказательство пригодности архива, не готовый production-коннектор (см.
+  # implementation_note каждой записи и docs/method.md). Реальные ответы
+  # серверов, на которых проверены факты ниже, сохранены байт-в-байт в
+  # tests/fixtures/sources/archive/ вместе с *.meta.json (URL, fetched_at,
+  # заголовки, SHA-256) — это и есть «конкретные доказательства» приёмки
+  # FN-23, не переизложенные, а проверяемые заново тестами
+  # tests/sources/test_archive_publication.py.
+
+  - id: nasa-donki-notifications
+    name: "NASA CCMC DONKI — уведомления (Notifications)"
+    provider: "NASA Community Coordinated Modeling Center (CCMC), Moon to Mars Space Weather Analysis Office"
+    url: "https://api.nasa.gov/DONKI/notifications"
+    product: >-
+      Текстовые уведомления о зафиксированной или ожидаемой активности
+      космопогоды (CME, вспышки, геомагнитные бури, протонные события,
+      межпланетные ударные волны и их комбинации/уточнения). Основная линия
+      строгого прогноза из прошлого по Механизму 1 (main-prompt.md §11):
+      «у каждого есть messageIssueTime, архив покрывает весь период
+      01.05–30.06.2024».
+    record_kind: warning
+    value_unit: null
+    coverage: >-
+      Проверено запросом за четыре 15-дневных окна, покрывающих весь
+      обязательный период 01.05–30.06.2024 включительно (включая выраженное
+      событие 10–11 мая, AR3664, и контрольный период 16–27 июня): 245
+      уведомлений, без повторов messageID между окнами. Карта наличия/пробелов
+      — docs/method.md §3; сырой источник фактов —
+      tests/fixtures/sources/archive/README.md.
+    published_at: >-
+      Поле верхнего уровня ``messageIssueTime`` каждого уведомления, точность
+      до минуты. Секундная точность есть только внутри свободного текста
+      ``messageBody`` (строка ``## Message Issue Date:``) и не используется
+      этим коннектором — разбор прозы под каждый ``messageType`` отдельно вне
+      объёма зонда пригодности (см. implementation_note).
+    versioning: >-
+      Сервер не отдаёт ни ``ETag``, ни ``Last-Modified`` (проверено на
+      реальных ответах — tests/fixtures/sources/archive/README.md).
+      ``messageID`` уникален и не переиздаётся поставщиком: source_version в
+      src/sources/archive_probe.py строится из времени публикации, только
+      чтобы удовлетворить непустоте поля контракта, не как инструмент
+      разрешения повторных версий одного и того же сообщения — повторных
+      версий у этого продукта не бывает.
+    quality_notes: >-
+      Связанные уведомления одного явления (например CME → SEP → IPS → GST
+      одной активности) поступают как отдельные messageID — main-prompt.md §4
+      «связанные сигналы одного события дают один вклад» обязана
+      реализовываться выше по пайплайну (домен), не здесь: этот зонд/коннектор
+      только нормализует, не сворачивает связанные уведомления.
+    access_restrictions: >-
+      Требуется ``api_key`` в query (используется публичный демонстрационный
+      ``DEMO_KEY`` NASA для проверки этой задачи — не секрет; для
+      production-использования — ``NASA_API_KEY`` из env, см. .env.example).
+      Наблюдаемый лимит — 10 запросов в час на ключ (заголовок
+      ``x-ratelimit-limit``); загрузка всего периода требует всего 4 запроса
+      (по числу 15-дневных окон), в лимит укладывается с большим запасом.
+    license: >-
+      Продукт NASA — публичные данные без ограничений на локальное хранение
+      или повторную публикацию, кроме указания NASA/CCMC как источника.
+    independence_note: >-
+      Единственный зарегистрированный источник строгого прогноза из прошлого
+      по космопогоде на данный момент; noaa-swpc-forecast-discussion-archive
+      ниже — независимая вторая линия того же механизма (другой поставщик,
+      другой формат, другое время публикации), не перепечатка этого продукта.
+    network:
+      connect_timeout_seconds: 5.0
+      read_timeout_seconds: 15.0
+      max_retries: 3
+      retry_backoff_base_seconds: 1.0
+    archive_cache: >-
+      Архивный ответ не меняется — кеш бессрочен (main-prompt.md §5), в
+      отличие от TTL-обновления noaa-swpc-proton-flux выше. Полная
+      постраничная загрузка периода в хранилище источников — задача этапа 3.
+    replay_eligible_for_historical_forecast: true
+    replay_eligible_note: >-
+      Подтверждено на реальных сохранённых ответах (245 уведомлений,
+      01.05–30.06.2024, у каждого — messageIssueTime): published_at известен
+      и проверяем для каждой записи, поздний выпуск исключается стандартным
+      правилом src/store/records.py::select_as_of (без изменений в правиле —
+      тесты tests/sources/test_archive_publication.py используют его как
+      есть, см. .ai/main-prompt.md §9 «утечка времени»).
+    enabled: true
+    implementation_note: >-
+      Парсинг и нормализация в RecordInput — src/sources/archive_probe.py
+      (parse_donki_notifications, donki_notification_to_record_input).
+      Полноценный fetch_and_store-шлюз (постраничная загрузка всего периода,
+      квоты, повтор) — задача этапа 3; эта задача (FN-23) доказывает
+      пригодность источника, не реализует загрузку всего архива в хранилище.
+
+  - id: noaa-swpc-forecast-discussion-archive
+    name: "NOAA SWPC Forecast Discussion — архив NCEI"
+    provider: "NOAA Space Weather Prediction Center (SWPC); архивируется NOAA NCEI/NGDC"
+    url: >-
+      https://www.ngdc.noaa.gov/stp/space-weather/swpc-products/daily_reports/discussion/{YYYY}/{MM}/{YYYYMMDDHHMM}forecast_discussion.txt
+    product: >-
+      Текстовый бюллетень с прогнозной дискуссией по солнечной активности,
+      энергичным частицам, солнечному ветру и геопространству, дважды в
+      сутки (00:30 и 12:30 UTC — время слота, не время фактического выпуска,
+      см. published_at). Дополнительная (не единственная) линия строгого
+      прогноза из прошлого по Механизму 1, main-prompt.md §11.
+    record_kind: forecast
+    value_unit: null
+    coverage: >-
+      Проверено выборочно по обеим сторонам события 10–11 мая (1–14 мая — 6
+      сохранённых выпусков) и по контрольному периоду (17–30 июня — 5
+      сохранённых выпусков), плюс листинги каталога за оба месяца как
+      доказательство полноты. **Подтверждённый пробел: выпусков с 15 мая по
+      16 июня 2024 в архиве нет вовсе** (56 из 122 слотов за два месяца) —
+      это не ограничение выборки этой проверки, а свойство архива, зафиксированное явно, а
+      не замаскированное (main-prompt.md §2, §5). Событие 8 июня 2024 этим
+      продуктом не покрыто. Карта — docs/method.md §3.
+    published_at: >-
+      Строка ``:Issued:`` внутри тела бюллетеня (например ``2024 May 10 0035
+      UTC``), НЕ время слота из имени файла/URL: подтверждённое расхождение —
+      выпуск «...0030» за 10 мая фактически выпущен в 00:35 UTC. Независимо
+      подтверждено HTTP-заголовком ``Last-Modified`` — совпадает с
+      ``:Issued:`` на всех проверенных ответах.
+    versioning: >-
+      ``ETag`` не предоставляется. Повторных версий одного слота в архиве нет
+      (один файл на слот) — source_version в src/sources/archive_probe.py
+      строится из ``:Issued:``, аналогично nasa-donki-notifications выше.
+    quality_notes: >-
+      Время публикации обязано разбираться из тела, не из имени файла или
+      времени HTTP-запроса (см. published_at) — коннектор, доверяющий имени
+      файла, тихо занизил бы published_at на несколько минут для части
+      выпусков, что для отсечения на границе часа/минуты — реальная утечка.
+    access_restrictions: "Без ключа/регистрации, публичный HTTP-эндпоинт NCEI."
+    license: >-
+      Продукт NOAA — общественное достояние (U.S. Government work); NOAA
+      просит указывать атрибуцию "NOAA Space Weather Prediction Center".
+    independence_note: >-
+      Независима от nasa-donki-notifications выше: другой поставщик (NOAA, не
+      NASA/CCMC), другой формат (текст с ``:Issued:``, не JSON с
+      ``messageIssueTime``), архивируется отдельной инфраструктурой (NCEI, не
+      DONKI). Не перепечатка одного и того же измерения (main-prompt.md §5).
+    network:
+      connect_timeout_seconds: 5.0
+      read_timeout_seconds: 15.0
+      max_retries: 3
+      retry_backoff_base_seconds: 1.0
+    archive_cache: "Архивный ответ не меняется — кеш бессрочен (main-prompt.md §5)."
+    replay_eligible_for_historical_forecast: true
+    replay_eligible_note: >-
+      Подтверждено на реальных сохранённых ответах: published_at известен и
+      проверяем (перепроверен независимо по Last-Modified) для каждого
+      сохранённого выпуска. Пригодность ограничена периодом фактического
+      покрытия архива (см. coverage выше) — пробел 15.05–16.06.2024 остаётся
+      пробелом и для этого источника тоже, компенсируется
+      nasa-donki-notifications, у которого такого разрыва нет
+      (docs/method.md §3).
+    enabled: true
+    implementation_note: >-
+      Парсинг и нормализация — src/sources/archive_probe.py
+      (parse_swpc_forecast_discussion, swpc_forecast_discussion_to_record_input).
+      Архив текстовых оповещений SWPC (alerts/watches/warnings, коды вроде
+      WATA20/ALTEF3) в этом разделе NCEI не найден при проверке — не
+      зарегистрирован как отдельный источник, пока не найден отдельно.
+      Полная постраничная загрузка обоих покрытых интервалов в хранилище —
+      задача этапа 3.

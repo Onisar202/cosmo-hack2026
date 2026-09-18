@@ -12,10 +12,16 @@ health-проверку и воспроизводимые проверки ка�
 добавляет коннектор космопогоды — NOAA SWPC, поток протонов >=10 МэВ
 (`src/sources/swpc.py`). FN-24 добавляет коннектор орбитальных элементов
 МКС с CelesTrak (`src/sources/orbit.py`) и первый расчётный модуль —
-распространение орбиты по SGP4 (`src/domain/orbit/propagate.py`). Оба
-коннектора регистрируют свои источники в общем реестре `sources.yaml`.
-Расчётных эндпоинтов ещё нет — API, объединяющий эти модули с остальными
-механизмами, появится вместе с задачей S1-07.
+распространение орбиты по SGP4 (`src/domain/orbit/propagate.py`). FN-23
+подтверждает пригодность архивов космопогоды для строгого прогноза из
+прошлого — NASA CCMC DONKI (основная линия, весь период
+01.05–30.06.2024) и NOAA SWPC Forecast Discussion из архива NCEI
+(дополнительная линия, с честно зафиксированным пробелом 15.05–16.06.2024)
+— и нормализует их в записи хранилища (`src/sources/archive_probe.py`,
+доказательства — `docs/method.md`). Все коннекторы и зонд регистрируют
+свои источники в общем реестре `sources.yaml`. Расчётных эндпоинтов ещё
+нет — API, объединяющий эти модули с остальными механизмами, появится
+вместе с задачей S1-07.
 
 ## Стек
 
@@ -394,14 +400,19 @@ src/
 ├── api/        # FastAPI: тонкие роутеры, валидация — сейчас только /health
 ├── config.py   # Настройки из env, без секретов
 ├── sources/    # Получение и нормализация — http.py/swpc.py/status.py (NOAA SWPC),
-│               # orbit.py (CelesTrak GP/TLE)
+│               # orbit.py (CelesTrak GP/TLE), archive_probe.py (архивы DONKI/SWPC)
 ├── store/      # Хранение, версии, выборка по as_of — schema.py/records.py/results.py
 ├── domain/     # Расчёты: spaceweather, orbit (propagate.py — SGP4), mmod, lighting, windows
 └── export/     # HTML и JSON из сохранённого результата (пока не реализовано)
-sources.yaml    # Реестр источников (main-prompt.md §7): space_weather (noaa-swpc-proton-flux),
+sources.yaml    # Реестр источников (main-prompt.md §7): space_weather (noaa-swpc-proton-flux,
+                # nasa-donki-notifications, noaa-swpc-forecast-discussion-archive),
                 # sources (celestrak-gp, space-track-gp-history, MMOD)
+docs/
+├── mechanisms.md  # Обоснование MMOD (FN-25)
+└── method.md      # Пригодность архивов космопогоды для строгого replay (FN-23)
 tests/
-├── sources/    # test_swpc.py + fixtures/sources/swpc/ (сохранённые реальные ответы)
+├── sources/    # test_swpc.py, test_archive_publication.py + fixtures/sources/{swpc,archive}/
+│               # (сохранённые реальные ответы)
 ├── orbit/      # test_propagation.py
 ├── fixtures/orbit/  # TLE-фикстуры и независимый эталон SGP4 verification
 ├── store/      # test_versions.py, test_as_of.py
