@@ -97,12 +97,16 @@ tests/store/test_versions.py::test_record_input_rejects_naive_datetime PASSED
 tests/store/test_versions.py::test_record_input_rejects_empty_source_version PASSED
 tests/store/test_versions.py::test_duplicate_key_with_different_content_is_a_conflict_not_a_duplicate PASSED
 tests/store/test_versions.py::test_duplicate_key_with_identical_content_is_idempotent PASSED
+tests/store/test_versions.py::test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict[override0] PASSED
+tests/store/test_versions.py::test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict[override1] PASSED
+tests/store/test_versions.py::test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict[override2] PASSED
+tests/store/test_versions.py::test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict[override3] PASSED
 tests/store/test_versions.py::test_published_at_offset_is_normalized_to_utc_before_comparison PASSED
 tests/test_health.py::test_health_returns_200_ok PASSED
 tests/test_health.py::test_health_time_is_utc_aware PASSED
 tests/test_health.py::test_settings_requires_app_env PASSED
 tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
-26 passed
+30 passed
 ```
 
 ## Хранилище (`src/store/`)
@@ -116,11 +120,14 @@ tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
 
 - **Нормализованные записи** — таблица SQLite `source_records`. Дедупликация
   по `(source_id, provider_record_id, source_version)`: повторная вставка
-  того же сочетания с тем же оригиналом (по контрольной сумме) не создаёт
-  новую строку и не удваивает воздействие; то же сочетание с другим
-  оригиналом — конфликт версии у поставщика (`DuplicateKeyConflictError`),
-  а не тихая замена. Позднее уточнение того же продукта — новая строка с
-  новым `source_version`, прежняя не трогается.
+  того же сочетания создаёт нет-оп только когда совпадают и оригинал (по
+  контрольной сумме), и все значимые нормализованные поля (`value`, `unit`,
+  `published_at`, `quality`, `spatial_context` и т.п.; `fetched_at` не
+  входит — момент получения того же оригинала законно отличается между
+  повторными обращениями). Любое расхождение — конфликт версии у
+  поставщика или ошибка нормализации выше по пайплайну
+  (`DuplicateKeyConflictError`), а не тихая замена. Позднее уточнение того
+  же продукта — новая строка с новым `source_version`, прежняя не трогается.
 - **Оригиналы ответов** — контент-адресуемое хранилище на диске
   (`RawOriginalStore`), путь файла определяется его SHA-256; оригинал и
   контрольная сумма восстанавливаются по `record_id` (`get_original`),

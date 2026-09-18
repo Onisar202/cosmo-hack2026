@@ -302,6 +302,33 @@ def test_duplicate_key_with_identical_content_is_idempotent(
     assert db_conn.execute("SELECT COUNT(*) FROM source_records").fetchone()[0] == 1
 
 
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"value": 999.0},
+        {"published_at": datetime(2024, 5, 9, 20, 0, tzinfo=UTC)},
+        {"unit": "different-unit"},
+        {"quality": "degraded"},
+    ],
+)
+def test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore, override: dict[str, Any]
+) -> None:
+    """Тот же оригинал (checksum) не оправдывает молчаливый дубль, если
+    нормализованные поля отличаются — иначе ошибка нормализации выше по
+    пайплайну тихо сохранилась бы как «уже было» (round 2 ревью)."""
+    same_bytes = b"identical raw original"
+    first = make_record(source_version="1", raw_bytes=same_bytes)
+    insert_record(db_conn, raw_store, first)
+
+    conflicting = replace(make_record(source_version="1", raw_bytes=same_bytes), **override)
+
+    with pytest.raises(DuplicateKeyConflictError):
+        insert_record(db_conn, raw_store, conflicting)
+
+    assert db_conn.execute("SELECT COUNT(*) FROM source_records").fetchone()[0] == 1
+
+
 def test_published_at_offset_is_normalized_to_utc_before_comparison(
     db_conn: sqlite3.Connection, raw_store: RawOriginalStore
 ) -> None:

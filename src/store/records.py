@@ -36,12 +36,17 @@ class ChecksumMismatchError(RuntimeError):
 
 class DuplicateKeyConflictError(ValueError):
     """Тот же дедуп-ключ (``source_id``, ``provider_record_id``, ``source_version``)
-    уже занят записью с другим содержимым.
+    уже занят записью с другим содержимым — либо оригинал (checksum), либо
+    любое из значимых нормализованных полей (``value``, ``unit``,
+    ``published_at``, ``quality`` и т.п.) отличается от уже сохранённой
+    записи.
 
-    Это не повторная передача того же сообщения (тогда контрольные суммы
-    совпали бы и вставка была бы идемпотентна), а конфликт: поставщик не
-    должен переиспользовать версию продукта для другого содержимого. Тихая
-    подмена здесь была бы хуже отказа — заявленная версия перестала бы
+    Это не повторная передача того же сообщения (тогда и checksum, и все
+    нормализованные поля совпали бы, и вставка была бы идемпотентна), а
+    конфликт: поставщик не должен переиспользовать версию продукта для
+    другого содержимого, и ошибка нормализации выше по пайплайну не должна
+    молча сохраниться как «уже было». Тихая подмена здесь была бы хуже
+    отказа — заявленная версия перестала бы
     однозначно определять содержимое (round 1 ревью)."""
 
 
@@ -177,22 +182,50 @@ def insert_record(
         _require_non_empty(value, field_name)
 
     new_checksum = hashlib.sha256(record.raw_bytes).hexdigest()
+
+    # Поля содержания записи — то, что обязано совпадать у двух вставок с
+    # одним и тем же дедуп-ключом и одним и тем же оригиналом. ``fetched_at``
+    # сюда не входит: момент получения того же оригинала законно отличается
+    # между повторными обращениями к источнику и не является содержанием
+    # записи (round 2 ревью). Времена уже нормализованы к UTC здесь же, чтобы
+    # сравнение ниже не повторяло округление/форматирование по-своему.
+    content_fields: dict[str, Any] = {
+        "source_url": record.source_url,
+        "record_kind": record.record_kind,
+        "observed_at": _iso_utc(record.observed_at),
+        "valid_from": _iso_utc(record.valid_from),
+        "valid_to": _iso_utc(record.valid_to),
+        "published_at": _iso_utc(record.published_at) if record.published_at else None,
+        "value": record.value,
+        "unit": record.unit,
+        "spatial_context": record.spatial_context,
+        "quality": record.quality,
+        "orbital_elements_meta": record.orbital_elements_meta,
+    }
+
     existing = conn.execute(
         """
-        SELECT record_id, checksum FROM source_records
+        SELECT record_id, checksum, payload_json FROM source_records
         WHERE source_id = ? AND provider_record_id = ? AND source_version = ?
         """,
         (record.source_id, record.provider_record_id, record.source_version),
     ).fetchone()
     if existing is not None:
-        existing_record_id, existing_checksum = existing
-        if existing_checksum != new_checksum:
+        existing_record_id, existing_checksum, existing_payload_json = existing
+        existing_payload = json.loads(existing_payload_json)
+        existing_content = {key: existing_payload.get(key) for key in content_fields}
+        # И оригинал (checksum), и все значимые нормализованные поля должны
+        # совпасть — иначе тот же дедуп-ключ описывает другое содержание
+        # (например ошибку нормализации выше по пайплайну), и тихо
+        # подтверждать первую попавшуюся запись нельзя (round 2 ревью).
+        if existing_checksum != new_checksum or existing_content != content_fields:
             raise DuplicateKeyConflictError(
                 f"source_id={record.source_id!r}, "
                 f"provider_record_id={record.provider_record_id!r}, "
                 f"source_version={record.source_version!r} is already stored "
-                f"with a different original (checksum {existing_checksum!r}, "
-                f"got {new_checksum!r})"
+                "with different content: "
+                f"checksum {existing_checksum!r} vs {new_checksum!r}, "
+                f"fields {existing_content!r} vs {content_fields!r}"
             )
         return str(existing_record_id)
 
@@ -209,24 +242,24 @@ def insert_record(
         "record_id": record_id,
         "provider_record_id": record.provider_record_id,
         "source_id": record.source_id,
-        "source_url": record.source_url,
-        "record_kind": record.record_kind,
-        "observed_at": _iso_utc(record.observed_at),
-        "valid_from": _iso_utc(record.valid_from),
-        "valid_to": _iso_utc(record.valid_to),
-        "published_at": _iso_utc(record.published_at) if record.published_at else None,
+        "source_url": content_fields["source_url"],
+        "record_kind": content_fields["record_kind"],
+        "observed_at": content_fields["observed_at"],
+        "valid_from": content_fields["valid_from"],
+        "valid_to": content_fields["valid_to"],
+        "published_at": content_fields["published_at"],
         "fetched_at": _iso_utc(record.fetched_at),
-        "value": record.value,
-        "unit": record.unit,
-        "spatial_context": record.spatial_context,
+        "value": content_fields["value"],
+        "unit": content_fields["unit"],
+        "spatial_context": content_fields["spatial_context"],
         "source_version": record.source_version,
         "raw_ref": raw_ref,
         "checksum": checksum,
-        "quality": record.quality,
+        "quality": content_fields["quality"],
         "replay_eligible": replay_eligible,
     }
-    if record.orbital_elements_meta is not None:
-        payload["orbital_elements_meta"] = record.orbital_elements_meta
+    if content_fields["orbital_elements_meta"] is not None:
+        payload["orbital_elements_meta"] = content_fields["orbital_elements_meta"]
 
     conn.execute(
         """
