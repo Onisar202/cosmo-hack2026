@@ -1,0 +1,24 @@
+{
+  "request_url": "https://www.ngdc.noaa.gov/stp/space-weather/swpc-products/daily_reports/discussion/2024/05/202405101230forecast_discussion.txt",
+  "api_key": "не требуется",
+  "http_status": 200,
+  "status_line": "HTTP/1.1 200 OK",
+  "fetched_at": "2026-09-18T23:06:10.062Z",
+  "response_received_at": "2026-09-18T23:06:10.617Z",
+  "response_headers": {
+    "date": "Fri, 18 Sep 2026 23:06:10 GMT",
+    "last-modified": "Fri, 10 May 2024 12:30:00 GMT",
+    "etag": null,
+    "content-type": "text/plain; charset=UTF-8",
+    "content-length": "3069",
+    "x-ratelimit-limit": null,
+    "x-ratelimit-remaining": null
+  },
+  "body_file": "swpc_forecast_discussion_20240510_1230.txt",
+  "body_size_bytes": 3069,
+  "body_sha256": "9cd1f05cb35027085b7b7b307f3e01ea31c4dd5c29db4c2cb2b8dedb9e2d3880",
+  "body_is_valid_json": null,
+  "body_item_count": null,
+  "client": "curl 8.18.0",
+  "note": "Тело сохранено байт-в-байт (curl -o, без форматирования). fetched_at — момент отправки запроса, UTC."
+}

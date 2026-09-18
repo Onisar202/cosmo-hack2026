@@ -1,0 +1,68 @@
+:Product: 05111230forecast_discussion.txt
+:Issued: 2024 May 11 1230 UTC
+# Prepared by the U.S. Dept. of Commerce, NOAA, Space Weather Prediction Center
+#
+Solar Activity
+
+.24 hr Summary...
+Solar activity was high. Region 3664 (S18W60, Fkc/beta-gamma-delta)
+produced the strongest event of the period, an X5.8/2b flare (R3/Strong)
+at 11/0123 UTC. Associated with the event was a Type II and Type IV
+radio sweep, a Castelli-U signature, and a 800 sfu Tenflare. A
+subsequent halo CME signature was identified in SOHO/LASCO C2 imagery
+beginning at 11/0136 UTC. The event is currently being analyzed and
+modeled. Another R3 event was ongoing at the time of this writing. The
+region produced numerous low-level M-class active throughout the entire
+past 24 hours.
+
+Two new regions were numbered in the SE quadrant near the limb. They
+were both relatively quiet and stable during the reporting period.
+  
+.Forecast...
+Solar activity is expected to persist at high to very high levels over
+11-13 May, with M-class (R1-R2/Minor-Moderate) and X-class flares
+(R3/Strong) expected, due primarily to the flare potential of Region
+3664.
+
+Energetic Particle
+
+.24 hr Summary...
+The greater than 10 MeV proton flux reached S2 (Moderate) solar
+radiation storm levels on 10 and 11 May. The greater than 2 MeV electron
+flux was at normal to moderate levels throughout the day.
+
+.Forecast...
+The greater than 10 MeV proton flux is expected to persist at S1 (Minor)
+storm levels through 12 May. Additional proton enhancements are likely
+on 12-13 May due to the flare potential and location of Region 3664. The
+greater than 2 MeV electron flux is expected to be at normal to moderate
+levels over 11-13 May.
+
+Solar Wind
+
+.24 hr Summary...
+This period saw the arrival of an strong interplanetary shock beginning
+at around 10/1635 UTC. Following initial shock arrival, total field
+strength increased to a peak of 74 nT and Bz was sustained southward, by
+as much as -50 nT. Solar wind speeds reached a peak of around 800 km/s
+late in the reporting period.
+ 
+.Forecast...
+A strongly enhanced solar wind environment and CME influences are
+expected to continue on 11 May. Additional enhancements are likely on
+12-13 May due to the anticipated arrival of multiple other halo CMEs
+that left the Sun over 09-11 May.
+
+Geospace
+
+.24 hr Summary...
+The geomagnetic field reached G5 (Extreme) geomagnetic storm periods
+over the 10/2100-11/0000 UTC, 11/0000-11/0300 UTC, and 09/0900-1200 UTC
+synoptic periods due to the passage of multiple CMEs in the past 24
+hours.
+
+.Forecast...
+Periods of G3-G4 (Strong-Severe) geomagnetic storms are expected on 11
+May due to continued CME activity. Periods of G3 (Strong) or greater are
+likely on 12 and 13 May due to the anticipated arrival of additional
+CMEs associated with eruptive activity from Region 3664 over 09-11 May.

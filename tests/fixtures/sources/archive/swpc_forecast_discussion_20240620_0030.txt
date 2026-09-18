@@ -1,0 +1,68 @@
+:Product: 06200030forecast_discussion.txt
+:Issued: 2024 Jun 20 0030 UTC
+# Prepared by the U.S. Dept. of Commerce, NOAA, Space Weather Prediction Center
+#
+Solar Activity
+
+.24 hr Summary...
+Solar activity continued at moderate levels as Region 3711 (S11W81,
+Axx/Alpha) produced an M1.1/Sf at 19/0638 UTC as it made its way to the
+western limb. Region 3713 (S15W27, Ekc/Beta-Gamma-Delta) continued to
+evolve and exhibited moderate growth in its intermediate and leader
+spots, but has only produced low level C-class flares recently. Region
+3712 (S24W39, Ekc/Beta-Gamma-Delta), the largest region on the disk,
+displayed separation in the intermediate and trailer spots, but was
+quiet this period. Region 3716 (N10W32, Dki/Beta-Gamma) showed
+consolidation in its leader spots, as well as growth in its intermediate
+and trailer spots. New Regions 3718 (N15E13, Cro/Beta), 3719 (S12E68,
+Cro/Beta) and 3720 (S04E77, Dao/Beta) were numbered this period, but
+remained mostly quiet.
+
+At approximately 19/0910 UTC, coronal dimming was observed just north of
+Region 3718 as an approximately seven degree long filament disappeared
+in GONG H-Alpha imagery. Analysis will be conducted as LASCO coronagraph
+imagery becomes available. At present, no known CMEs are expected to
+have an Earth-directed component.
+
+.Forecast...
+M-class flares (R1-R2/Minor-Moderate) are likely over 20-22 Jun, with a
+slight chance for X-class flares (R3 or greater), due primarily to the
+flare potential of Regions 3712, 3713 and 3716.
+
+Energetic Particles
+
+.24 hr Summary...
+The greater than 2 MeV electron flux was at normal to moderate levels
+and the greater than 10 MeV proton flux was at background levels.
+
+.Forecast...
+The greater than 2 MeV electron flux is expected to be at normal to
+moderate levels through 22 Jun. There is a slight chance for the greater
+than 10 MeV proton flux to reach up to S1 (Minor) levels on 20-22 Jun.
+
+Solar Wind
+
+.24 hr Summary...
+The solar wind environment reflected continued, yet weakening, CH HSS
+influences. Total field averaged near 4 nT, the Bz component varied
+between +/- 5 nT and wind speeds decreased from 575 km/s to near 490
+km/s during the period. The phi angle was in a mostly positive
+orientation.
+
+.Forecast...
+A gradual decline in solar wind enhancements is expected on 20 Jun. A
+negative polarity coronal hole is likely to move into a geoeffective
+position on 21 and 22 Jun, increasing the chances for additional
+enhancements in the solar wind environment.
+
+Geospace
+
+.24 hr Summary...
+The geomagnetic field was at quiet to unsettled levels in response to a
+mildly disturbed solar wind environment.
+
+.Forecast...
+Mostly quiet conditions are expected on 20 Jun as CH HSS effects
+diminish. Unsettled conditions are expected on 21 and 22 Jun, with
+active levels possible on 22 Jun, with the arrival of the CH HSS
+mentioned in the solar wind forecast.

@@ -1,0 +1,59 @@
+:Product: 06281230forecast_discussion.txt
+:Issued: 2024 Jun 28 1230 UTC
+# Prepared by the U.S. Dept. of Commerce, NOAA, Space Weather Prediction Center
+#
+Solar Activity
+
+.24 hr Summary...
+Solar activity was at low levels. The largest flare was a C6.6 at
+27/2347 UTC from Region 3730 (S18E02, Cso/beta). Slight decay was
+observed in Region 3730. Slight growth was observed in Region 3728
+(S27E24, Dao/beta) and in the intermediate spots of Region 3729 (S03E49,
+Eai/beta). New Region 3731 (S17E56, Axx/alpha) was numbered.
+
+A CME was observed off the SW limb beginning at 27/1724 UTC in LASCO
+C2 imagery. Modelling efforts determined a possible glancing influence
+late on 01 Jul.
+
+.Forecast...
+Solar activity is expected to be low with a chance for M-class flares
+(R1-R2/Minor-Moderate) on 28-30 Jun.
+
+Energetic Particle
+
+.24 hr Summary...
+The greater than 2 MeV electron flux was at normal to moderate levels
+and the greater than 10 MeV proton flux was at background levels.
+
+.Forecast...
+The greater than 2 MeV electron flux is expected to be at normal to
+moderate levels on 28-30 Jun. The greater than 10 MeV proton flux is
+expected to be at background levels on 28-30 Jun.
+
+Solar Wind
+
+.24 hr Summary...
+Solar wind parameters became further enhanced at 28/0912 UTC when an IP
+shock passage was observed at the ACE satellite, likely the flanking
+influence from the 24 Jun CME. Total field increased from 11 nT to 20 nT
+with a corresponding increase in solar wind speed from 323 km/s to 371
+km/s. Total field further increased to 30 nT with solar wind speed
+reaching 423 km/s. The Bz component deflected further south to near -24
+nT. Phi angle was mostly negative.
+
+.Forecast...
+Solar wind parameters are expected to continue to be enhanced through 29
+Jun due as CME effects persist. A slow return to nominal levels is
+expected on 30 Jun.
+
+Geospace
+
+.24 hr Summary...
+The geomagnetic field was at quiet to G2 (Moderate) storming due to CME
+effects.
+
+.Forecast...
+Unsettled to G2 (Moderate) storming is expected on 28 Jun with G1
+(Minor) storming likely to continue through early on 29 Jun due to
+persistent effects from the 24 Jun CME. Quiet to unsettled conditions
+are expected on 30 Jun as CME effects diminish.
