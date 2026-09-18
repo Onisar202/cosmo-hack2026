@@ -14,19 +14,35 @@ production-шлюз наподобие ``src/sources/swpc.py::fetch_and_store``
 (``tests/fixtures/sources/archive/``, см. README этой папки о происхождении):
 
 - **NASA CCMC DONKI** — уведомления, каждое несёт ``messageIssueTime``.
-  Основная линия строгого replay: архив покрывает весь обязательный период.
+  Основная линия строгого replay: уведомления с проверяемым временем
+  публикации выходят на протяжении всего обязательного периода без
+  многонедельного молчания (карта — docs/method.md §3). **Важная
+  оговорка** (round 1 ревью PR #18): это доказывает, что событийные
+  предупреждения этого источника пригодны для строгого replay, а НЕ то,
+  что DONKI — непрерывный периодический прогнозный продукт с явным
+  горизонтом действия наподобие SWPC Forecast Discussion ниже. День без
+  уведомлений — это «в этот день не было события выше порога», а не «нет
+  данных о состоянии на этот день»; карта наличия здесь про присутствие
+  публикаций, не про непрерывное покрытие прогнозного горизонта.
 - **NOAA SWPC Forecast Discussion** (архив NCEI) — время публикации берётся
   из строки ``:Issued:`` внутри тела бюллетеня, а не из имени файла или
   времени запроса. Дополнительная линия: в архиве есть подтверждённый
   пробел 15.05–16.06.2024 (нет ни одного выпуска), который зонд обязан
-  показать, а не скрыть (main-prompt.md §2, §5).
+  показать, а не скрыть (main-prompt.md §2, §5) — DONKI выше не
+  «компенсирует» этот пробел как замена периодического продукта, только
+  даёт независимую эпизодическую линию предупреждений на то же время.
 
 Обе линии нормализуются в ``RecordInput`` (``src/store/records.py``) и
 пригодны для реальной вставки в хранилище тем же путём, что и любой другой
 источник — ``select_as_of`` уже реализует и уже протестирован
 (``tests/store/test_as_of.py``) на правиле «``published_at <= as_of`` и
 ``replay_eligible``»; этот модуль не переизобретает это правило, а только
-поставляет ему корректно нормализованные записи.
+поставляет ему корректно нормализованные записи. Обе линии сознательно
+консервативны в том, чего не утверждают: время события (DONKI) и интервал
+действия (оба источника) там, где их нельзя надёжно извлечь из
+структурированных полей без разбора свободного текста, не подставляются
+временем публикации — см. docstring ``donki_notification_to_record_input``
+и ``swpc_forecast_discussion_to_record_input``.
 """
 
 from __future__ import annotations
@@ -64,13 +80,38 @@ class ArchiveFormatError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+_ISSUE_TIME_TOLERANCE_SECONDS = 90.0
+_MESSAGE_ISSUE_DATE_RE = re.compile(r"Message Issue Date:\s*(?P<value>\S+)")
+_ACTIVITY_ID_RE = re.compile(
+    r"Activity ID:\s*(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})-[A-Za-z]+-\d+"
+)
+_REPORT_COVERAGE_BEGIN_RE = re.compile(r"Report Coverage Begin Date:\s*(?P<value>\S+)")
+_REPORT_COVERAGE_END_RE = re.compile(r"Report Coverage End Date:\s*(?P<value>\S+)")
+
+
 @dataclass(frozen=True)
 class DonkiNotification:
-    """Одно нормализованное уведомление DONKI."""
+    """Одно нормализованное уведомление DONKI.
+
+    ``reported_issue_time`` — поле верхнего уровня ``messageIssueTime``
+    (минутная точность), присутствует всегда. ``resolved_issue_time`` —
+    время публикации, пригодное для ``published_at``: секундная точность из
+    ``messageBody`` («## Message Issue Date:»), если она согласуется с
+    ``reported_issue_time`` в пределах округления; ``None``, если два
+    независимых указания времени у одного и того же уведомления расходятся
+    существенно (реальный случай — round 1 ревью PR #18: у
+    ``20240516-7D-001`` верхнее поле даёт ``03:44Z``, тело — ``17:40:05Z``,
+    расхождение ~14 часов). В этом случае мы не гадаем, какое из двух верно —
+    ``published_at`` становится ``None`` (main-prompt.md §1: неизвестное
+    время публикации — «непригодно», не «вероятно было доступно»),
+    что стандартным правилом хранилища (``src/store/records.py``) даёт
+    ``replay_eligible=False``, не отбрасывая уведомление целиком.
+    """
 
     message_id: str
     message_type: str
-    issue_time: datetime  # UTC-aware
+    reported_issue_time: datetime  # UTC-aware, всегда есть — только для карты наличия/пробелов
+    resolved_issue_time: datetime | None  # UTC-aware либо None — для published_at
     url: str
     raw_entry: dict[str, Any]
 
@@ -103,14 +144,17 @@ def parse_donki_notifications(raw_bytes: bytes) -> list[DonkiNotification]:
             message_type = str(entry["messageType"])
             issue_raw = str(entry["messageIssueTime"])
             url = str(entry["messageURL"])
+            body = str(entry["messageBody"])
         except KeyError as exc:
             raise ArchiveFormatError(f"entry #{index} is missing field {exc}") from exc
-        issue_time = _parse_donki_issue_time(issue_raw, index=index)
+        reported = _parse_donki_issue_time(issue_raw, index=index)
+        resolved = _resolve_donki_issue_time(reported, body, index=index)
         notifications.append(
             DonkiNotification(
                 message_id=message_id,
                 message_type=message_type,
-                issue_time=issue_time,
+                reported_issue_time=reported,
+                resolved_issue_time=resolved,
                 url=url,
                 raw_entry=entry,
             )
@@ -119,31 +163,87 @@ def parse_donki_notifications(raw_bytes: bytes) -> list[DonkiNotification]:
 
 
 def _parse_donki_issue_time(raw: str, *, index: int) -> datetime:
-    """Разбирает ``messageIssueTime`` (ISO 8601, обычно с точностью до минуты).
-
-    Наблюдение на реальных фикстурах (tests/fixtures/sources/archive/README.md):
-    это поле округлено до минуты, тогда как то же время внутри
-    ``messageBody`` (строка ``## Message Issue Date:``) несёт секунды. Здесь
-    используется поле верхнего уровня как задокументированное машиночитаемое
-    время публикации — разбор текста тела письма для секундной точности не
-    требуется правилу ``published_at <= as_of`` (минутной точности достаточно
-    для отсечения по часу-минуте, которого требует §11) и это ограничение
-    явно фиксируется, а не скрывается.
-    """
+    """Разбирает время в форме DONKI (ISO 8601, ``Z`` или явное смещение)."""
     text = raw.strip()
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError as exc:
-        raise ArchiveFormatError(
-            f"entry #{index} has an unparseable messageIssueTime: {raw!r}"
-        ) from exc
+        raise ArchiveFormatError(f"entry #{index} has an unparseable timestamp: {raw!r}") from exc
     if parsed.tzinfo is None:
-        raise ArchiveFormatError(
-            f"entry #{index} messageIssueTime has no UTC offset: {raw!r}"
-        )
+        raise ArchiveFormatError(f"entry #{index} timestamp has no UTC offset: {raw!r}")
     return parsed.astimezone(UTC)
+
+
+def _resolve_donki_issue_time(
+    reported: datetime, body: str, *, index: int
+) -> datetime | None:
+    """Сверяет ``messageIssueTime`` с независимым «## Message Issue Date:» в теле.
+
+    Оба поля документируют одно и то же событие (выпуск уведомления) у
+    одного и того же поставщика — по построению они обязаны совпадать (с
+    точностью до округления верхнего поля до минуты, README фикстур).
+    Реальное расхождение — не более точная версия того же момента, а
+    признак того, что как минимум одно из двух полей не отражает
+    действительный момент выпуска; в этом случае используется вторая,
+    более строгая часть правила main-prompt.md §1 — неизвестно, какое
+    время верно, значит время публикации неизвестно целиком.
+    """
+    match = _MESSAGE_ISSUE_DATE_RE.search(body)
+    if match is None:
+        # Тело не содержит второго независимого указания — сверять не с чем,
+        # доверяем единственному документированному полю как есть.
+        return reported
+    body_time = _parse_donki_issue_time(match.group("value"), index=index)
+    if abs((body_time - reported).total_seconds()) <= _ISSUE_TIME_TOLERANCE_SECONDS:
+        return body_time  # согласуются — берём более точную (секунды) версию
+    return None
+
+
+def _extract_donki_event_window(
+    message_body: str,
+) -> tuple[datetime, datetime, datetime] | None:
+    """Извлекает ``(observed_at, valid_from, valid_to)`` из структурированных
+    полей тела уведомления — НЕ из времени публикации (round 1 ревью PR #18:
+    подмена ``observed_at`` временем выпуска смешивает два из четырёх разных
+    времён, main-prompt.md §1).
+
+    Поддержаны два структурированных, задокументированно стабильных поля
+    (не свободная проза, а machine-написанные строки того же вида, что и
+    ``## Message Issue Date:``):
+
+    - ``Activity ID: <ISO-момент>-<ТИП>-<NNN>`` — точечное событие
+      (CME/GST/IPS/MPC/RBE/SEP и часть FLR); ``observed_at`` =
+      ``valid_from`` = ``valid_to`` = этот момент.
+    - ``Report Coverage Begin/End Date:`` (тип ``Report`` — еженедельная
+      сводка) — интервал, а не точка; ``valid_from``/``valid_to`` = границы
+      покрытия, ``observed_at`` = начало (последний момент, к которому
+      привязано содержимое, доступен только как конец окна — берём начало
+      как более консервативную, точно измеренную границу).
+
+    Остальные формулировки (например «Flare M5.0 crossing time: …» без
+    ``Activity ID`` — часть уведомлений типа FLR) не покрыты: извлечение
+    произвольной формулировки под каждый вариант уведомления — это уже
+    интерпретация содержания, а не получение (main-prompt.md §8), и остаётся
+    зоне 3. ``None`` здесь означает «этот зонд пока не умеет опознать
+    времена события в этом уведомлении» — вызывающая сторона обязана не
+    строить для него ``RecordInput``, а не подставлять время публикации как
+    заглушку.
+    """
+    activity_match = _ACTIVITY_ID_RE.search(message_body)
+    if activity_match is not None:
+        moment = _parse_donki_issue_time(activity_match.group("ts") + "Z", index=-1)
+        return moment, moment, moment
+
+    begin_match = _REPORT_COVERAGE_BEGIN_RE.search(message_body)
+    end_match = _REPORT_COVERAGE_END_RE.search(message_body)
+    if begin_match is not None and end_match is not None:
+        begin = _parse_donki_issue_time(begin_match.group("value"), index=-1)
+        end = _parse_donki_issue_time(end_match.group("value"), index=-1)
+        return begin, begin, end
+
+    return None
 
 
 def _canonical_entry_bytes(entry: dict[str, Any]) -> bytes:
@@ -153,40 +253,58 @@ def _canonical_entry_bytes(entry: dict[str, Any]) -> bytes:
 
 def donki_notification_to_record_input(
     notification: DonkiNotification, *, source_url: str, fetched_at: datetime
-) -> RecordInput:
-    """Нормализует уведомление DONKI в :class:`RecordInput`.
+) -> RecordInput | None:
+    """Нормализует уведомление DONKI в :class:`RecordInput`, либо ``None``.
+
+    ``None`` — этот зонд не смог извлечь настоящее время события
+    (:func:`_extract_donki_event_window`) для данного уведомления: честнее
+    не производить запись вовсе (main-prompt.md §8 «получение не считает
+    физику», round 1 ревью PR #18), чем подставить время публикации как
+    заглушку под ``observed_at``/``valid_from``/``valid_to``. На реальном
+    архиве это ~18% уведомлений (часть типа FLR без структурированного
+    ``Activity ID``) — задокументировано в docs/method.md §6.
 
     ``record_kind = "warning"``: уведомление DONKI — предупреждение о
     зафиксированном или ожидаемом явлении, а не первичное измерение и не
     отдельный количественный прогноз команды (.ai/main-prompt.md §4).
-    Точная классификация по ``messageType`` (наблюдение события vs. прогноз
-    его воздействия) — работа зоны 3 при интерпретации, не этого зонда
-    (.ai/main-prompt.md §8 «получение не считает физику»).
 
-    ``observed_at``/``valid_from``/``valid_to`` намеренно равны времени
-    публикации: извлечение фактического времени события требует разбора
-    свободного текста ``messageBody`` по каждому ``messageType`` отдельно
-    (даты внутри тела не структурированы одинаково для CME/FLR/GST/…) — это
-    явно вне объёма зонда пригодности и зафиксировано как ограничение
-    (docs/method.md), а не подменено правдоподобным, но не разобранным
-    значением.
+    ``published_at = notification.resolved_issue_time`` — может быть
+    ``None``, когда верхнее поле и тело письма расходятся (см. docstring
+    :class:`DonkiNotification`); тогда запись сохраняется (для
+    ``current``/``historical_analysis``), но не участвует в строгом
+    ``historical_forecast`` (``replay_eligible=False`` по стандартному
+    правилу ``src/store/records.py``).
 
-    ``source_version`` — время публикации в фиксированном формате: у DONKI
-    нет ``ETag``/``Last-Modified`` (подтверждено по реальным ответам, см.
-    README фикстур), а ``messageID`` уже уникален и неизменяем у поставщика,
-    так что версия нужна лишь как непустая метка одной публикации, не как
-    инструмент разрешения дублей.
+    ``quality = "reconstructed"``: ``observed_at``/``valid_from``/
+    ``valid_to`` извлечены из вспомогательного структурированного поля тела
+    (``Activity ID``/``Report Coverage …``), а не измерены этим источником
+    напрямую — квалификация по смыслу главы .ai/backend-prompt.md
+    (`quality` enum, contracts/record.schema.json).
+
+    ``source_version`` — время публикации по верхнему полю в фиксированном
+    формате: у DONKI нет ``ETag``/``Last-Modified`` (подтверждено по
+    реальным ответам, README фикстур), а ``messageID`` уже уникален и
+    неизменяем у поставщика, так что версия нужна лишь как непустая метка
+    одной публикации, не как инструмент разрешения дублей. Использование
+    ``reported_issue_time`` (а не ``resolved_issue_time``, который может
+    быть ``None``) гарантирует непустую версию даже для расходящихся
+    записей.
     """
-    source_version = notification.issue_time.strftime("%Y%m%dT%H%M%SZ")
+    window = _extract_donki_event_window(notification.raw_entry.get("messageBody", ""))
+    if window is None:
+        return None
+    observed_at, valid_from, valid_to = window
+
+    source_version = notification.reported_issue_time.strftime("%Y%m%dT%H%M%SZ")
     return RecordInput(
         provider_record_id=notification.message_id,
         source_id=DONKI_SOURCE_ID,
         source_url=source_url,
         record_kind="warning",
-        observed_at=notification.issue_time,
-        valid_from=notification.issue_time,
-        valid_to=notification.issue_time,
-        published_at=notification.issue_time,
+        observed_at=observed_at,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        published_at=notification.resolved_issue_time,
         fetched_at=fetched_at,
         value=None,
         unit=None,
@@ -196,7 +314,7 @@ def donki_notification_to_record_input(
             "message_url": notification.url,
         },
         source_version=source_version,
-        quality="nominal",
+        quality="reconstructed",
         raw_bytes=_canonical_entry_bytes(notification.raw_entry),
     )
 
@@ -285,6 +403,24 @@ def swpc_forecast_discussion_to_record_input(
 ) -> RecordInput:
     """Нормализует выпуск Forecast Discussion в :class:`RecordInput`.
 
+    ``observed_at``/``valid_from``/``valid_to`` — все равны моменту выпуска
+    (точка, не интервал). Реальный текст бюллетеня описывает и прошедшие 24
+    часа («.24 hr Summary...»), и будущий период по каждой из четырёх тем
+    («.Forecast...») отдельными фразами с разными датами на каждую секцию
+    (например «over 10-12 May» для одной темы и «through much of 10 May» для
+    другой в одном и том же выпуске) — единого машиночитаемого интервала
+    действия у бюллетеня нет. Прежняя версия (round 1 ревью PR #18)
+    подставляла ``valid_to = issued_at + 12 часов`` — придуманное число, не
+    соответствующее реальному горизонту бюллетеня (2-3 суток по факту).
+    Вместо второго придуманного числа — точка: запись честно утверждает
+    только момент выпуска, не берётся утверждать конкретный интервал
+    действия. Извлечение реального интервала по каждой из четырёх тем
+    отдельно — разбор свободного текста, то есть интерпретация содержания,
+    а не получение (main-prompt.md §8); остаётся зоне 3.
+
+    ``quality = "reconstructed"``: по той же причине — интервал не измерен
+    источником, а упрощён до точки этим зондом.
+
     ``source_version`` — сам ``:Issued:`` в фиксированном формате: архив не
     хранит повторных версий одного слота (README фикстур), у продукта нет
     отдельного номера ревизии.
@@ -297,14 +433,14 @@ def swpc_forecast_discussion_to_record_input(
         record_kind="forecast",
         observed_at=discussion.issued_at,
         valid_from=discussion.issued_at,
-        valid_to=discussion.issued_at + timedelta(hours=12),
+        valid_to=discussion.issued_at,
         published_at=discussion.issued_at,
         fetched_at=fetched_at,
         value=None,
         unit=None,
         spatial_context={"provider": "NOAA SWPC", "product": discussion.product},
         source_version=source_version,
-        quality="nominal",
+        quality="reconstructed",
         raw_bytes=discussion.raw_text.encode("utf-8"),
     )
 
@@ -403,6 +539,16 @@ def build_coverage_report(
     Публикация вне окна не учитывается и не расширяет окно молча — окно
     задаётся вызывающей стороной явно (обязательный период 01.05–30.06.2024,
     main-prompt.md §11), а не выводится из данных.
+
+    **Что доказывает ненулевой день, а что нет** (round 1 ревью PR #18): для
+    событийного источника (DONKI) ненулевой день означает только «в этот
+    день что-то опубликовано», не «на этот день есть непрерывный прогноз с
+    явным горизонтом действия» — эти два источника коротают разные вещи, и
+    нулевой день у DONKI не обязательно означает «спокойно», он может
+    означать «порог не пересечён и не было других уведомлений». Для
+    периодического продукта (SWPC Forecast Discussion) ненулевой день
+    сильнее: там сам факт выпуска слота структурно подразумевает продукт с
+    объявленным (хоть и не машиночитаемым в этой версии) горизонтом.
     """
     if window_end < window_start:
         raise ValueError("window_end must not be before window_start")

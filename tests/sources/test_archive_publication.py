@@ -81,8 +81,61 @@ def test_donki_archive_covers_the_whole_mandatory_period_with_245_notifications(
 
 def test_donki_notification_issue_times_are_utc_aware() -> None:
     for notification in _load_all_donki_notifications():
-        assert notification.issue_time.tzinfo is not None
-        assert notification.issue_time.utcoffset().total_seconds() == 0
+        assert notification.reported_issue_time.tzinfo is not None
+        assert notification.reported_issue_time.utcoffset().total_seconds() == 0
+        if notification.resolved_issue_time is not None:
+            assert notification.resolved_issue_time.tzinfo is not None
+            assert notification.resolved_issue_time.utcoffset().total_seconds() == 0
+
+
+def test_donki_resolved_issue_time_matches_reported_for_almost_all_notifications() -> None:
+    """Round 1 ревью PR #18: 244 из 245 реальных уведомлений имеют
+    согласованные ``messageIssueTime`` и тело («## Message Issue Date:») в
+    пределах округления до минуты; единственное реальное расхождение —
+    `20240516-7D-001` (см. отдельный тест ниже) — обязано остаться
+    единственным."""
+    notifications = _load_all_donki_notifications()
+    unresolved = [n for n in notifications if n.resolved_issue_time is None]
+    assert [n.message_id for n in unresolved] == ["20240516-7D-001"]
+
+
+def test_donki_conflicting_issue_time_fields_are_not_silently_trusted(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    """Реальный случай (round 1 ревью PR #18): `20240516-7D-001` — верхнее
+    поле `messageIssueTime` даёт `2024-05-16T03:44Z`, тело письма («##
+    Message Issue Date:») — `2024-05-16T17:40:05Z`, расхождение ~14 часов.
+    Нельзя угадывать, какое из двух верно — published_at обязан стать
+    неизвестным (main-prompt.md §1), а не одним из двух правдоподобных, но
+    непроверяемых кандидатов."""
+    raw = (ARCHIVE_DIR / "donki_2024-05-16_2024-05-31.json").read_bytes()
+    notifications = parse_donki_notifications(raw)
+    by_id = {n.message_id: n for n in notifications}
+    notification = by_id["20240516-7D-001"]
+
+    assert notification.reported_issue_time == datetime(2024, 5, 16, 3, 44, tzinfo=UTC)
+    assert notification.resolved_issue_time is None
+
+    record_input = donki_notification_to_record_input(
+        notification,
+        source_url="https://api.nasa.gov/DONKI/notifications",
+        fetched_at=datetime(2026, 9, 18, 23, 3, 15, tzinfo=UTC),
+    )
+    assert record_input is not None  # Report Coverage Begin/End Date даёт настоящий observed_at
+    assert record_input.published_at is None
+    insert_record(db_conn, raw_store, record_input)
+
+    # Ни отсечение сразу после верхнего поля, ни отсечение сразу после тела,
+    # ни отсечение спустя годы не должны дать эту запись строгому replay —
+    # published_at=None делает её непригодной навсегда (src/store/records.py),
+    # а не «доступной с такого-то момента».
+    for as_of in (
+        datetime(2024, 5, 16, 4, 0, tzinfo=UTC),
+        datetime(2024, 5, 16, 18, 0, tzinfo=UTC),
+        datetime(2026, 1, 1, tzinfo=UTC),
+    ):
+        eligible = select_as_of(db_conn, as_of, source_id=DONKI_SOURCE_ID)
+        assert not any(row["provider_record_id"] == "20240516-7D-001" for row in eligible)
 
 
 def test_donki_parser_rejects_missing_required_field() -> None:
@@ -129,6 +182,7 @@ def test_late_update_notification_is_excluded_by_as_of(
             source_url="https://api.nasa.gov/DONKI/notifications",
             fetched_at=fetched_at,
         )
+        assert record_input is not None, f"{message_id} has an Activity ID and must convert"
         insert_record(db_conn, raw_store, record_input)
 
     as_of = datetime(2024, 5, 11, 12, 0, tzinfo=UTC)
@@ -156,11 +210,98 @@ def test_earlier_as_of_excludes_both_notifications(
             source_url="https://api.nasa.gov/DONKI/notifications",
             fetched_at=fetched_at,
         )
+        assert record_input is not None
         insert_record(db_conn, raw_store, record_input)
 
     as_of = datetime(2024, 5, 11, 0, 0, tzinfo=UTC)
     eligible = select_as_of(db_conn, as_of, source_id=DONKI_SOURCE_ID)
     assert eligible == []
+
+
+# ---------------------------------------------------------------------------
+# Извлечение настоящего времени события, а не подмена временем публикации
+# (main-prompt.md §1: «четыре времени различаются»).
+# ---------------------------------------------------------------------------
+
+
+def test_donki_record_observed_at_is_the_activity_time_not_the_publish_time() -> None:
+    """AL-009 опубликован в 04:50:13Z, но описывает CME с Activity ID
+    `2024-05-11T01:36:00-CME-001` — начавшийся более чем тремя часами раньше.
+    ``observed_at`` обязан быть временем активности, не временем выпуска."""
+    raw = (ARCHIVE_DIR / "donki_2024-05-01_2024-05-15.json").read_bytes()
+    notifications = parse_donki_notifications(raw)
+    by_id = {n.message_id: n for n in notifications}
+    notification = by_id["20240511-AL-009"]
+
+    record_input = donki_notification_to_record_input(
+        notification,
+        source_url="https://api.nasa.gov/DONKI/notifications",
+        fetched_at=datetime(2026, 9, 18, 23, 3, 15, tzinfo=UTC),
+    )
+    assert record_input is not None
+    activity_time = datetime(2024, 5, 11, 1, 36, 0, tzinfo=UTC)
+    assert record_input.observed_at == activity_time
+    assert record_input.valid_from == activity_time
+    assert record_input.valid_to == activity_time
+    assert record_input.observed_at != record_input.published_at
+    assert record_input.quality == "reconstructed"
+
+
+def test_donki_notification_without_extractable_event_time_yields_no_record_input() -> None:
+    """Часть уведомлений FLR не содержит структурированного `Activity ID`
+    (главная тема ревью round 1, PR #18: не подставлять время публикации
+    заглушкой) — для них зонд обязан вернуть ``None``, не запись с
+    придуманным ``observed_at``."""
+    raw = (ARCHIVE_DIR / "donki_2024-05-01_2024-05-15.json").read_bytes()
+    notifications = parse_donki_notifications(raw)
+    by_id = {n.message_id: n for n in notifications}
+    notification = by_id["20240515-AL-006"]  # "Flare M5.0 crossing time: …", без Activity ID
+    assert "Activity ID" not in notification.raw_entry["messageBody"]
+
+    record_input = donki_notification_to_record_input(
+        notification,
+        source_url="https://api.nasa.gov/DONKI/notifications",
+        fetched_at=datetime(2026, 9, 18, 23, 3, 15, tzinfo=UTC),
+    )
+    assert record_input is None
+
+
+def test_donki_report_notification_uses_coverage_window_not_a_point() -> None:
+    """Тип `Report` (еженедельная сводка) несёт `Report Coverage Begin/End
+    Date` — интервал, а не точку; ``valid_from``/``valid_to`` обязаны его
+    отражать, не схлопываться в момент публикации."""
+    raw = (ARCHIVE_DIR / "donki_2024-05-16_2024-05-31.json").read_bytes()
+    notifications = parse_donki_notifications(raw)
+    by_id = {n.message_id: n for n in notifications}
+    notification = by_id["20240516-7D-001"]
+
+    record_input = donki_notification_to_record_input(
+        notification,
+        source_url="https://api.nasa.gov/DONKI/notifications",
+        fetched_at=datetime(2026, 9, 18, 23, 3, 15, tzinfo=UTC),
+    )
+    assert record_input is not None
+    assert record_input.valid_from == datetime(2024, 5, 8, 0, 0, tzinfo=UTC)
+    assert record_input.valid_to == datetime(2024, 5, 14, 23, 59, tzinfo=UTC)
+    assert record_input.valid_from < record_input.valid_to
+
+
+def test_swpc_record_input_no_longer_fabricates_a_forecast_horizon() -> None:
+    """Round 1 ревью PR #18: прежняя версия задавала ``valid_to = issued_at
+    + 12 часов`` — число, не подтверждённое содержимым бюллетеня (реальный
+    горизонт — 2-3 суток, main-prompt.md §11). Запись обязана утверждать
+    только точку (момент выпуска), не придуманный интервал."""
+    raw = (ARCHIVE_DIR / "swpc_forecast_discussion_20240510_0030.txt").read_bytes()
+    discussion = parse_swpc_forecast_discussion(raw)
+    record_input = swpc_forecast_discussion_to_record_input(
+        discussion,
+        source_url="https://www.ngdc.noaa.gov/x",
+        fetched_at=datetime(2026, 9, 18, 23, 6, 8, tzinfo=UTC),
+    )
+    assert record_input.observed_at == discussion.issued_at
+    assert record_input.valid_from == discussion.issued_at
+    assert record_input.valid_to == discussion.issued_at
+    assert record_input.quality == "reconstructed"
 
 
 # ---------------------------------------------------------------------------
@@ -256,17 +397,20 @@ def test_coverage_report_flags_the_documented_swpc_gap() -> None:
     assert report.daily_counts[date(2024, 6, 20)] > 0
 
 
-def test_coverage_report_shows_donki_covers_the_whole_period_without_a_multi_week_gap() -> None:
-    """DONKI — основная линия §11: в отличие от SWPC, здесь не должно быть
-    сравнимого многонедельного провала. Отдельные дни без уведомлений —
-    штатное дело (не каждый день есть событие), поэтому проверяется
-    отсутствие *длинных* провалов, а не полное отсутствие нулевых дней."""
-    issue_times = [n.issue_time for n in _load_all_donki_notifications()]
+def test_coverage_report_shows_donki_notification_activity_has_no_multi_week_silence() -> None:
+    """DONKI — основная линия §11: в отличие от SWPC, здесь нет сравнимого
+    многонедельного молчания. Это НЕ значит «весь период покрыт прогнозом» —
+    день без уведомлений может означать «порог не пересечён», а не
+    «состояние подтверждено спокойным» (round 1 ревью PR #18, см. docstring
+    build_coverage_report). Проверяется только отсутствие *длинных*
+    провалов активности, а не полное отсутствие нулевых дней и не
+    заменяемость периодического прогноза SWPC."""
+    issue_times = [n.reported_issue_time for n in _load_all_donki_notifications()]
     report = build_coverage_report(
         issue_times, window_start=date(2024, 5, 1), window_end=date(2024, 6, 30)
     )
     longest_gap = max((gap.length_days for gap in report.gap_runs), default=0)
-    assert longest_gap < 7, f"unexpectedly long DONKI gap: {report.gap_runs}"
+    assert longest_gap < 7, f"unexpectedly long DONKI silence: {report.gap_runs}"
 
 
 def test_coverage_report_rejects_inverted_window() -> None:
