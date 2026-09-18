@@ -7,10 +7,11 @@
 
 Этап FN-19 сдал каркас: слоистую структуру Python/FastAPI сервиса,
 health-проверку и воспроизводимые проверки качества кода. FN-20 добавил
-контракты (`contracts/`). FN-21 добавляет неизменяемое хранилище оригиналов,
-версий записей источников и результатов расчёта (`src/store/`). Расчётных
-эндпоинтов и коннекторов источников ещё нет — они появятся вместе с
-последующими задачами.
+контракты (`contracts/`). FN-21 добавил неизменяемое хранилище оригиналов,
+версий записей источников и результатов расчёта (`src/store/`). FN-22
+добавляет первый реальный коннектор источника — NOAA SWPC, поток протонов
+>=10 МэВ (`src/sources/`) — и реестр источников `sources.yaml`. Расчётных
+эндпоинтов ещё нет — они появятся вместе с последующими задачами.
 
 ## Стек
 
@@ -73,9 +74,45 @@ $ uv run ruff check .
 All checks passed!
 
 $ uv run mypy src
-Success: no issues found in 16 source files
+Success: no issues found in 19 source files
 
 $ uv run pytest -v
+tests/sources/test_swpc.py::test_parse_response_filters_to_target_energy_channel PASSED
+tests/sources/test_swpc.py::test_parse_response_keeps_plausible_flux_value PASSED
+tests/sources/test_swpc.py::test_parse_response_maps_negative_sentinel_to_none_not_zero PASSED
+tests/sources/test_swpc.py::test_parse_response_flags_yaw_flip_period_as_degraded PASSED
+tests/sources/test_swpc.py::test_parse_response_rejects_empty_array PASSED
+tests/sources/test_swpc.py::test_parse_response_rejects_empty_body PASSED
+tests/sources/test_swpc.py::test_parse_response_rejects_non_json_body PASSED
+tests/sources/test_swpc.py::test_parse_response_rejects_missing_target_channel PASSED
+tests/sources/test_swpc.py::test_parse_response_rejects_non_list_payload PASSED
+tests/sources/test_swpc.py::test_parse_response_accepts_time_tag_without_z_suffix_as_utc PASSED
+tests/sources/test_swpc.py::test_to_record_input_has_no_published_at_and_is_not_replay_eligible PASSED
+tests/sources/test_swpc.py::test_to_record_input_missing_value_has_no_unit PASSED
+tests/sources/test_swpc.py::test_to_record_input_degraded_quality_for_yaw_flip PASSED
+tests/sources/test_swpc.py::test_content_derived_source_version_allows_later_correction_as_new_row PASSED
+tests/sources/test_swpc.py::test_repeated_fetch_of_same_value_is_idempotent PASSED
+tests/sources/test_swpc.py::test_http_fetch_retries_transient_5xx_then_succeeds PASSED
+tests/sources/test_swpc.py::test_http_fetch_gives_up_after_max_retries PASSED
+tests/sources/test_swpc.py::test_http_fetch_429_is_not_retried_and_raises_quota_error PASSED
+tests/sources/test_swpc.py::test_http_fetch_timeout_after_retries_raises_timeout_error PASSED
+tests/sources/test_swpc.py::test_http_fetch_does_not_retry_permanent_4xx PASSED
+tests/sources/test_swpc.py::test_fetch_and_store_success_stores_records_and_updates_status PASSED
+tests/sources/test_swpc.py::test_fetch_and_store_skips_network_within_ttl_then_refreshes_after PASSED
+tests/sources/test_swpc.py::test_fetch_and_store_force_bypasses_ttl PASSED
+tests/sources/test_swpc.py::test_fetch_and_store_frozen_never_touches_network_even_when_forced PASSED
+tests/sources/test_swpc.py::test_fetch_and_store_disabled_source_never_touches_network PASSED
+tests/sources/test_swpc.py::test_fetch_and_store_quota_429_gives_explicit_status_not_a_favorable_one PASSED
+tests/sources/test_swpc.py::test_fetch_and_store_timeout_gives_explicit_status PASSED
+tests/sources/test_swpc.py::test_fetch_and_store_unexpected_format_gives_explicit_status_not_favorable PASSED
+tests/sources/test_swpc.py::test_fetch_and_store_error_preserved_after_later_recovery PASSED
+tests/sources/test_swpc.py::test_staleness_seconds_is_none_without_any_success PASSED
+tests/sources/test_swpc.py::test_never_succeeded_source_counts_as_critically_stale PASSED
+tests/sources/test_swpc.py::test_is_critically_stale_true_past_threshold_false_before PASSED
+tests/sources/test_swpc.py::test_effective_status_disabled_config_forces_frozen_true PASSED
+tests/sources/test_swpc.py::test_load_source_config_reads_real_sources_yaml PASSED
+tests/sources/test_swpc.py::test_load_source_config_raises_for_unknown_source_id PASSED
+tests/sources/test_swpc.py::test_live_smoke SKIPPED (live-smoke: реальное обращение к сети, см. .ai/main-prompt.md §9 — не часть детерминированного набора)
 tests/store/test_as_of.py::test_publication_after_cutoff_is_excluded PASSED
 tests/store/test_as_of.py::test_records_without_published_at_never_selected PASSED
 tests/store/test_as_of.py::test_newer_publication_after_cutoff_does_not_leak_even_as_a_refinement PASSED
@@ -106,8 +143,13 @@ tests/test_health.py::test_health_returns_200_ok PASSED
 tests/test_health.py::test_health_time_is_utc_aware PASSED
 tests/test_health.py::test_settings_requires_app_env PASSED
 tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
-30 passed
+65 passed, 1 skipped
 ```
+
+`test_live_smoke` пропускается намеренно: детерминированные тесты парсера
+гоняются на сохранённых реальных ответах (`tests/fixtures/sources/swpc/`,
+см. её README про их происхождение), а не на живой сети
+(.ai/main-prompt.md §9 «тесты детерминированы, live-smoke отдельно»).
 
 ## Хранилище (`src/store/`)
 
@@ -161,10 +203,68 @@ tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
   (.ai/main-prompt.md §2–3). Условия лицензии конкретного источника
   (допустимость локального хранения оригинала, требования к атрибуции,
   ограничения на срок хранения) фиксируются в `sources.yaml` при добавлении
-  соответствующего коннектора (.ai/main-prompt.md §7) — на этом этапе
-  коннекторов ещё нет, поэтому реестр пуст; хранилище уже сейчас соблюдает
-  эту политику тем, что ничего не перезаписывает и не удаляет через
-  публичный интерфейс.
+  соответствующего коннектора (.ai/main-prompt.md §7). FN-22 заводит первую
+  запись реестра (`sources.yaml`, секция `space_weather`) — NOAA SWPC,
+  общественное достояние без ограничений на локальное хранение; хранилище
+  уже сейчас соблюдает эту политику тем, что ничего не перезаписывает и не
+  удаляет через публичный интерфейс.
+
+## Источники (`src/sources/`)
+
+Слой получения: коннекторы, парсеры, нормализация ответа источника в
+`RecordInput` для `src/store/` (.ai/main-prompt.md §8 — не интерпретирует
+данные и не считает физику). Первый и пока единственный коннектор —
+NOAA SWPC, интегральный поток протонов `>=10 МэВ` (Механизм 1
+«Радиационная обстановка», main-prompt.md §11).
+
+- **`src/sources/http.py`** — общий HTTP-клиент для всех коннекторов:
+  раздельные таймауты на соединение и на чтение, ограниченное число
+  повторов с экспоненциальной задержкой для временных ошибок (сеть/таймаут/
+  5xx), `429` обрабатывается отдельно и без немедленного повтора
+  (.ai/backend-prompt.md §3).
+- **`src/sources/swpc.py`** — коннектор и парсер продукта
+  `integral-protons-1-day` (первичный спутник GOES, канал `>=10 MeV`).
+  Продукт не несёт времени публикации — только время измерения
+  (`time_tag`) — поэтому `published_at` каждой записи всегда `null`, а
+  `replay_eligible` всегда `false`: это ожидаемо и явно допущено приёмкой
+  задачи («допускается отсутствие доказанной публикации текущего
+  измерения»). Строгий replay из прошлого по космопогоде реализуется
+  другой линией (архивные сводки NOAA SWPC/NCEI с явным Issued) — вне
+  объёма этой задачи.
+  - Пустой ответ, невалидный JSON, отсутствие ожидаемого канала энергии —
+    явная ошибка формата (`SwpcFormatError`), не пустой список (иначе
+    смена формата источника читалась бы как «нет активности»).
+  - Отрицательный/невалидный отсчёт потока (сентинел продукта) сохраняется
+    как `value=None`, а не отбрасывается и не заменяется нулём.
+  - `source_version` производится из содержания измерения (у продукта нет
+    собственной версии): повторная выборка того же значения — идемпотентна,
+    а переиздание того же `time_tag` с другим значением становится новой
+    записью рядом со старой, а не конфликтом дедупликации.
+  - `fetch_and_store(...)` — единый управляемый шлюз: TTL по конфигу
+    (`sources.yaml`) реализует периодический refresh без реального
+    сетевого вызова, пока последний успех не устарел; `force=True`
+    обходит TTL, но не обходит заморозку/отключение.
+- **`src/sources/status.py`** — статус источника как отдельная сущность
+  (`SourceStatus`: `last_success_at`, `last_error_at`,
+  `last_error_message`, `frozen`, `quota_limited` — форма совпадает с
+  `contracts/result.schema.json` → `source_status[*]`), плюс
+  `staleness_seconds`/`is_critically_stale` для решения «оценить
+  невозможно» на уровне домена (последующая задача).
+- **Отключение и заморозка источника** (main-prompt.md §5, §10;
+  .ai/backend-prompt.md §3) — два независимых, документированных здесь
+  переключателя, оба действуют без перезапуска сервиса:
+  - **заморозка** — оперативный переключатель в памяти
+    (`SourceStatusRegistry.freeze`/`.unfreeze`); не трогает уже сохранённые
+    записи, только останавливает новые обращения к источнику;
+  - **отключение** — статическая настройка `enabled: false` в записи
+    источника в `sources.yaml`, перечитывается заново при каждом обращении
+    (файл не кешируется), поэтому правка файла тоже действует без
+    перезапуска.
+  - Оба состояния снаружи видны через одно и то же поле контракта
+    `frozen` (`effective_status`) — контракт не различает причину.
+- **`sources.yaml`** — реестр: адрес, продукт, единицы, охват, лицензия,
+  таймауты, TTL периодического refresh и порог критического устаревания
+  для каждого источника (main-prompt.md §7 — конфигурация, а не код).
 
 ## Структура проекта
 
@@ -174,11 +274,13 @@ tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
 src/
 ├── api/        # FastAPI: тонкие роутеры, валидация — сейчас только /health
 ├── config.py   # Настройки из env, без секретов
-├── sources/    # Получение и нормализация (пока не реализовано)
+├── sources/    # Получение и нормализация — http.py/swpc.py/status.py (NOAA SWPC)
 ├── store/      # Хранение, версии, выборка по as_of — schema.py/records.py/results.py
 ├── domain/     # Расчёты: spaceweather, orbit, mmod, lighting, windows
 └── export/     # HTML и JSON из сохранённого результата (пока не реализовано)
+sources.yaml    # Реестр источников (main-prompt.md §7)
 tests/
+├── sources/    # test_swpc.py + fixtures/sources/swpc/ (сохранённые реальные ответы)
 ├── store/      # test_versions.py, test_as_of.py
 └── test_health.py
 ```
