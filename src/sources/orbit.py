@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -212,6 +213,16 @@ def parse_tle_response(raw_bytes: bytes, *, expected_norad_id: str = ISS_NORAD_I
     _validate_tle_line(line2, line_number=2)
 
     norad_id = line1[2:7].strip()
+    # Обе строки TLE несут номер спутника (колонки 3-7) независимо друг от
+    # друга; проверка одной только первой строки допустила бы пару "строка 1
+    # МКС + валидная по checksum строка 2 другого спутника" — орбита
+    # определяется параметрами строки 2, так что такая пара тихо считала бы
+    # чужую орбиту орбитой МКС (round 1 ревью PR #17).
+    norad_id_line2 = line2[2:7].strip()
+    if norad_id_line2 != norad_id:
+        raise CorruptedElementsError(
+            f"TLE line 1 and line 2 NORAD ids disagree: {norad_id!r} vs {norad_id_line2!r}"
+        )
     if norad_id != expected_norad_id:
         raise CorruptedElementsError(
             f"TLE NORAD id {norad_id!r} does not match expected {expected_norad_id!r}"
@@ -221,6 +232,23 @@ def parse_tle_response(raw_bytes: bytes, *, expected_norad_id: str = ISS_NORAD_I
     return ParsedTle(
         object_name=object_name, norad_id=norad_id, line1=line1, line2=line2, epoch=epoch
     )
+
+
+def _tle_content_fingerprint(line1: str, line2: str) -> str:
+    """Короткий отпечаток содержимого пары строк TLE.
+
+    Часть ``source_version`` наравне с эпохой: эпоха одна не идентифицирует
+    версию однозначно — поставщик может выпустить уточнённый набор
+    элементов (изменились параметры орбиты), не сдвинув эпоху. Без
+    отпечатка такое уточнение получило бы тот же дедуп-ключ
+    ``(source_id, provider_record_id, source_version)``, что и прежняя
+    запись, но с другим содержимым — хранилище (``src/store/records.py``)
+    отклонило бы его как ``DuplicateKeyConflictError`` вместо того, чтобы
+    сохранить рядом со старой версией (round 1 ревью PR #17). Один и тот же
+    набор элементов, полученный повторно, даёт тот же отпечаток и потому
+    остаётся идемпотентным дублем, как и требуется.
+    """
+    return hashlib.sha256(f"{line1}\n{line2}".encode("ascii")).hexdigest()[:12]
 
 
 def build_orbital_elements_record(
@@ -259,7 +287,10 @@ def build_orbital_elements_record(
         value={"raw": tle_text},
         unit=None,
         spatial_context=spatial_context,
-        source_version=parsed.epoch.isoformat(),
+        source_version=(
+            f"{parsed.epoch.isoformat()}:"
+            f"{_tle_content_fingerprint(parsed.line1, parsed.line2)}"
+        ),
         quality=quality,
         raw_bytes=raw_bytes,
         orbital_elements_meta={

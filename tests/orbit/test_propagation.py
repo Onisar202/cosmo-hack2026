@@ -170,6 +170,23 @@ def test_time_grid_requires_aware_start_and_positive_step() -> None:
         domain.time_grid(datetime(2024, 5, 10, tzinfo=UTC), hours=1, step_minutes=0)
 
 
+def test_time_grid_always_covers_the_full_window_when_step_does_not_divide_it() -> None:
+    """round 1 ревью PR #17: hours=1, step_minutes=40 раньше давал только
+    [00:00, 00:40] — последние 20 минут окна оставались без расчёта, что
+    могло скрыть максимальный уровень воздействия ближе к концу ВКД.
+    """
+    start = datetime(2024, 5, 10, 0, 0, tzinfo=UTC)
+    grid = domain.time_grid(start, hours=1, step_minutes=40)
+    assert grid == [start, start + timedelta(minutes=40), start + timedelta(hours=1)]
+    assert grid[-1] == start + timedelta(hours=1)
+
+
+def test_time_grid_covers_window_when_step_is_longer_than_the_window() -> None:
+    start = datetime(2024, 5, 10, 0, 0, tzinfo=UTC)
+    grid = domain.time_grid(start, hours=1, step_minutes=120)
+    assert grid == [start, start + timedelta(hours=1)]
+
+
 def test_elements_age_hours_and_reconstruction_flag() -> None:
     epoch = datetime(2024, 5, 10, 0, 0, tzinfo=UTC)
     fresh_as_of = epoch + timedelta(hours=2)
@@ -218,6 +235,22 @@ def test_parse_tle_response_rejects_unexpected_norad_id() -> None:
 def test_parse_tle_response_rejects_wrong_line_count() -> None:
     with pytest.raises(sources_orbit.CorruptedElementsError, match="2 or 3 non-empty lines"):
         sources_orbit.parse_tle_response(b"just one line\n")
+
+
+def test_parse_tle_response_rejects_mismatched_line1_line2_norad_id() -> None:
+    """round 1 ревью PR #17: строка 1 МКС (checksum валиден) + строка 2
+    другого спутника (тоже checksum-валидна, тот же satellite 5, что и в
+    vallado_sgp4_verification_sat5.tle) раньше молча принималась бы как МКС,
+    хотя орбита определяется параметрами строки 2, а не строки 1.
+    """
+    iss_line1 = (FIXTURES_DIR / "celestrak_iss_gp_sample.tle").read_text().splitlines()[1]
+    other_line2 = (
+        FIXTURES_DIR / "vallado_sgp4_verification_sat5.tle"
+    ).read_text().splitlines()[1]
+    mixed = f"{iss_line1}\n{other_line2}\n".encode()
+
+    with pytest.raises(sources_orbit.CorruptedElementsError, match="NORAD ids disagree"):
+        sources_orbit.parse_tle_response(mixed)
 
 
 # ---------------------------------------------------------------------------
@@ -382,3 +415,55 @@ def test_build_orbital_elements_record_is_never_replay_eligible(
     at = datetime(2024, 5, 10, 12, 0, tzinfo=UTC)
     age_hours = domain.elements_age_hours(parsed.epoch, at)
     assert age_hours > 0
+
+
+def test_refined_elements_at_the_same_epoch_get_a_new_version_not_a_conflict(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    """round 1 ревью PR #17: source_version раньше был равен только эпохе
+    TLE. Уточнённый поставщиком набор элементов с той же эпохой получал бы
+    тот же дедуп-ключ (source_id, provider_record_id, source_version), что и
+    прежняя запись, но другое содержимое — src/store/records.py отклонил бы
+    его как DuplicateKeyConflictError вместо того, чтобы сохранить рядом со
+    старой версией (.ai/backend-prompt.md §1 «поздние уточнения хранятся
+    рядом с прежними версиями»).
+    """
+    raw_bytes = (FIXTURES_DIR / "celestrak_iss_gp_sample.tle").read_bytes()
+    parsed = sources_orbit.parse_tle_response(raw_bytes)
+
+    # Меняем эксцентриситет (значимое поле орбиты), сохраняя эпоху и длину
+    # строки, и пересчитываем контрольную сумму — получаем валидный, но
+    # содержательно другой набор элементов той же эпохи.
+    refined_body = parsed.line2[:-1].replace("0005156", "0009999")
+    assert refined_body != parsed.line2[:-1]
+    refined_checksum = sources_orbit._tle_checksum(refined_body + "0")  # noqa: SLF001
+    refined_line2 = refined_body + str(refined_checksum)
+    assert len(refined_line2) == len(parsed.line2)
+
+    refined_parsed = sources_orbit.ParsedTle(
+        object_name=parsed.object_name,
+        norad_id=parsed.norad_id,
+        line1=parsed.line1,
+        line2=refined_line2,
+        epoch=parsed.epoch,  # та же эпоха, что и у исходного набора
+    )
+    refined_raw_bytes = f"{parsed.object_name}\n{parsed.line1}\n{refined_line2}\n".encode()
+
+    fetched_at = datetime(2024, 5, 10, 12, 0, tzinfo=UTC)
+    source_url = "https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=TLE"
+    original_record = sources_orbit.build_orbital_elements_record(
+        parsed, raw_bytes=raw_bytes, fetched_at=fetched_at, source_url=source_url
+    )
+    refined_record = sources_orbit.build_orbital_elements_record(
+        refined_parsed, raw_bytes=refined_raw_bytes, fetched_at=fetched_at, source_url=source_url
+    )
+
+    assert original_record.source_version != refined_record.source_version
+
+    original_id = insert_record(db_conn, raw_store, original_record)
+    # Не должно поднимать DuplicateKeyConflictError: разное содержимое той же
+    # эпохи обязано получить собственный record_id рядом со старым.
+    refined_id = insert_record(db_conn, raw_store, refined_record)
+
+    assert original_id != refined_id
+    assert get_record(db_conn, original_id)["value"] != get_record(db_conn, refined_id)["value"]

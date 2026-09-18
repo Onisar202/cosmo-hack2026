@@ -121,9 +121,17 @@ def time_grid(
     step = timedelta(minutes=step_minutes)
     end = start + timedelta(hours=hours)
     t = start
-    while t <= end:
+    while t < end:
         grid.append(t)
         t += step
+    # ``end`` — обязательная точка сетки, а не просто ещё один шаг: когда
+    # step_minutes не делит hours нацело (или шаг длиннее самого окна),
+    # цикл выше останавливается раньше границы окна и хвост интервала
+    # остаётся без расчёта, что может скрыть максимальный уровень
+    # воздействия ближе к концу ВКД (round 1 ревью PR #17). Каждый элемент
+    # grid всегда строго меньше end (условие цикла), так что это не может
+    # задвоить последнюю точку.
+    grid.append(end)
     return grid
 
 
