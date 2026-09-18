@@ -9,6 +9,7 @@
 
 from src.store.records import (
     ChecksumMismatchError,
+    DuplicateKeyConflictError,
     RawOriginalStore,
     RecordInput,
     get_original,
@@ -26,6 +27,7 @@ from src.store.schema import connect
 
 __all__ = [
     "ChecksumMismatchError",
+    "DuplicateKeyConflictError",
     "ManifestVerificationError",
     "RawOriginalStore",
     "RecordInput",

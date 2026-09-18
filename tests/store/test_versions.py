@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ import pytest
 
 from src.store import (
     ChecksumMismatchError,
+    DuplicateKeyConflictError,
     RawOriginalStore,
     connect,
     get_original,
@@ -53,7 +54,10 @@ def test_later_refinement_does_not_overwrite_old(
     assert original_v1 is not None
     assert original_v1["source_version"] == "1"
     assert v1.published_at is not None
-    assert original_v1["published_at"] == v1.published_at.isoformat()
+    stored_published_at = datetime.strptime(
+        original_v1["published_at"], "%Y-%m-%dT%H:%M:%S.%fZ"
+    ).replace(tzinfo=UTC)
+    assert stored_published_at == v1.published_at.astimezone(UTC)
 
     row_count = db_conn.execute("SELECT COUNT(*) FROM source_records").fetchone()[0]
     assert row_count == 2
@@ -252,3 +256,72 @@ def test_record_input_rejects_naive_datetime(
 
     with pytest.raises(ValueError):
         insert_record(db_conn, raw_store, naive_record)
+
+
+def test_record_input_rejects_empty_source_version(
+    raw_store: RawOriginalStore, db_conn: sqlite3.Connection
+) -> None:
+    """Пустая/неизвестная версия непригодна для replay так же, как
+    неизвестная публикация (.ai/main-prompt.md §1) — запись отклоняется
+    целиком, а не тихо сохраняется с replay_eligible = false (round 1 ревью)."""
+    empty_version = replace(make_record(), source_version="   ")
+
+    with pytest.raises(ValueError):
+        insert_record(db_conn, raw_store, empty_version)
+
+    assert db_conn.execute("SELECT COUNT(*) FROM source_records").fetchone()[0] == 0
+
+
+def test_duplicate_key_with_different_content_is_a_conflict_not_a_duplicate(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    """Совпадение (source_id, provider_record_id, source_version) само по
+    себе не значит «тот же дубль»: если оригинал отличается, это конфликт
+    версии у поставщика, а не сообщение с тем же содержимым, и тихо
+    подтверждать первую попавшуюся запись нельзя (round 1 ревью)."""
+    first = make_record(source_version="1", raw_bytes=b"first submission")
+    insert_record(db_conn, raw_store, first)
+
+    conflicting = make_record(source_version="1", raw_bytes=b"different submission")
+
+    with pytest.raises(DuplicateKeyConflictError):
+        insert_record(db_conn, raw_store, conflicting)
+
+    assert db_conn.execute("SELECT COUNT(*) FROM source_records").fetchone()[0] == 1
+
+
+def test_duplicate_key_with_identical_content_is_idempotent(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    record = make_record(source_version="1", raw_bytes=b"same bytes twice")
+
+    first_id = insert_record(db_conn, raw_store, record)
+    second_id = insert_record(db_conn, raw_store, replace(record))
+
+    assert first_id == second_id
+    assert db_conn.execute("SELECT COUNT(*) FROM source_records").fetchone()[0] == 1
+
+
+def test_published_at_offset_is_normalized_to_utc_before_comparison(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    """``00:30-05:00`` — это ``05:30Z``: если хранилище сравнивало бы ISO-строки
+    без приведения к UTC, эта запись прошла бы отсечение ``as_of = 03:00Z``
+    лексикографически, хотя фактически опубликована позже (round 1 ревью,
+    утечка будущих данных)."""
+    published_at_with_offset = datetime(
+        2024, 5, 10, 0, 30, tzinfo=timezone(timedelta(hours=-5))
+    )
+    assert published_at_with_offset.astimezone(UTC) == datetime(2024, 5, 10, 5, 30, tzinfo=UTC)
+
+    record = make_record(published_at=published_at_with_offset)
+    insert_record(db_conn, raw_store, record)
+
+    as_of_before_actual_utc_instant = datetime(2024, 5, 10, 3, 0, tzinfo=UTC)
+    selected = select_as_of(db_conn, as_of_before_actual_utc_instant)
+    assert selected == []
+
+    as_of_after_actual_utc_instant = datetime(2024, 5, 10, 6, 0, tzinfo=UTC)
+    selected_after = select_as_of(db_conn, as_of_after_actual_utc_instant)
+    assert len(selected_after) == 1
+    assert selected_after[0]["published_at"] == "2024-05-10T05:30:00.000000Z"

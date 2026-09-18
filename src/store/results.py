@@ -34,19 +34,16 @@ class ManifestVerificationError(ValueError):
     """``data_manifest`` результата ссылается на запись, которой нет в хранилище."""
 
 
-def store_result(
-    conn: sqlite3.Connection,
-    result: dict[str, Any],
-    *,
-    verify_manifest: bool = True,
-) -> str:
+def store_result(conn: sqlite3.Connection, result: dict[str, Any]) -> str:
     """Сохраняет уже полностью сформированный результат расчёта.
 
     Форма результата — ``contracts/result.schema.json``; полную валидацию по
     JSON Schema выполняет вызывающий слой (домен/API, задачи зоны 3).
     Хранилище проверяет только предпосылки собственной неизменности: наличие
-    полей, нужных для индексации, уникальность ``result_id`` и (по умолчанию)
-    ссылочную целостность ``data_manifest``.
+    полей, нужных для индексации, уникальность ``result_id`` и — всегда,
+    без возможности отключить — ссылочную целостность ``data_manifest``.
+    Отключаемая проверка была бы дырой в заявленной неизменности: результат
+    с фиктивным манифестом сохранился бы навсегда (round 1 ревью).
     """
     missing = [f for f in _REQUIRED_FIELDS if f not in result]
     if missing:
@@ -61,8 +58,7 @@ def store_result(
             f"result_id already stored, results are immutable: {result_id!r}"
         )
 
-    if verify_manifest:
-        _verify_manifest(conn, result["data_manifest"])
+    _verify_manifest(conn, result["data_manifest"])
 
     conn.execute(
         """

@@ -22,7 +22,7 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,6 +32,17 @@ Quality = Literal["nominal", "degraded", "reconstructed", "unknown"]
 
 class ChecksumMismatchError(RuntimeError):
     """Прочитанный с диска оригинал не совпадает с сохранённой контрольной суммой."""
+
+
+class DuplicateKeyConflictError(ValueError):
+    """Тот же дедуп-ключ (``source_id``, ``provider_record_id``, ``source_version``)
+    уже занят записью с другим содержимым.
+
+    Это не повторная передача того же сообщения (тогда контрольные суммы
+    совпали бы и вставка была бы идемпотентна), а конфликт: поставщик не
+    должен переиспользовать версию продукта для другого содержимого. Тихая
+    подмена здесь была бы хуже отказа — заявленная версия перестала бы
+    однозначно определять содержимое (round 1 ревью)."""
 
 
 class RawOriginalStore:
@@ -115,8 +126,24 @@ def _require_aware(dt: datetime, field_name: str) -> None:
         )
 
 
-def _iso(dt: datetime) -> str:
-    return dt.isoformat()
+def _iso_utc(dt: datetime) -> str:
+    """Нормализует к UTC и сериализует в фиксированный по ширине формат.
+
+    Нормализация обязательна: запись со смещением, например
+    ``2024-05-10T00:30:00-05:00`` (= ``05:30Z``), при сравнении как есть
+    строкой с отсечением ``as_of = 2024-05-10T03:00:00Z`` прошла бы фильтр
+    ``published_at <= as_of`` лексикографически, хотя фактический момент
+    публикации позже отсечения — утечка будущих данных (round 1 ревью).
+    Микросекунды форматируются фиксированной шириной (всегда 6 знаков), иначе
+    запись без дробной части и запись с ней сортировались бы не так, как
+    сравнивались бы как моменты времени.
+    """
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+
+
+def _require_non_empty(value: str, field_name: str) -> None:
+    if not value or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string (contracts/record.schema.json)")
 
 
 def insert_record(
@@ -138,20 +165,44 @@ def insert_record(
     if record.published_at is not None:
         _require_aware(record.published_at, "published_at")
 
+    # Контракт требует непустую source_version (contracts/record.schema.json,
+    # minLength 1); неизвестная версия непригодна для replay точно так же,
+    # как неизвестная публикация (.ai/main-prompt.md §1) — запись с пустой
+    # версией отклоняется целиком, а не тихо помечается неприемлемой.
+    for field_name, value in (
+        ("provider_record_id", record.provider_record_id),
+        ("source_id", record.source_id),
+        ("source_version", record.source_version),
+    ):
+        _require_non_empty(value, field_name)
+
+    new_checksum = hashlib.sha256(record.raw_bytes).hexdigest()
     existing = conn.execute(
         """
-        SELECT record_id FROM source_records
+        SELECT record_id, checksum FROM source_records
         WHERE source_id = ? AND provider_record_id = ? AND source_version = ?
         """,
         (record.source_id, record.provider_record_id, record.source_version),
     ).fetchone()
     if existing is not None:
-        return str(existing[0])
+        existing_record_id, existing_checksum = existing
+        if existing_checksum != new_checksum:
+            raise DuplicateKeyConflictError(
+                f"source_id={record.source_id!r}, "
+                f"provider_record_id={record.provider_record_id!r}, "
+                f"source_version={record.source_version!r} is already stored "
+                f"with a different original (checksum {existing_checksum!r}, "
+                f"got {new_checksum!r})"
+            )
+        return str(existing_record_id)
 
     raw_ref, checksum = raw_store.put(record.raw_bytes)
-    # published_at неизвестен => запись навсегда непригодна для строгого replay
-    # (.ai/main-prompt.md §1); значение не восстанавливается по observed_at.
-    replay_eligible = record.published_at is not None
+    assert checksum == new_checksum
+    # published_at или source_version неизвестны => запись навсегда непригодна
+    # для строгого replay (.ai/main-prompt.md §1); source_version уже
+    # проверена выше как непустая, проверка здесь остаётся как явное
+    # выражение обоих условий правила, а не только published_at.
+    replay_eligible = record.published_at is not None and bool(record.source_version.strip())
 
     record_id = str(uuid.uuid4())
     payload: dict[str, Any] = {
@@ -160,11 +211,11 @@ def insert_record(
         "source_id": record.source_id,
         "source_url": record.source_url,
         "record_kind": record.record_kind,
-        "observed_at": _iso(record.observed_at),
-        "valid_from": _iso(record.valid_from),
-        "valid_to": _iso(record.valid_to),
-        "published_at": _iso(record.published_at) if record.published_at else None,
-        "fetched_at": _iso(record.fetched_at),
+        "observed_at": _iso_utc(record.observed_at),
+        "valid_from": _iso_utc(record.valid_from),
+        "valid_to": _iso_utc(record.valid_to),
+        "published_at": _iso_utc(record.published_at) if record.published_at else None,
+        "fetched_at": _iso_utc(record.fetched_at),
         "value": record.value,
         "unit": record.unit,
         "spatial_context": record.spatial_context,
@@ -252,7 +303,7 @@ def select_as_of(
     _require_aware(as_of, "as_of")
 
     clauses = ["replay_eligible = 1", "published_at IS NOT NULL", "published_at <= ?"]
-    params: list[Any] = [_iso(as_of)]
+    params: list[Any] = [_iso_utc(as_of)]
     if source_id is not None:
         clauses.append("source_id = ?")
         params.append(source_id)

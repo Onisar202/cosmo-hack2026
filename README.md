@@ -94,11 +94,15 @@ tests/store/test_versions.py::test_store_result_rejects_manifest_referencing_unk
 tests/store/test_versions.py::test_different_results_parameters_are_isolated PASSED
 tests/store/test_versions.py::test_records_and_results_survive_restart PASSED
 tests/store/test_versions.py::test_record_input_rejects_naive_datetime PASSED
+tests/store/test_versions.py::test_record_input_rejects_empty_source_version PASSED
+tests/store/test_versions.py::test_duplicate_key_with_different_content_is_a_conflict_not_a_duplicate PASSED
+tests/store/test_versions.py::test_duplicate_key_with_identical_content_is_idempotent PASSED
+tests/store/test_versions.py::test_published_at_offset_is_normalized_to_utc_before_comparison PASSED
 tests/test_health.py::test_health_returns_200_ok PASSED
 tests/test_health.py::test_health_time_is_utc_aware PASSED
 tests/test_health.py::test_settings_requires_app_env PASSED
 tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
-22 passed
+26 passed
 ```
 
 ## Хранилище (`src/store/`)
@@ -112,26 +116,35 @@ tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
 
 - **Нормализованные записи** — таблица SQLite `source_records`. Дедупликация
   по `(source_id, provider_record_id, source_version)`: повторная вставка
-  того же сочетания не создаёт новую строку и не удваивает воздействие.
-  Позднее уточнение того же продукта — новая строка с новым
-  `source_version`, прежняя не трогается.
+  того же сочетания с тем же оригиналом (по контрольной сумме) не создаёт
+  новую строку и не удваивает воздействие; то же сочетание с другим
+  оригиналом — конфликт версии у поставщика (`DuplicateKeyConflictError`),
+  а не тихая замена. Позднее уточнение того же продукта — новая строка с
+  новым `source_version`, прежняя не трогается.
 - **Оригиналы ответов** — контент-адресуемое хранилище на диске
   (`RawOriginalStore`), путь файла определяется его SHA-256; оригинал и
   контрольная сумма восстанавливаются по `record_id` (`get_original`),
   несовпадение контрольной суммы — ошибка, а не тихая порча данных.
-- **`replay_eligible`** вычисляется при записи: неизвестное время публикации
-  (`published_at is None`) — запись навсегда непригодна для строгого
-  прогноза из прошлого, задним числом это не восстанавливается.
+- **`replay_eligible`** вычисляется при записи из `published_at` и
+  `source_version`: неизвестное время публикации (`published_at is None`)
+  или пустая версия — запись навсегда непригодна для строгого прогноза из
+  прошлого (пустая версия отклоняется на вставке целиком, а не тихо
+  помечается непригодной), задним числом флаг не восстанавливается.
 - **`select_as_of(as_of, ...)`** — основной запрос строгого replay: только
   записи с `published_at <= as_of` и `replay_eligible = true`, внутри одного
   продукта — с наибольшим пригодным `published_at` (самое позднее известное
   к этому моменту уточнение). Публикация позже `as_of` в выборку не попадает,
-  даже если это более новая версия того же продукта.
+  даже если это более новая версия того же продукта. Все времена перед
+  сравнением нормализуются к UTC и сериализуются в фиксированный по ширине
+  формат — иначе запись со смещением (например `00:30-05:00`, то есть
+  `05:30Z`) могла бы пройти строковое сравнение с отсечением `03:00Z`
+  лексикографически, хотя фактически опубликована позже.
 - **Результаты расчёта** — таблица `calculation_results`, тоже без
   обновления/удаления: пересчёт создаёт новый `result_id`. `store_result`
-  дополнительно проверяет, что `data_manifest` результата ссылается на
-  реально сохранённые записи (а не на правдоподобный, но не проверенный
-  список).
+  всегда (без возможности отключить) проверяет, что каждая запись
+  `data_manifest` реально существует в хранилище и совпадает с ней по
+  `source_id`/`source_version`/`record_kind` — манифест не может быть
+  правдоподобным, но не проверенным списком.
 - **Хранение и перезапуск.** SQLite-файл и каталог оригиналов — пути из
   конфига (`STORE_DB_PATH`, `STORE_RAW_DIR`), по умолчанию подкаталог
   проекта, а не временная директория контейнера: перезапуск сервиса не
