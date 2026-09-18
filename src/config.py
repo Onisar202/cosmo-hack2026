@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     log_level: LogLevel = "INFO"
     service_name: str = "vkd-risk-service"
 
+    # Пути хранилища (.ai/main-prompt.md §7: адреса и пороги — в конфиге, не в
+    # коде). По умолчанию — подкаталог тома проекта, не временная директория:
+    # перезапуск сервиса не должен терять сохранённые записи и результаты.
+    store_db_path: str = "data/store.sqlite3"
+    store_raw_dir: str = "data/raw"
+
 
 @lru_cache
 def get_settings() -> Settings:
