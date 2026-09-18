@@ -7,11 +7,18 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
-from tests.api.conftest import wait_for_job
+from src.api.service import fetch_and_store_orbit
+from src.sources import orbit as orbit_source
+from src.sources.status import SourceStatusRegistry
+from src.store import RawOriginalStore, connect
+from tests.api.conftest import orbit_tle_bytes, wait_for_job
 
 # Разные duration_hours/search_window_hours на каждый конкурентный запрос —
 # если параметры где-то перепутаются между потоками (например через модульную
@@ -155,3 +162,43 @@ def test_recompute_with_same_parameters_creates_a_new_immutable_result(
     second_result = app_client.get(f"/api/results/{second_job['result_id']}").json()
     assert first_result["result_id"] != second_result["result_id"]
     assert first_result["computed_at"] <= second_result["computed_at"]
+
+
+def test_orbit_fetch_status_snapshot_is_not_mutated_by_a_later_concurrent_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``OrbitFetchResult.status`` — снимок, сделанный ИМЕННО этим вызовом
+    (round 1 ревью PR #19): результат.source_status собирается из него, а не
+    отдельным более поздним ``registry.get(source_id)``, который на общем
+    (потокобезопасном, но именно поэтому и разделяемом между конкурентными
+    расчётами) реестре мог бы уже отразить состояние другого, позже
+    завершившегося запроса — тогда успешный расчёт мог бы сохранить в своём
+    результате чужую ошибку вместо собственного исхода."""
+    monkeypatch.setattr(orbit_source, "fetch_current_tle", lambda **_kwargs: orbit_tle_bytes())
+
+    conn = connect(tmp_path / "store.sqlite3")
+    raw_store = RawOriginalStore(tmp_path / "raw")
+    registry = SourceStatusRegistry()
+
+    t1 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    result = fetch_and_store_orbit(conn, raw_store, registry, now=t1)
+    assert result.outcome == "stored"
+    assert result.status.last_success_at == t1
+    assert result.status.last_error_at is None
+
+    # Имитирует более позднюю, никак не связанную ошибку на ТОМ ЖЕ реестре —
+    # ровно то, что произвёл бы второй конкурентный запрос к тому же
+    # source_id.
+    t2 = t1 + timedelta(seconds=5)
+    registry.record_error(
+        orbit_source.SOURCE_ID_CURRENT, at=t2, message="unrelated concurrent failure",
+        quota_limited=False,
+    )
+
+    # Снимок, захваченный ПЕРВЫМ вызовом, остаётся ровно тем, что увидел он
+    # сам — не задет более поздней мутацией общего реестра.
+    assert result.status.last_success_at == t1
+    assert result.status.last_error_at is None
+    assert result.status.last_error_message is None
+
+    conn.close()

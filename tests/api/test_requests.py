@@ -5,15 +5,26 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
+from src.api import routes as routes_module
+from src.api.schemas import CalculationRequest
+from src.api.service import ensure_store_ready
+from src.api.service import run_calculation as _run_calculation
+from src.config import get_settings
 from src.sources import orbit as orbit_source
 from src.sources import swpc as swpc_source
-from src.sources.http import SourceTimeoutError
-from tests.api.conftest import wait_for_job
+from src.sources.http import HttpFetchResult, SourceTimeoutError
+from src.sources.status import SourceStatusRegistry
+from src.store import RawOriginalStore
+from src.store import connect as connect_store
+from src.store import get_result as store_get_result
+from tests.api.conftest import orbit_tle_bytes, swpc_sample_bytes, wait_for_job
 
 CURRENT_REQUEST: dict[str, Any] = {
     "mode": "current",
@@ -148,6 +159,46 @@ def test_orbit_source_failure_fails_the_job_not_a_fake_success(
     assert job["error"]["code"] == "orbit_error_source"
 
 
+def test_orbit_source_failure_falls_back_to_last_stored_record(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Отказ CelesTrak не роняет расчёт, если есть ранее сохранённый набор
+    элементов: main-prompt.md §5 «последний пригодный ответ сохраняется и
+    отдаётся с явной давностью, когда источник недоступен» (round 1 ревью
+    PR #19)."""
+    first = app_client.post("/api/calculations", json=CURRENT_REQUEST)
+    first_job = wait_for_job(app_client, first.json()["task_id"])
+    assert first_job["status"] == "done", first_job
+    first_result = app_client.get(f"/api/results/{first_job['result_id']}").json()
+    cached_record_id = first_result["orbit"]["record_id"]
+
+    def failing_fetch(**_kwargs: Any) -> bytes:
+        raise orbit_source.OrbitSourceError("simulated CelesTrak outage")
+
+    monkeypatch.setattr(orbit_source, "fetch_current_tle", failing_fetch)
+
+    second = app_client.post("/api/calculations", json=CURRENT_REQUEST)
+    second_job = wait_for_job(app_client, second.json()["task_id"])
+
+    assert second_job["status"] == "done", second_job  # not failed: fallback used
+    second_result = app_client.get(f"/api/results/{second_job['result_id']}").json()
+    assert second_result["result_id"] != first_result["result_id"]
+    assert second_result["orbit"]["record_id"] == cached_record_id
+
+    orbit_status = next(
+        s for s in second_result["source_status"] if s["source_id"] == "celestrak-gp"
+    )
+    # Эта, вторая, попытка сама завершилась ошибкой — это видно, даже
+    # несмотря на то, что расчёт в целом успешен благодаря fallback.
+    assert orbit_status["last_error_message"] is not None
+
+    fallback_warning = next(
+        w for w in second_result["warnings"] if w["code"] == "orbit-source-stale-fallback"
+    )
+    assert fallback_warning["record_ids"] == [cached_record_id]
+    assert fallback_warning["fetch_attempt_id"]
+
+
 def test_swpc_source_failure_does_not_fail_the_job(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -237,3 +288,122 @@ def test_refresh_sources_forces_a_fetch(app_client: TestClient) -> None:
     statuses = {s["source_id"]: s for s in response.json()}
     assert statuses["celestrak-gp"]["last_success_at"] is not None
     assert statuses["noaa-swpc-proton-flux"]["last_success_at"] is not None
+
+
+def test_swpc_failure_warning_fetch_attempt_id_is_traceable_in_the_log(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``warning.fetch_attempt_id`` доказуемо ссылается на залогированную
+    попытку (contracts/README.md «Каждое предупреждение доказуемо») — не
+    просто отформатированная строка без следа (round 1 ревью PR #19)."""
+
+    def failing_fetch(url: str, **_kwargs: Any) -> None:
+        raise SourceTimeoutError(f"simulated timeout for {url}")
+
+    monkeypatch.setattr(swpc_source, "fetch", failing_fetch)
+
+    create = app_client.post("/api/calculations", json=CURRENT_REQUEST)
+    task_id = create.json()["task_id"]
+    job = wait_for_job(app_client, task_id)
+    assert job["status"] == "done", job
+
+    result = app_client.get(f"/api/results/{job['result_id']}").json()
+    warning = next(w for w in result["warnings"] if w["mechanism"] == "space_weather")
+    fetch_attempt_id = warning["fetch_attempt_id"]
+    assert fetch_attempt_id
+
+    logs = capsys.readouterr().err
+    assert fetch_attempt_id in logs
+    assert task_id in logs
+    assert job["result_id"] in logs
+
+
+def test_negative_elements_age_is_clamped_to_non_negative_in_the_stored_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``orbit.elements_age_hours`` — минимум 0 по контракту
+    (contracts/result.schema.json); эпоха элементов «из будущего»
+    относительно момента расчёта не должна проходить в хранилище
+    отрицательным значением (round 1 ревью PR #19). API не даёт
+    подставить произвольный ``now``, поэтому сценарий воспроизведён
+    напрямую через ``service.run_calculation``."""
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("STORE_DB_PATH", str(tmp_path / "store.sqlite3"))
+    monkeypatch.setenv("STORE_RAW_DIR", str(tmp_path / "raw"))
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(
+        orbit_source, "fetch_current_tle", lambda **_kwargs: orbit_tle_bytes()
+    )
+    monkeypatch.setattr(
+        swpc_source,
+        "fetch",
+        lambda url, **_kwargs: HttpFetchResult(
+            status_code=200, body=swpc_sample_bytes(), url=url, elapsed_seconds=0.001
+        ),
+    )
+
+    settings = get_settings()
+    ensure_store_ready(settings)
+    raw_store = RawOriginalStore(settings.store_raw_dir)
+    registry = SourceStatusRegistry()
+
+    request = CalculationRequest(
+        mode="current",
+        start_at=datetime(2019, 1, 2, tzinfo=timezone.utc),
+        duration_hours=2,
+        search_window_hours=4,
+    )
+    # tests/fixtures/orbit/celestrak_iss_gp_sample.tle epoch is
+    # 2020-01-01T19:42:47Z; "now" below is earlier than that epoch, so the
+    # raw (signed) age would be negative without the fix.
+    result_id = _run_calculation(
+        request,
+        settings=settings,
+        raw_store=raw_store,
+        registry=registry,
+        now=datetime(2019, 1, 1, tzinfo=timezone.utc),
+    )
+
+    conn = connect_store(settings.store_db_path)
+    try:
+        result = store_get_result(conn, result_id)
+    finally:
+        conn.close()
+    assert result is not None
+    assert result["orbit"]["elements_age_hours"] >= 0
+    assert any("рассинхронизация" in note for note in result["limitations"])
+
+    get_settings.cache_clear()
+
+
+def test_unexpected_internal_error_returns_sanitized_message_not_raw_exception_text(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Текст непредвиденного исключения не должен уходить клиенту как есть —
+    он может раскрыть внутренние детали (путь к БД, URL с учётными данными
+    и т.п.). Клиент получает нейтральное сообщение с ``task_id``; полный
+    текст — только в лог сервера (round 1 ревью PR #19)."""
+
+    def failing_run_calculation(*_args: Any, **_kwargs: Any) -> str:
+        raise RuntimeError("boom: leaking /var/secret/db-credentials.txt")
+
+    monkeypatch.setattr(routes_module, "_run_calculation", failing_run_calculation)
+
+    create = app_client.post("/api/calculations", json=CURRENT_REQUEST)
+    task_id = create.json()["task_id"]
+    job = wait_for_job(app_client, task_id)
+
+    assert job["status"] == "failed"
+    assert job["error"]["code"] == "internal_error"
+    assert "secret" not in job["error"]["message"]
+    assert "db-credentials" not in job["error"]["message"]
+    assert task_id in job["error"]["message"]
+
+    logs = capsys.readouterr().err
+    assert "db-credentials" in logs
+    assert task_id in logs

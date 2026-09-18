@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -47,14 +49,41 @@ def _run_job(task_id: str, payload: CalculationRequest, state: Any) -> None:
             settings=state.settings,
             raw_store=state.raw_store,
             registry=state.source_registry,
+            task_id=task_id,
         )
     except CalculationError as exc:
+        # CalculationError — curated, expected failure modes (source down,
+        # mode not implemented и т.п.): их текст не содержит внутренних
+        # деталей инфраструктуры и осознанно информативен для клиента
+        # (main-prompt.md §12 «ошибка понятна»).
         state.job_registry.mark_failed(task_id, code=exc.code, message=exc.message)
     except Exception as exc:  # noqa: BLE001 — последний рубеж изоляции: ошибка в
         # одной фоновой задаче не должна убивать поток исполнителя и не должна
         # остаться незамеченной вызывающей стороной — она сохраняется как
         # понятный статус задачи (приёмка FN-26 «статус ошибки понятен»).
-        state.job_registry.mark_failed(task_id, code="internal_error", message=str(exc))
+        # В отличие от CalculationError, текст ЛЮБОГО непредвиденного
+        # исключения не отдаётся клиенту как есть: он мог бы содержать путь к
+        # файлу БД, детали окружения или другую внутреннюю информацию
+        # (.ai/backend-prompt.md §4 «никаких секретов в логах», тот же
+        # принцип применён здесь к ответу API — round 1 ревью PR #19).
+        # Полный текст уходит только в структурированный лог со сквозным
+        # task_id, клиенту — нейтральное сообщение с тем же task_id для
+        # сопоставления с логом сервера.
+        print(
+            json.dumps(
+                {"event": "job_failed_unexpected", "task_id": task_id, "error": str(exc)},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        state.job_registry.mark_failed(
+            task_id,
+            code="internal_error",
+            message=(
+                "Внутренняя ошибка сервиса. Подробности записаны в лог сервера "
+                f"с этим же task_id ({task_id}) для сопоставления."
+            ),
+        )
     else:
         state.job_registry.mark_done(task_id, result_id=result_id)
 

@@ -34,7 +34,12 @@ import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal
+
+from jsonschema import Draft202012Validator
+from referencing import Registry, Resource
 
 from src.api.schemas import ALGORITHM_VERSION, CalculationRequest, iso_utc
 from src.config import Settings
@@ -48,11 +53,16 @@ from src.domain.orbit.propagate import (
 )
 from src.sources import orbit
 from src.sources import swpc as swpc_source
-from src.sources.status import SourceStatusRegistry, effective_status
-from src.store import RawOriginalStore, insert_record, store_result
+from src.sources.status import SourceStatus, SourceStatusRegistry, effective_status
+from src.store import RawOriginalStore, get_latest_record, insert_record, store_result
 from src.store.schema import connect as connect_store
 
-OrbitOutcome = Literal["stored", "error_source", "error_quota", "error_corrupted"]
+OrbitOutcome = Literal[
+    "stored", "stored_from_cache", "error_source", "error_quota", "error_corrupted"
+]
+_ORBIT_READY_OUTCOMES = frozenset({"stored", "stored_from_cache"})
+
+_CONTRACTS_DIR = Path(__file__).resolve().parents[2] / "contracts"
 
 
 class ApiError(Exception):
@@ -82,17 +92,45 @@ class OrbitFetchResult:
     record_id: str | None
     parsed: orbit.ParsedTle | None
     source_version: str | None
+    # Снимок статуса источника, возвращённый ИМЕННО этим вызовом
+    # registry.record_success/record_error — не более поздний
+    # registry.get(). Используется для сборки result.source_status (см.
+    # _build_current_result): чтение реестра ПОЗЖЕ, после других обращений
+    # (propagate, swpc-запрос), рискует застать состояние, уже перезаписанное
+    # другим конкурентным расчётом с тем же source_id — round 1 ревью PR #19.
+    status: SourceStatus
 
 
-def _log(event: str, **fields: Any) -> None:
-    """Одна структурированная запись в stdout на этап (.ai/backend-prompt.md §5).
+def _log(
+    event: str, *, task_id: str | None = None, result_id: str | None = None, **fields: Any
+) -> None:
+    """Одна структурированная запись в stderr на этап (.ai/backend-prompt.md §5).
 
-    Не заменяет полноценный логгер — минимальная реализация, достаточная,
-    чтобы по ``result_id``/``task_id`` можно было восстановить историю
-    конкретного расчёта, как того требует приёмка.
+    ``task_id``/``result_id`` — сквозные идентификаторы (когда уже известны
+    вызывающей стороне): по одному из них должна восстанавливаться вся
+    история конкретного расчёта, включая ранние этапы до сохранения
+    результата (round 1 ревью PR #19 — до этой правки не передавались).
+    Не заменяет полноценный логгер — минимальная реализация, достаточная для
+    приёмки.
     """
-    line = {"event": event, **fields}
+    line: dict[str, Any] = {"event": event}
+    if task_id is not None:
+        line["task_id"] = task_id
+    if result_id is not None:
+        line["result_id"] = result_id
+    line.update(fields)
     print(json.dumps(line, ensure_ascii=False, default=str), file=sys.stderr)
+
+
+def _fetch_attempt_id(source_id: str, *, now: datetime) -> str:
+    """Устойчивый идентификатор попытки обращения к источнику.
+
+    Логируется вместе с исходом попытки (см. вызовы :func:`_log` ниже) —
+    так предупреждение, ссылающееся на этот id (``warning.fetch_attempt_id``,
+    contracts/result.schema.json), доказуемо восстанавливается в структурном
+    логе, а не остаётся строкой без следа (round 1 ревью PR #19).
+    """
+    return f"fa-{source_id}-{iso_utc(now)}-{uuid.uuid4().hex[:8]}"
 
 
 def fetch_and_store_orbit(
@@ -109,26 +147,33 @@ def fetch_and_store_orbit(
     ``outcome``, как ``FetchOutcome`` у ``src/sources/swpc.py``: вызывающая
     сторона решает, фатально ли это (для расчёта — да, для принудительного
     обновления источников — нет).
+
+    При живом отказе источника (любой из трёх типов ошибки) пробует отдать
+    последнюю сохранённую запись вместо немедленного отказа —
+    .ai/main-prompt.md §5 «последний пригодный ответ сохраняется и отдаётся
+    с явной давностью, когда источник недоступен» (round 1 ревью PR #19).
+    Отказ задачи целиком остаётся единственным исходом, только когда ни
+    живого, ни ранее сохранённого набора элементов нет вовсе.
     """
     try:
         parsed, raw_bytes, source_url = orbit.fetch_elements_for_request(
             "current", norad_id=norad_id
         )
     except orbit.OrbitSourceQuotaError as exc:
-        registry.record_error(
-            orbit.SOURCE_ID_CURRENT, at=now, message=str(exc), quota_limited=True
+        return _orbit_fetch_failed(
+            conn, registry, now=now, norad_id=norad_id, outcome="error_quota",
+            exc=exc, quota_limited=True,
         )
-        return OrbitFetchResult("error_quota", str(exc), None, None, None)
     except orbit.OrbitSourceError as exc:
-        registry.record_error(
-            orbit.SOURCE_ID_CURRENT, at=now, message=str(exc), quota_limited=False
+        return _orbit_fetch_failed(
+            conn, registry, now=now, norad_id=norad_id, outcome="error_source",
+            exc=exc, quota_limited=False,
         )
-        return OrbitFetchResult("error_source", str(exc), None, None, None)
     except orbit.CorruptedElementsError as exc:
-        registry.record_error(
-            orbit.SOURCE_ID_CURRENT, at=now, message=str(exc), quota_limited=False
+        return _orbit_fetch_failed(
+            conn, registry, now=now, norad_id=norad_id, outcome="error_corrupted",
+            exc=exc, quota_limited=False,
         )
-        return OrbitFetchResult("error_corrupted", str(exc), None, None, None)
 
     record = orbit.build_orbital_elements_record(
         parsed, raw_bytes=raw_bytes, fetched_at=now, source_url=source_url
@@ -150,8 +195,46 @@ def fetch_and_store_orbit(
         # и тот же результат fetch (приёмка FN-26 «два конкурентных запроса
         # не смешивают ... данные»).
         record_id = insert_record(conn, raw_store, record)
-    registry.record_success(orbit.SOURCE_ID_CURRENT, at=now)
-    return OrbitFetchResult("stored", None, record_id, parsed, record.source_version)
+    status = registry.record_success(orbit.SOURCE_ID_CURRENT, at=now)
+    return OrbitFetchResult("stored", None, record_id, parsed, record.source_version, status)
+
+
+def _orbit_fetch_failed(
+    conn: sqlite3.Connection,
+    registry: SourceStatusRegistry,
+    *,
+    now: datetime,
+    norad_id: str,
+    outcome: OrbitOutcome,
+    exc: Exception,
+    quota_limited: bool,
+) -> OrbitFetchResult:
+    status = registry.record_error(
+        orbit.SOURCE_ID_CURRENT, at=now, message=str(exc), quota_limited=quota_limited
+    )
+    cached = get_latest_record(
+        conn, source_id=orbit.SOURCE_ID_CURRENT, record_kind="orbital_elements"
+    )
+    if cached is None:
+        return OrbitFetchResult(outcome, str(exc), None, None, None, status)
+
+    cached_parsed = orbit.parse_tle_response(
+        cached["value"]["raw"].encode("ascii"), expected_norad_id=norad_id
+    )
+    message = (
+        f"live CelesTrak fetch failed ({outcome}): {exc}; served the last stored "
+        f"record {cached['record_id']!r} instead, with its real staleness "
+        "(.ai/main-prompt.md §5 «последний пригодный ответ сохраняется и "
+        "отдаётся с явной давностью, когда источник недоступен»)"
+    )
+    return OrbitFetchResult(
+        "stored_from_cache",
+        message,
+        cached["record_id"],
+        cached_parsed,
+        cached["source_version"],
+        status,
+    )
 
 
 def _not_implemented_mechanism(mechanism: Literal["space_weather", "mmod"]) -> dict[str, Any]:
@@ -175,22 +258,33 @@ def _not_implemented_mechanism(mechanism: Literal["space_weather", "mmod"]) -> d
     }
 
 
+def _status_dict(status: SourceStatus, *, config_enabled: bool) -> dict[str, Any]:
+    effective = effective_status(status, config_enabled=config_enabled)
+    return {
+        "source_id": effective.source_id,
+        "last_success_at": (
+            iso_utc(effective.last_success_at) if effective.last_success_at is not None else None
+        ),
+        "last_error_at": (
+            iso_utc(effective.last_error_at) if effective.last_error_at is not None else None
+        ),
+        "last_error_message": effective.last_error_message,
+        "frozen": effective.frozen,
+        "quota_limited": effective.quota_limited,
+    }
+
+
 def _source_status_dict(
     registry: SourceStatusRegistry, source_id: str, *, config_enabled: bool
 ) -> dict[str, Any]:
-    status = effective_status(registry.get(source_id), config_enabled=config_enabled)
-    return {
-        "source_id": status.source_id,
-        "last_success_at": (
-            iso_utc(status.last_success_at) if status.last_success_at is not None else None
-        ),
-        "last_error_at": (
-            iso_utc(status.last_error_at) if status.last_error_at is not None else None
-        ),
-        "last_error_message": status.last_error_message,
-        "frozen": status.frozen,
-        "quota_limited": status.quota_limited,
-    }
+    """Текущий ГЛОБАЛЬНЫЙ статус источника из реестра — для эндпоинтов,
+    не привязанных к одному расчёту (``/sources/status``,
+    ``/sources/refresh``). Внутри одного расчёта используется
+    :func:`_status_dict` над снимком, возвращённым САМИМ вызовом этого
+    расчёта (``OrbitFetchResult.status``/``FetchOutcome.status``), а не этот
+    более поздний повторный запрос к реестру — см. :func:`_build_current_result`.
+    """
+    return _status_dict(registry.get(source_id), config_enabled=config_enabled)
 
 
 def _swpc_config_enabled() -> bool:
@@ -224,6 +318,40 @@ def _window(window_id: str, start_at: datetime, duration_hours: float) -> dict[s
     }
 
 
+@lru_cache
+def _result_validator() -> Draft202012Validator:
+    """Валидатор ``contracts/result.schema.json`` (плюс вложенный
+    ``request.schema.json``), построенный один раз за процесс.
+
+    Собранный результат проверяется этим валидатором до сохранения (см.
+    :func:`_build_current_result`) — контрактное нарушение (например
+    отрицательная давность элементов, main-prompt.md §… или пропущенное
+    обязательное поле) обязано остановить сохранение явной ошибкой, а не
+    молча лечь в неизменяемое хранилище и уйти клиенту как «корректный»
+    результат (round 1 ревью PR #19).
+    """
+    schemas = {
+        name: json.loads((_CONTRACTS_DIR / f"{name}.schema.json").read_text(encoding="utf-8"))
+        for name in ("request", "result")
+    }
+    registry: Registry[Any] = Registry().with_resources(
+        (schema["$id"], Resource.from_contents(schema)) for schema in schemas.values()
+    )
+    return Draft202012Validator(schemas["result"], registry=registry)
+
+
+def _validate_result_or_raise(result: dict[str, Any]) -> None:
+    errors = sorted(_result_validator().iter_errors(result), key=lambda e: list(e.path))
+    if not errors:
+        return
+    details = "; ".join(f"{list(e.path)}: {e.message}" for e in errors[:5])
+    raise CalculationError(
+        "result_schema_violation",
+        f"built result does not conform to contracts/result.schema.json, refusing "
+        f"to store it: {details}",
+    )
+
+
 def _build_current_result(
     request: CalculationRequest,
     *,
@@ -232,11 +360,22 @@ def _build_current_result(
     registry: SourceStatusRegistry,
     settings: Settings,
     now: datetime,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
+    result_id = f"res-{uuid.uuid4()}"
+    log_ctx = {"task_id": task_id, "result_id": result_id}
+
+    orbit_attempt_id = _fetch_attempt_id(orbit.SOURCE_ID_CURRENT, now=now)
     orbit_fetch = fetch_and_store_orbit(conn, raw_store, registry, now=now)
-    _log("orbit_fetch", outcome=orbit_fetch.outcome, source_id=orbit.SOURCE_ID_CURRENT)
+    _log(
+        "orbit_fetch",
+        outcome=orbit_fetch.outcome,
+        source_id=orbit.SOURCE_ID_CURRENT,
+        fetch_attempt_id=orbit_attempt_id,
+        **log_ctx,
+    )
     orbit_ready = (
-        orbit_fetch.outcome == "stored"
+        orbit_fetch.outcome in _ORBIT_READY_OUTCOMES
         and orbit_fetch.parsed is not None
         and orbit_fetch.record_id is not None
     )
@@ -244,7 +383,8 @@ def _build_current_result(
         raise CalculationError(
             f"orbit_{orbit_fetch.outcome}",
             f"orbital elements are required for any result (main-prompt.md §11 "
-            f"«Траектория участвует хотя бы в одном расчёте»); fetch failed: "
+            f"«Траектория участвует хотя бы в одном расчёте») and no previously "
+            f"stored record is available either; live fetch failed: "
             f"{orbit_fetch.message}",
         )
     assert orbit_fetch.parsed is not None  # narrowed by orbit_ready above, for mypy
@@ -252,7 +392,13 @@ def _build_current_result(
     parsed = orbit_fetch.parsed
 
     elements = load_elements(parsed.line1, parsed.line2, norad_id=parsed.norad_id)
-    age_hours = elements_age_hours(parsed.epoch, now)
+    raw_age_hours = elements_age_hours(parsed.epoch, now)
+    # contracts/result.schema.json: orbit.elements_age_hours >= 0. Отрицательное
+    # значение (эпоха элементов позже момента расчёта — например
+    # рассинхронизация часов) не отбрасывается и не заменяется нулём, а
+    # приводится к модулю; направление всё равно виден из сравнения
+    # elements_epoch и computed_at самого результата (round 1 ревью PR #19).
+    age_hours = abs(raw_age_hours)
     reconstructed = is_reconstructed_geometry(
         parsed.epoch, now, max_confirmed_age_hours=settings.orbit_max_confirmed_age_hours
     )
@@ -275,20 +421,41 @@ def _build_current_result(
         epoch=parsed.epoch.isoformat(),
         elements_age_hours=age_hours,
         is_reconstructed=reconstructed,
+        **log_ctx,
     )
 
-    swpc_warning: dict[str, Any] | None = None
+    warnings: list[dict[str, Any]] = []
+    if orbit_fetch.outcome == "stored_from_cache":
+        warnings.append(
+            {
+                "code": "orbit-source-stale-fallback",
+                "severity": "advisory",
+                "mechanism": "orbit",
+                "message": orbit_fetch.message or "",
+                "record_ids": [orbit_fetch.record_id],
+                "fetch_attempt_id": orbit_attempt_id,
+                "window_id": None,
+            }
+        )
+
+    swpc_attempt_id = _fetch_attempt_id(swpc_source.SOURCE_ID, now=now)
+    swpc_unexpected_error: str | None = None
     try:
         swpc_cfg = swpc_source.load_source_config()
         swpc_outcome = swpc_source.fetch_and_store(
             conn, raw_store, config=swpc_cfg, registry=registry, now=now
         )
+        swpc_status = swpc_outcome.status
     except Exception as exc:  # noqa: BLE001 — отказ одного источника не должен
         # обрушивать расчёт целиком (.ai/main-prompt.md §5, приёмка FN-26
         # «при отказе одного источника остальные доступны»); неожиданная
         # ошибка коннектора фиксируется как статус источника, а не падение API.
-        registry.record_error(
-            swpc_source.SOURCE_ID, at=now, message=str(exc), quota_limited=False
+        # Сообщение об ошибке сохраняется в переменной здесь: Python удаляет
+        # имя, связанное через "except ... as exc", сразу после блока —
+        # использовать `exc` дальше по функции было бы NameError.
+        swpc_unexpected_error = str(exc)
+        swpc_status = registry.record_error(
+            swpc_source.SOURCE_ID, at=now, message=swpc_unexpected_error, quota_limited=False
         )
         swpc_outcome = None
 
@@ -296,36 +463,62 @@ def _build_current_result(
         "swpc_fetch",
         outcome=(swpc_outcome.outcome if swpc_outcome is not None else "error_unexpected"),
         source_id=swpc_source.SOURCE_ID,
+        fetch_attempt_id=swpc_attempt_id,
+        **log_ctx,
     )
-    if swpc_outcome is not None and swpc_outcome.outcome.startswith("error_"):
-        swpc_warning = {
-            "code": f"space-weather-{swpc_outcome.outcome}",
-            "severity": "advisory",
-            "mechanism": "space_weather",
-            "message": (
-                f"Получение потока протонов не удалось ({swpc_outcome.outcome}): "
-                f"{swpc_outcome.message}. Интерпретация механизма пока не "
-                "реализована в любом случае, но провенанс отказа источника "
-                "сохранён отдельно от оценки."
-            ),
-            "record_ids": [],
-            "fetch_attempt_id": f"fa-{swpc_source.SOURCE_ID}-{iso_utc(now)}",
-            "window_id": None,
-        }
+    if swpc_outcome is None or swpc_outcome.outcome.startswith("error_"):
+        failure_detail = swpc_outcome.message if swpc_outcome is not None else swpc_unexpected_error
+        message = (
+            f"Получение потока протонов не удалось: {failure_detail}. "
+            "Интерпретация механизма пока не реализована в любом случае, но "
+            "провенанс отказа источника сохранён отдельно от оценки."
+        )
+        outcome_code = swpc_outcome.outcome if swpc_outcome is not None else "error_unexpected"
+        warnings.append(
+            {
+                "code": f"space-weather-{outcome_code}",
+                "severity": "advisory",
+                "mechanism": "space_weather",
+                "message": message,
+                "record_ids": [],
+                "fetch_attempt_id": swpc_attempt_id,
+                "window_id": None,
+            }
+        )
 
     windows = [
         _window("win-a", request.start_at, request.duration_hours),
         _window("win-b", request.search_end_at, request.duration_hours),
     ]
 
+    # Снимки статуса, взятые НЕПОСРЕДСТВЕННО из этого вызова (orbit_fetch.status,
+    # swpc_status), а не отдельным более поздним registry.get(source_id):
+    # между этой точкой и фактическим обращением к источнику могли успеть
+    # отработать другие конкурентные расчёты с тем же source_id, и поздний
+    # повторный запрос к общему реестру мог бы застать УЖЕ ИХ статус, а не
+    # тот, что реально увидела эта попытка (round 1 ревью PR #19, приёмка
+    # FN-26 «два конкурентных запроса не смешивают статусы»).
     source_status = [
-        _source_status_dict(registry, orbit.SOURCE_ID_CURRENT, config_enabled=True),
-        _source_status_dict(
-            registry, swpc_source.SOURCE_ID, config_enabled=_swpc_config_enabled()
-        ),
+        _status_dict(orbit_fetch.status, config_enabled=True),
+        _status_dict(swpc_status, config_enabled=_swpc_config_enabled()),
     ]
 
-    result_id = f"res-{uuid.uuid4()}"
+    limitations = [
+        "Интерпретация обоих обязательных механизмов воздействия (космическая "
+        "погода, MMOD) не реализована в этой версии сервиса — этот эндпоинт "
+        "получает и сохраняет реальные исходные данные (орбитальные элементы "
+        "МКС и, при доступности источника, поток протонов), но не вычисляет "
+        "уровень риска.",
+        "Траектория станции рассчитана по SGP4 на предоставленных элементах "
+        "(см. orbit.elements_age_hours/is_reconstructed).",
+    ]
+    if raw_age_hours < 0:
+        limitations.append(
+            "Эпоха орбитальных элементов позже момента расчёта "
+            f"(на {abs(raw_age_hours):.3f} ч) — вероятна рассинхронизация часов "
+            "источника/сервиса; показанная давность — модуль этого смещения."
+        )
+
     result: dict[str, Any] = {
         "result_id": result_id,
         "computed_at": iso_utc(now),
@@ -352,16 +545,8 @@ def _build_current_result(
         },
         "windows": windows,
         "coverage": {"requested_period_supported": True, "archive_gaps": []},
-        "limitations": [
-            "Интерпретация обоих обязательных механизмов воздействия (космическая "
-            "погода, MMOD) не реализована в этой версии сервиса — этот эндпоинт "
-            "получает и сохраняет реальные исходные данные (орбитальные элементы "
-            "МКС и, при доступности источника, поток протонов), но не вычисляет "
-            "уровень риска.",
-            "Траектория станции рассчитана по SGP4 на предоставленных элементах "
-            "(см. orbit.elements_age_hours/is_reconstructed).",
-        ],
-        "warnings": [swpc_warning] if swpc_warning is not None else [],
+        "limitations": limitations,
+        "warnings": warnings,
         "recommendation": {
             "status": "all_windows_excluded",
             "window_id": None,
@@ -375,6 +560,7 @@ def _build_current_result(
         },
         "source_status": source_status,
     }
+    _validate_result_or_raise(result)
     return result
 
 
@@ -406,6 +592,7 @@ def run_calculation(
     raw_store: RawOriginalStore,
     registry: SourceStatusRegistry,
     now: datetime | None = None,
+    task_id: str | None = None,
 ) -> str:
     """Выполняет расчёт и сохраняет результат. Возвращает ``result_id``.
 
@@ -417,6 +604,7 @@ def run_calculation(
     соединений к одному файлу.
     """
     moment = now if now is not None else datetime.now(timezone.utc)
+    _log("job_started", task_id=task_id, mode=request.mode)
     conn = connect_store(settings.store_db_path)
     try:
         if request.mode != "current":
@@ -437,10 +625,16 @@ def run_calculation(
             registry=registry,
             settings=settings,
             now=moment,
+            task_id=task_id,
         )
         store_result(conn, result)
-        _log("result_stored", result_id=result["result_id"], mode=result["mode"])
+        _log(
+            "result_stored", task_id=task_id, result_id=result["result_id"], mode=result["mode"]
+        )
         return str(result["result_id"])
+    except CalculationError as exc:
+        _log("job_failed", task_id=task_id, mode=request.mode, code=exc.code, message=exc.message)
+        raise
     finally:
         conn.close()
 

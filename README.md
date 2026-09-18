@@ -24,7 +24,9 @@ GP_HISTORY) ещё не реализованы — см. раздел «API» н
 ## Стек
 
 Python 3.11+, FastAPI, Pydantic v2, [SGP4](https://pypi.org/project/sgp4/),
-httpx, [uv](https://docs.astral.sh/uv/) как менеджер пакетов и виртуальных
+httpx, `jsonschema`/`referencing` (валидация результата по
+`contracts/result.schema.json` перед сохранением, `src/api/service.py`),
+[uv](https://docs.astral.sh/uv/) как менеджер пакетов и виртуальных
 окружений.
 
 ## Установка
@@ -91,6 +93,7 @@ $ uv run pytest -v
 tests/api/test_isolation.py::test_concurrent_calculations_do_not_mix_parameters_statuses_or_data PASSED
 tests/api/test_isolation.py::test_concurrent_calculations_have_independent_task_status PASSED
 tests/api/test_isolation.py::test_recompute_with_same_parameters_creates_a_new_immutable_result PASSED
+tests/api/test_isolation.py::test_orbit_fetch_status_snapshot_is_not_mutated_by_a_later_concurrent_attempt PASSED
 tests/api/test_requests.py::test_create_calculation_returns_202_pending PASSED
 tests/api/test_requests.py::test_get_calculation_status_unknown_task_is_404 PASSED
 tests/api/test_requests.py::test_get_result_unknown_id_is_404 PASSED
@@ -98,6 +101,7 @@ tests/api/test_requests.py::test_current_mode_full_flow_returns_real_orbit_and_n
 tests/api/test_requests.py::test_historical_modes_fail_with_clear_not_implemented[historical_analysis] PASSED
 tests/api/test_requests.py::test_historical_modes_fail_with_clear_not_implemented[historical_forecast] PASSED
 tests/api/test_requests.py::test_orbit_source_failure_fails_the_job_not_a_fake_success PASSED
+tests/api/test_requests.py::test_orbit_source_failure_falls_back_to_last_stored_record PASSED
 tests/api/test_requests.py::test_swpc_source_failure_does_not_fail_the_job PASSED
 tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides0] PASSED
 tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides1] PASSED
@@ -112,6 +116,9 @@ tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_erro
 tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides10] PASSED
 tests/api/test_requests.py::test_list_results_and_sources_status PASSED
 tests/api/test_requests.py::test_refresh_sources_forces_a_fetch PASSED
+tests/api/test_requests.py::test_swpc_failure_warning_fetch_attempt_id_is_traceable_in_the_log PASSED
+tests/api/test_requests.py::test_negative_elements_age_is_clamped_to_non_negative_in_the_stored_result PASSED
+tests/api/test_requests.py::test_unexpected_internal_error_returns_sanitized_message_not_raw_exception_text PASSED
 tests/orbit/test_propagation.py::test_propagate_matches_independently_published_reference PASSED
 tests/orbit/test_propagation.py::test_load_elements_epoch_matches_independently_parsed_epoch PASSED
 tests/orbit/test_propagation.py::test_propagate_rejects_naive_datetime PASSED
@@ -217,7 +224,7 @@ tests/test_health.py::test_health_returns_200_ok PASSED
 tests/test_health.py::test_health_time_is_utc_aware PASSED
 tests/test_health.py::test_settings_requires_app_env PASSED
 tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
-128 passed, 1 skipped
+133 passed, 1 skipped
 ```
 
 `test_live_smoke` пропускается намеренно: детерминированные тесты парсера
@@ -434,10 +441,15 @@ shapes для S1-07»; тонкие роутеры — `src/api/routes.py`, вс
   благоприятной оценкой (main-prompt.md §2, приёмка FN-26 «при отказе
   одного источника остальные доступны») — он остаётся виден в
   `source_status`/`warnings`, а орбита и форма результата не страдают;
-  отказ источника орбитальных элементов, наоборот, фатален для расчёта
-  (без орбиты контракт `result.orbit` невыполним) — задача завершается
-  понятной ошибкой (`orbit_error_source`/`orbit_error_quota`/
-  `orbit_error_corrupted`), а не пустым или придуманным результатом;
+  отказ источника орбитальных элементов сначала пробует последнюю
+  сохранённую запись (main-prompt.md §5 «последний пригодный ответ
+  сохраняется и отдаётся с явной давностью, когда источник недоступен») —
+  геометрия при этом реальна, а её давность и, при необходимости,
+  реконструкция видны честно (`orbit.elements_age_hours`/`is_reconstructed`,
+  предупреждение `orbit-source-stale-fallback`); задача завершается
+  ошибкой (`orbit_error_source`/`orbit_error_quota`/`orbit_error_corrupted`)
+  только когда нет вообще ни живого, ни ранее сохранённого набора
+  элементов — не пустым или придуманным результатом;
 - `mode ∈ {historical_analysis, historical_forecast}` внутри поддерживаемого
   периода (1 мая — 30 июня 2024) сейчас всегда завершается понятной ошибкой
   задачи `historical_mode_not_implemented`: строгий исторический режим
@@ -461,7 +473,27 @@ main-prompt.md §9 п.7, backend-prompt.md §2): каждая фоновая з�
 модульных переменных — параметры и промежуточные данные передаются явно по
 вызовам. Файл/схема хранилища создаются один раз при старте приложения
 (`ensure_store_ready`), чтобы первый набор конкурентных запросов не гонялся
-за созданием файла БД.
+за созданием файла БД. `result.source_status` собирается из снимка статуса,
+возвращённого ИМЕННО этой попыткой обращения к источнику
+(`OrbitFetchResult.status`/`FetchOutcome.status`), а не отдельным более
+поздним чтением общего реестра — иначе конкурентный запрос мог бы застать и
+сохранить в своём результате чужой, позже случившийся исход
+(`test_orbit_fetch_status_snapshot_is_not_mutated_by_a_later_concurrent_attempt`).
+
+**Прослеживаемость и защита контракта.** Каждое предупреждение с
+`fetch_attempt_id` доказуемо: тот же id попадает в структурированную запись
+лога вместе со сквозными `task_id`/`result_id` (`src/api/service.py:_log`) —
+по нему восстанавливается конкретная попытка, а не только текст без следа.
+Полностью собранный результат валидируется по
+`contracts/result.schema.json` (пакеты `jsonschema`/`referencing`) прямо
+перед сохранением — контрактное нарушение (например давность элементов
+`< 0`, что `orbit.elements_age_hours` не пропускает — отрицательное значение
+приводится к модулю, main-prompt.md §2 «пропуск не заменяется нулём», тот же
+принцип к знаку) останавливает сохранение явной ошибкой, а не уходит
+клиенту как «корректный» результат. Текст любого НЕПРЕДВИДЕННОГО исключения
+(в отличие от curated `CalculationError`) не возвращается клиенту как есть —
+он мог бы раскрыть путь к БД или другую внутреннюю деталь; клиент получает
+нейтральное сообщение с `task_id`, полный текст — только в лог сервера.
 
 ## Структура проекта
 
