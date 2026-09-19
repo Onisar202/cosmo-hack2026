@@ -1,0 +1,6 @@
+dist
+coverage
+node_modules
+# Снимок contracts/fixtures/*.json как есть — не переформатируем копию
+# оригинала (см. src/api/fixtures.ts).
+src/api/fixtures/*.json

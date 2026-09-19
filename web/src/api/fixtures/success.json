@@ -1,0 +1,151 @@
+{
+  "result_id": "res-fx-success-0001",
+  "computed_at": "2026-09-18T12:00:00Z",
+  "request": {
+    "mode": "historical_forecast",
+    "start_at": "2024-05-10T12:00:00Z",
+    "duration_hours": 6,
+    "search_window_hours": 6,
+    "as_of": "2024-05-10T09:00:00Z",
+    "lighting_constraint": { "requires_sunlight": false }
+  },
+  "mode": "historical_forecast",
+  "as_of": "2024-05-10T09:00:00Z",
+  "algorithm_version": "0.1.0",
+  "data_manifest": [
+    { "record_id": "rec-orbit-histelem-0001", "source_id": "space-track-gp-history", "source_version": "2024-05-09T21:03:11Z", "record_kind": "orbital_elements" },
+    { "record_id": "rec-swx-donki-forecast-0001", "source_id": "nasa-ccmc-donki", "source_version": "2024-05-09T18:00:00Z", "record_kind": "forecast" },
+    { "record_id": "rec-swx-watch-0002", "source_id": "noaa-swpc-geomag-watch", "source_version": "2024-05-09T20:00:00Z", "record_kind": "warning" },
+    { "record_id": "rec-mmod-stream-0004", "source_id": "meteor-stream-static-ref", "source_version": "2024.1", "record_kind": "observation" }
+  ],
+  "orbit": {
+    "source": "space-track",
+    "norad_id": "25544",
+    "elements_epoch": "2024-05-09T21:03:11Z",
+    "elements_age_hours": 11.93,
+    "coordinate_system": "TEME",
+    "is_reconstructed": false,
+    "record_id": "rec-orbit-histelem-0001"
+  },
+  "windows": [
+    {
+      "window_id": "win-a",
+      "start_at": "2024-05-10T12:00:00Z",
+      "end_at": "2024-05-10T18:00:00Z",
+      "duration_hours": 6,
+      "mechanisms": [
+        {
+          "mechanism": "space_weather",
+          "status": "ok",
+          "max_level": "S2",
+          "exceedance_hours_by_level": { "S1": 4.0, "S2": 2.5, "S3": 0 },
+          "coverage_fraction": 1.0,
+          "critical_gap": false,
+          "notes": [
+            "Прогноз NOAA SWPC (G2 Watch, опубликован 2024-05-09T20:00Z, до отсечения as_of) ожидает геомагнитную бурю Kp≈6 — это расширяет широтный интервал применимости уровня механизма 1; собственного вклада в уровень не даёт."
+          ],
+          "record_ids": ["rec-swx-donki-forecast-0001", "rec-swx-watch-0002"]
+        },
+        {
+          "mechanism": "mmod",
+          "status": "ok",
+          "max_level": "background",
+          "exceedance_hours_by_level": { "elevated": 0, "pronounced": 0 },
+          "coverage_fraction": 1.0,
+          "critical_gap": false,
+          "notes": [
+            "Оценка ведётся в относительных единицах к спорадическому фону — абсолютная калибровка источника недоступна."
+          ],
+          "record_ids": ["rec-mmod-stream-0004", "rec-orbit-histelem-0001"]
+        }
+      ],
+      "lighting": { "requested": false, "status": "not_requested", "note": null },
+      "excluded_from_comparison": false,
+      "exclusion_reason": null
+    },
+    {
+      "window_id": "win-b",
+      "start_at": "2024-05-10T15:00:00Z",
+      "end_at": "2024-05-10T21:00:00Z",
+      "duration_hours": 6,
+      "mechanisms": [
+        {
+          "mechanism": "space_weather",
+          "status": "ok",
+          "max_level": "S3",
+          "exceedance_hours_by_level": { "S1": 6.0, "S2": 5.0, "S3": 4.0 },
+          "coverage_fraction": 1.0,
+          "critical_gap": false,
+          "notes": [
+            "Прогноз NOAA SWPC (G2 Watch, опубликован 2024-05-09T20:00Z, до отсечения as_of) ожидает геомагнитную бурю Kp≈6 — это расширяет широтный интервал применимости уровня механизма 1; собственного вклада в уровень не даёт."
+          ],
+          "record_ids": ["rec-swx-donki-forecast-0001", "rec-swx-watch-0002"]
+        },
+        {
+          "mechanism": "mmod",
+          "status": "ok",
+          "max_level": "background",
+          "exceedance_hours_by_level": { "elevated": 0, "pronounced": 0 },
+          "coverage_fraction": 1.0,
+          "critical_gap": false,
+          "notes": [
+            "Оценка ведётся в относительных единицах к спорадическому фону — абсолютная калибровка источника недоступна."
+          ],
+          "record_ids": ["rec-mmod-stream-0004", "rec-orbit-histelem-0001"]
+        }
+      ],
+      "lighting": { "requested": false, "status": "not_requested", "note": null },
+      "excluded_from_comparison": false,
+      "exclusion_reason": null
+    }
+  ],
+  "coverage": {
+    "requested_period_supported": true,
+    "archive_gaps": []
+  },
+  "limitations": [
+    "Оценка MMOD ведётся в относительных единицах к фону, абсолютная калибровка потока не выполнена.",
+    "Строгий прогноз из прошлого: as_of = 2024-05-10T09:00Z предшествует началу обоих окон, во вход попали только записи record_kind = forecast/warning, опубликованные до отсечения — фактические наблюдения периода окон в расчёт не входят.",
+    "Фикстура носит демонстрационный характер и не является результатом научного расчёта."
+  ],
+  "warnings": [
+    {
+      "code": "geomagnetic-storm-context",
+      "severity": "info",
+      "mechanism": "space_weather",
+      "message": "Прогноз NOAA SWPC (G2 Watch, опубликован 2024-05-09T20:00Z) ожидает геомагнитную бурю Kp≈6 — расширяет широтный интервал применимости уровня S2/S3 солнечных частиц; собственного вклада в уровень не даёт.",
+      "record_ids": ["rec-swx-watch-0002"],
+      "fetch_attempt_id": null,
+      "window_id": null
+    },
+    {
+      "code": "elevated-proton-flux",
+      "severity": "critical",
+      "mechanism": "space_weather",
+      "message": "Прогноз DONKI (опубликован 2024-05-09T18:00Z, до отсечения as_of) предсказывает выход потока протонов >10 МэВ на уровень S3 в окне B и удержание не менее 4.0 ч.",
+      "record_ids": ["rec-swx-donki-forecast-0001"],
+      "fetch_attempt_id": null,
+      "window_id": "win-b"
+    },
+    {
+      "code": "mmod-relative-calibration",
+      "severity": "advisory",
+      "mechanism": "mmod",
+      "message": "Оценка MMOD ведётся в относительных единицах к фону; абсолютная калибровка потока для используемого источника недоступна.",
+      "record_ids": ["rec-mmod-stream-0004"],
+      "fetch_attempt_id": null,
+      "window_id": null
+    }
+  ],
+  "recommendation": {
+    "status": "selected",
+    "window_id": "win-a",
+    "explanation": "Окно A выбрано по правилу предпочтения: меньший максимальный уровень механизма 1 (S2 против S3 в окне B) при равном механизме 2 (оба — фон) и равной полноте данных."
+  },
+  "source_status": [
+    { "source_id": "space-track-gp-history", "last_success_at": "2024-05-09T22:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
+    { "source_id": "nasa-ccmc-donki", "last_success_at": "2024-05-09T18:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
+    { "source_id": "noaa-swpc-geomag-watch", "last_success_at": "2024-05-09T20:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
+    { "source_id": "meteor-stream-static-ref", "last_success_at": "2024-01-01T00:00:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false }
+  ]
+}
