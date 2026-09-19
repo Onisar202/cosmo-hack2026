@@ -342,7 +342,11 @@ def test_two_real_releases_are_stored_side_by_side_not_overwritten(
     id_a = insert_record(db_conn, raw_store, record_a)
     id_b = insert_record(db_conn, raw_store, record_b)
     assert id_a != id_b
-    assert get_record(db_conn, id_a)["record_id"] != get_record(db_conn, id_b)["record_id"]
+    stored_a = get_record(db_conn, id_a)
+    stored_b = get_record(db_conn, id_b)
+    assert stored_a is not None
+    assert stored_b is not None
+    assert stored_a["record_id"] != stored_b["record_id"]
 
 
 # ---------------------------------------------------------------------------
