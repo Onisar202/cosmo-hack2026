@@ -58,8 +58,13 @@ def _window(
     }
 
 
-def test_algorithm_version_was_bumped_for_the_dominance_rule_change() -> None:
-    assert ALGORITHM_VERSION == "0.3.0"
+def test_algorithm_version_was_bumped_for_the_mmod_wiring_change() -> None:
+    # FN-39 подключил реальный mmod поверх уже реального space_weather
+    # (FN-38) — main-prompt.md §3 требует поднять ALGORITHM_VERSION при
+    # каждом таком изменении алгоритма, даже когда наблюдаемый результат
+    # части запросов не меняется (например окно вне грида NASA MEO 2024
+    # оставалось и остаётся missing_data и до, и после этого бампа).
+    assert ALGORITHM_VERSION == "0.4.0"
 
 
 def test_apply_window_dominance_selects_the_dominating_window() -> None:

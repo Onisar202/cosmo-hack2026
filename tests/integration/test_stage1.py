@@ -209,17 +209,21 @@ def test_current_mode_end_to_end_shape(completed_calculation: dict[str, Any]) ->
     assert body["data_manifest"]
     assert any(m["record_id"] == orbit["record_id"] for m in body["data_manifest"])
 
-    # MMOD (Механизм 2) не реализован (FN-32/FN-39 — научный гейт не закрыт).
-    # Space weather (Механизм 1, FN-38) теперь реально классифицируется, но
-    # это окно — целиком в будущем относительно момента расчёта (start_at =
-    # now + 1 минута при создании запроса, см. _current_mode_request), а
-    # наблюдение GOES не имеет собственного горизонта прогноза вперёд —
-    # честно "beyond_horizon", не "not_implemented" (main-prompt.md §4).
+    # Оба обязательных механизма (space_weather — FN-38, mmod — FN-39) теперь
+    # реально интерпретируются, но это окно — целиком в будущем относительно
+    # реального времени запуска проверки (start_at = сегодняшнее "сейчас" +
+    # 1 минута, см. _current_mode_request): наблюдение GOES не имеет
+    # собственного горизонта прогноза вперёд — честно "beyond_horizon", не
+    # "not_implemented" (main-prompt.md §4); NASA MEO 2024 LEO forecast
+    # покрывает только 2024-01-01..2025-01-01 — любое реальное "сегодня"
+    # после этого лежит вне грида, честный "missing_data", а не имитация
+    # спокойной обстановки (main-prompt.md §2).
     assert body["windows"]
     for window in body["windows"]:
         mechanisms = {m["mechanism"]: m for m in window["mechanisms"]}
         assert set(mechanisms) == {"space_weather", "mmod"}
-        assert mechanisms["mmod"]["status"] == "not_implemented"
+        assert mechanisms["mmod"]["status"] == "missing_data"
+        assert mechanisms["mmod"]["critical_gap"] is True
         assert mechanisms["space_weather"]["status"] == "beyond_horizon"
         for assessment in mechanisms.values():
             assert assessment["max_level"] is None
