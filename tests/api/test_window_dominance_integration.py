@@ -57,7 +57,7 @@ def _window(
 
 
 def test_algorithm_version_was_bumped_for_the_dominance_rule_change() -> None:
-    assert ALGORITHM_VERSION == "0.2.0"
+    assert ALGORITHM_VERSION == "0.3.0"
 
 
 def test_apply_window_dominance_selects_the_dominating_window() -> None:

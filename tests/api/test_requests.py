@@ -58,7 +58,7 @@ def test_get_result_unknown_id_is_404(app_client: TestClient) -> None:
     assert response.json()["error"]["code"] == "result_not_found"
 
 
-def test_current_mode_full_flow_returns_real_orbit_and_not_implemented_mechanisms(
+def test_current_mode_full_flow_returns_real_orbit_and_honest_mechanism_gaps(
     app_client: TestClient,
 ) -> None:
     create = app_client.post("/api/calculations", json=CURRENT_REQUEST)
@@ -89,8 +89,10 @@ def test_current_mode_full_flow_returns_real_orbit_and_not_implemented_mechanism
     assert body["orbit"]["record_id"]
     assert body["orbit"]["is_reconstructed"] is True  # фикстура давно устарела
 
-    # Manifest — только фактически использованная запись (орбита); поток
-    # протонов получен, но не использован (интерпретация not_implemented).
+    # Manifest — только фактически использованная запись (орбита); фикстура
+    # потока протонов (10 мая 2024) не пересекается с окном этого запроса
+    # (18 сентября 2026), поэтому наблюдение получено, но не использовано —
+    # ни одна запись не попадает в покрытый сегмент ни одного окна.
     assert len(body["data_manifest"]) == 1
     assert body["data_manifest"][0]["record_id"] == body["orbit"]["record_id"]
     assert body["data_manifest"][0]["record_kind"] == "orbital_elements"
@@ -99,11 +101,18 @@ def test_current_mode_full_flow_returns_real_orbit_and_not_implemented_mechanism
     for window in body["windows"]:
         mechanisms = {m["mechanism"]: m for m in window["mechanisms"]}
         assert set(mechanisms) == {"space_weather", "mmod"}
+        # mmod (FN-39 не сделано) остаётся честной заглушкой; space_weather
+        # (FN-38) теперь реально классифицируется — для ЭТОГО окна пригодных
+        # отсчётов наблюдения нет (см. комментарий про manifest выше), но
+        # источник исправен и свеж (фикстура только что «получена»), поэтому
+        # причина — честный пробел покрытия (missing_data), не отказ.
+        assert mechanisms["mmod"]["status"] == "not_implemented"
+        assert mechanisms["space_weather"]["status"] == "missing_data"
         for assessment in mechanisms.values():
-            assert assessment["status"] == "not_implemented"
             assert assessment["max_level"] is None
             assert assessment["exceedance_hours_by_level"] is None
             assert assessment["record_ids"] == []
+            assert assessment["critical_gap"] is True
         assert window["excluded_from_comparison"] is True
         assert window["exclusion_reason"]
 
@@ -227,6 +236,19 @@ def test_swpc_source_failure_does_not_fail_the_job(
     )
     assert swpc_status["last_error_message"] is not None
     assert any(w["mechanism"] == "space_weather" for w in result["warnings"])
+
+    # FN-38 приёмка п.3: timeout источника даёт явный status="source_error"
+    # для space_weather — не благоприятную оценку и не 0 pfu (main-prompt.md
+    # §2). Ни одной записи наблюдения нет вовсе (первая попытка сразу
+    # завершилась ошибкой) — record_ids/max_level пусты.
+    for window in result["windows"]:
+        space_weather = next(
+            m for m in window["mechanisms"] if m["mechanism"] == "space_weather"
+        )
+        assert space_weather["status"] == "source_error"
+        assert space_weather["max_level"] is None
+        assert space_weather["record_ids"] == []
+        assert space_weather["critical_gap"] is True
 
 
 @pytest.mark.parametrize(
@@ -390,10 +412,15 @@ def test_noaa_3day_forecast_is_used_in_windows_and_manifest_when_it_overlaps(
     видна в notes/record_ids окна и в data_manifest — не только получена и
     сохранена (это уже проверяет test_current_mode_full_flow_…), но и
     использована результатом (main-prompt.md §3 «манифест собирается
-    фактически использованными записями»). ``mechanisms[*].status`` при
-    этом остаётся ``not_implemented`` — комбинирование с наблюдением GOES
-    в один уровень всё ещё не реализовано (main-prompt.md §2: частичный
-    прогресс не выдаётся за готовую оценку)."""
+    фактически использованными записями»). Она по-прежнему НЕ создаёт
+    собственного уровня механизма (FN-38 не меняет это — суточная
+    вероятность и наблюдение GOES остаются разными величинами, см.
+    src/domain/spaceweather/external_forecast.py). ``mechanisms[*].status``
+    здесь — ``missing_data`` (не ``not_implemented``, с FN-38): наблюдение
+    GOES теперь классифицируется по-настоящему (FN-38), но фикстура потока
+    протонов датирована маем 2024, а это окно — январём 2025, поэтому для
+    НЕГО пригодных отсчётов наблюдения нет — честный пробел покрытия, а не
+    отсутствие реализации."""
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("STORE_DB_PATH", str(tmp_path / "store.sqlite3"))
     monkeypatch.setenv("STORE_RAW_DIR", str(tmp_path / "raw"))
@@ -451,7 +478,7 @@ def test_noaa_3day_forecast_is_used_in_windows_and_manifest_when_it_overlaps(
 
     win_a = next(w for w in result["windows"] if w["window_id"] == "win-a")
     space_weather = next(m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather")
-    assert space_weather["status"] == "not_implemented"
+    assert space_weather["status"] == "missing_data"
     assert space_weather["max_level"] is None
     assert space_weather["record_ids"]  # реально использованная запись прогноза
     assert any("20%" in note for note in space_weather["notes"])
