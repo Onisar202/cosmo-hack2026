@@ -33,6 +33,11 @@ fi
 if [[ -n "$api_container" ]]; then
     log "останавливаю api для консистентного снимка (том $VOLUME_NAME)"
     compose stop api
+    # set -e прерывает скрипт на первой же ошибке (docker run/tar/место на
+    # диске) — без этой ловушки api остался бы остановленным навсегда.
+    # Best-effort (|| true): реальную ошибку архивации это не маскирует,
+    # `set -e` всё равно прервёт скрипт с её кодом выхода (round 1 ревью PR #36).
+    trap 'log "восстанавливаю api после сбоя backup (trap)"; compose start api >/dev/null 2>&1 || true' EXIT
 fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -46,6 +51,7 @@ docker run --rm \
     tar czf "/backup/$(basename "$archive")" -C /data .
 
 if [[ -n "$api_container" ]]; then
+    trap - EXIT
     log "перезапускаю api"
     compose start api
     "$SCRIPT_DIR/wait-healthy.sh" 60

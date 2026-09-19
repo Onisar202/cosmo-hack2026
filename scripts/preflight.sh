@@ -11,8 +11,9 @@ source "$SCRIPT_DIR/lib.sh"
 
 cd "$(repo_root)"
 
-log "1/5 инструменты: docker, docker compose"
+log "1/5 инструменты: docker, docker compose, jq"
 require_cmd docker
+require_cmd jq
 docker info >/dev/null 2>&1 || die "docker demon недоступен (проверьте, что Docker Desktop/dockerd запущен и текущий пользователь имеет доступ к сокету)."
 docker compose version >/dev/null 2>&1 || die "плагин 'docker compose' (v2) не найден — установите его (legacy 'docker-compose' v1 не поддерживается этим проектом)."
 
@@ -36,14 +37,24 @@ if ! compose_output=$(docker compose config 2>&1); then
     die $'docker compose config провалился — обычно это опечатка в .env или несовместимая версия docker compose.\n'"$compose_output"
 fi
 
-log "5/5 порты хоста свободны"
-for var_default in "API_PORT:8000" "WEB_PORT:8080"; do
-    name="${var_default%%:*}"
-    default="${var_default##*:}"
-    port="${!name:-$default}"
-    if command -v ss >/dev/null 2>&1 && ss -ltn "( sport = :$port )" 2>/dev/null | grep -q ":$port"; then
-        die "порт $port (переменная $name, по умолчанию $default) уже занят на хосте — освободите его или задайте $name=<другой порт> в .env."
-    fi
-done
+log "5/5 порты хоста свободны (только при первом развёртывании)"
+if [[ -n "$(compose ps -q 2>/dev/null)" ]]; then
+    # Контейнеры этого compose-проекта уже существуют — deploy.sh/upgrade.sh/
+    # rollback.sh переиспользуют занятые ИМИ ЖЕ порты через `up -d`, это не
+    # конфликт. Проверка "порт свободен" имеет смысл только на первом запуске
+    # (round 1 ревью PR #36: иначе повторный deploy/upgrade/rollback падал
+    # здесь на собственном же работающем стеке).
+    log "  compose-проект уже развёрнут — проверка занятости портов пропущена."
+else
+    # Публикуемые порты берём из `docker compose config` (уже проверен на
+    # шаге 4/5), а не из переменных текущей shell-сессии — так учитываются
+    # значения из .env, даже если оператор не экспортировал их вручную.
+    published_ports="$(docker compose config --format json 2>/dev/null | jq -r '[.services[].ports[]?.published // empty] | .[]' 2>/dev/null || true)"
+    for port in $published_ports; do
+        if command -v ss >/dev/null 2>&1 && ss -ltn "( sport = :$port )" 2>/dev/null | grep -q ":$port"; then
+            die "порт $port уже занят на хосте другим процессом — освободите его или поменяйте порт (API_PORT/WEB_PORT) в .env."
+        fi
+    done
+fi
 
 log "preflight пройден: чистое окружение готово к 'scripts/deploy.sh' (или 'docker compose up --build -d')."

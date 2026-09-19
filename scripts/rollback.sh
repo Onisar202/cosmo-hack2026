@@ -18,11 +18,24 @@ require_cmd git
 [[ -z "$(git status --porcelain)" ]] || die "в рабочем дереве есть незакоммиченные изменения — откат их потеряет. Закоммитьте/уберите их (git stash) и повторите."
 git rev-parse --verify --quiet "${target_ref}^{commit}" >/dev/null || die "'$target_ref' не найден локально — сначала 'git fetch origin'."
 
+# target_ref может не содержать scripts/ вовсе (откат на коммит до FN-45) —
+# `git checkout` меняет рабочее дерево целиком и вырубил бы этот же
+# запущенный скрипт и preflight/wait-healthy/smoke из-под себя. Копируем
+# ТЕКУЩИЕ scripts/ во временный каталог до переключения и используем эту
+# копию для всех шагов ниже; FN45_REPO_ROOT (lib.sh:repo_root) указывает ей
+# на реальный репозиторий, а не на temp-копию (round 1 ревью PR #36).
+runner_dir="$(mktemp -d "${TMPDIR:-/tmp}/fn45-rollback-runner-XXXXXX")"
+cleanup_runner() { rm -rf "$runner_dir"; }
+trap cleanup_runner EXIT
+cp -a "$SCRIPT_DIR/." "$runner_dir/"
+FN45_REPO_ROOT="$(repo_root)"
+export FN45_REPO_ROOT
+
 previous_commit="$(git rev-parse HEAD)"
 log "откат: $previous_commit -> $target_ref"
 git checkout --quiet "$target_ref"
 
-"$SCRIPT_DIR/preflight.sh"
+"$runner_dir/preflight.sh"
 
 log "docker compose build"
 compose build
@@ -30,10 +43,10 @@ compose build
 log "docker compose up -d"
 compose up -d
 
-"$SCRIPT_DIR/wait-healthy.sh"
+"$runner_dir/wait-healthy.sh"
 
 log "smoke-проверка основного пути"
-if ! "$SCRIPT_DIR/smoke.sh"; then
+if ! "$runner_dir/smoke.sh"; then
     die "smoke-проверка провалилась и после отката на $target_ref — нужна ручная диагностика (docker compose logs)."
 fi
 

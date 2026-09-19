@@ -26,12 +26,24 @@ log "текущий коммит: $previous_commit (запомните для sc
 log "git fetch"
 git fetch origin --quiet
 
+# target_ref теоретически может не содержать scripts/ (upgrade на произвольный
+# ref, не обязательно вперёд) — `git checkout` меняет рабочее дерево целиком
+# и вырубил бы этот же скрипт и preflight/wait-healthy/smoke из-под себя.
+# Тот же приём, что и в rollback.sh (round 1 ревью PR #36): копия scripts/ во
+# временном каталоге, FN45_REPO_ROOT указывает ей на реальный репозиторий.
+runner_dir="$(mktemp -d "${TMPDIR:-/tmp}/fn45-upgrade-runner-XXXXXX")"
+cleanup_runner() { rm -rf "$runner_dir"; }
+trap cleanup_runner EXIT
+cp -a "$SCRIPT_DIR/." "$runner_dir/"
+FN45_REPO_ROOT="$(repo_root)"
+export FN45_REPO_ROOT
+
 log "переключение на $target_ref"
 git checkout --quiet "$target_ref"
 new_commit="$(git rev-parse HEAD)"
 [[ "$new_commit" == "$previous_commit" ]] && log "  без изменений ($new_commit) — пересборка и перезапуск всё равно выполняются."
 
-"$SCRIPT_DIR/preflight.sh"
+"$runner_dir/preflight.sh"
 
 log "docker compose build"
 compose build
@@ -39,10 +51,10 @@ compose build
 log "docker compose up -d"
 compose up -d
 
-"$SCRIPT_DIR/wait-healthy.sh"
+"$runner_dir/wait-healthy.sh"
 
 log "smoke-проверка основного пути"
-if ! "$SCRIPT_DIR/smoke.sh"; then
+if ! "$runner_dir/smoke.sh"; then
     die "smoke-проверка провалилась после обновления до $new_commit. Откат: scripts/rollback.sh $previous_commit"
 fi
 

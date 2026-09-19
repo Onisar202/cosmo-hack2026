@@ -14,6 +14,15 @@ require_cmd() {
 }
 
 repo_root() {
+    # FN45_REPO_ROOT: override for scripts/*.sh invoked from a copy outside
+    # the real checkout (scripts/rollback.sh, scripts/upgrade.sh — `git
+    # checkout` can delete scripts/ out from under the running script when
+    # the target ref predates it, so they run a temp copy of scripts/ but
+    # still need to operate on the real repo's compose.yaml).
+    if [[ -n "${FN45_REPO_ROOT:-}" ]]; then
+        printf '%s\n' "$FN45_REPO_ROOT"
+        return
+    fi
     cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd
 }
 
