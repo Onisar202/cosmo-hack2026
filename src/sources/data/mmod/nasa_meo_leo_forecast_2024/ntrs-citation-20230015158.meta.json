@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-09-19T13:51:58Z",
+  "request": {
+    "method": "GET",
+    "url": "https://ntrs.nasa.gov/api/citations/20230015158"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "content_length": 4893,
+    "etag": "W/\"131d-TImybvryYkC9MQWlSabeHrfvWr4\"",
+    "raw_body_sha256": "42eeb330bfc9064c2d2de10388c6088ad6f51c88098cefbe37c57e26c99b1d30"
+  },
+  "citation": {
+    "id": 20230015158,
+    "title": "The 2024 Meteor Shower Activity Forecast for Low Earth Orbit",
+    "status": "CURATED",
+    "distribution": "PUBLIC",
+    "disseminated": "DOCUMENT_AND_METADATA",
+    "submitted_date": "2023-10-19T17:15:39.2274950+00:00",
+    "distribution_date": "2023-11-02T05:00:00.0000000+00:00",
+    "publication_date": "2023-11-02T05:00:00.0000000+00:00",
+    "modified": "2025-08-31T18:39:21.7150190+00:00",
+    "index": "submissions-2026-09-17-04-12",
+    "downloads": [
+      {
+        "name": "LEO_Forecast_2024.pdf",
+        "mimetype": "application/pdf",
+        "url": "https://ntrs.nasa.gov/api/citations/20230015158/downloads/LEO_Forecast_2024.pdf"
+      },
+      {
+        "name": "fluence_data.txt",
+        "mimetype": "text/plain",
+        "url": "https://ntrs.nasa.gov/api/citations/20230015158/downloads/fluence_data.txt"
+      },
+      {
+        "name": "flux_data.txt",
+        "mimetype": "text/plain",
+        "url": "https://ntrs.nasa.gov/api/citations/20230015158/downloads/flux_data.txt"
+      }
+    ]
+  }
+}

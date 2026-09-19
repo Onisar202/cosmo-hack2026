@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,8 +22,13 @@ import pytest
 from src.domain.mmod.background import ratio_to_background
 from src.sources import mmod as mmod_module
 from src.sources.mmod import (
+    NTRS_RAW_METADATA_SHA256,
+    PUBLICATION_EVIDENCE_PATH,
+    PUBLICATION_EVIDENCE_REF,
+    PUBLICATION_EVIDENCE_SHA256,
     PUBLISHED_AT,
     SOURCE_ID,
+    SOURCE_VERSION,
     VALUE_UNIT,
     MmodFluxForecastFormatError,
     build_mmod_background_records,
@@ -65,9 +72,25 @@ def test_bundled_file_matches_verified_checksum() -> None:
     хранящем только происхождение/контрольную сумму, не второй экземпляр
     файла — round 1 ревью PR #31, «diff слишком большой» из-за дублирования
     строки в двух копиях)."""
-    import hashlib
-
     assert hashlib.sha256(REAL_FILE_BYTES).hexdigest() == REAL_FILE_SHA256
+
+
+def test_bundled_ntrs_metadata_proves_exact_publication_timestamp() -> None:
+    """Время публикации берётся из сохранённых официальных полей NTRS,
+    не восстанавливается как полночь из одной календарной даты."""
+    metadata_bytes = PUBLICATION_EVIDENCE_PATH.read_bytes()
+    assert hashlib.sha256(metadata_bytes).hexdigest() == PUBLICATION_EVIDENCE_SHA256
+
+    snapshot = json.loads(metadata_bytes)
+    assert snapshot["request"]["url"] == "https://ntrs.nasa.gov/api/citations/20230015158"
+    assert snapshot["response"]["status"] == 200
+    assert snapshot["response"]["raw_body_sha256"] == NTRS_RAW_METADATA_SHA256
+    citation = snapshot["citation"]
+    assert citation["id"] == 20230015158
+    assert citation["distribution"] == "PUBLIC"
+    assert citation["distribution_date"] == "2023-11-02T05:00:00.0000000+00:00"
+    assert citation["publication_date"] == citation["distribution_date"]
+    assert PUBLISHED_AT == datetime(2023, 11, 2, 5, 0, tzinfo=UTC)
 
 
 def test_fetch_reads_the_bundled_file() -> None:
@@ -158,8 +181,19 @@ class TestBuildMmodBackgroundRecords:
         assert first.published_at == PUBLISHED_AT
         assert first.valid_from == subset[0].ut_datetime
         assert first.valid_to == subset[0].ut_datetime + timedelta(hours=1)
-        assert first.spatial_context["worst_case_unshielded_leo"] is True
+        assert "worst_case_unshielded_leo" not in first.spatial_context
+        assert first.spatial_context["unshielded_radiant_facing_reference"] is True
+        assert first.spatial_context["orientation_unmodeled"] is True
+        assert first.spatial_context["damage_response_unmodeled"] is True
+        assert first.spatial_context["earth_shielding_unmodeled"] is True
         assert first.spatial_context["not_spacecraft_surface_specific"] is True
+        assert first.spatial_context["publication_evidence"] == "ntrs_distribution_date"
+        assert first.spatial_context["publication_evidence_ref"] == PUBLICATION_EVIDENCE_REF
+        assert (
+            first.spatial_context["publication_evidence_checksum"]
+            == PUBLICATION_EVIDENCE_SHA256
+        )
+        assert first.source_version == SOURCE_VERSION
 
     def test_provider_record_id_is_unique_per_hour(self) -> None:
         parsed = parse_flux_forecast(REAL_FILE_BYTES)
@@ -208,6 +242,32 @@ class TestEnsureMmodRecordsForWindow:
             assert record["unit"] == VALUE_UNIT
             assert record["published_at"] is not None
             assert record["replay_eligible"] is True
+
+    def test_exact_publication_timestamp_is_the_replay_cutoff(
+        self, db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+    ) -> None:
+        record_ids, _, _ = ensure_mmod_records_for_window(
+            db_conn,
+            raw_store,
+            window_start=datetime(2024, 5, 5, 14, 0, tzinfo=UTC),
+            window_end=datetime(2024, 5, 5, 15, 0, tzinfo=UTC),
+            fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        assert record_ids
+        before_publication = select_as_of(
+            db_conn,
+            datetime(2023, 11, 2, 4, 59, 59, tzinfo=UTC),
+            source_id=SOURCE_ID,
+            record_kind="forecast",
+        )
+        at_publication = select_as_of(
+            db_conn,
+            PUBLISHED_AT,
+            source_id=SOURCE_ID,
+            record_kind="forecast",
+        )
+        assert before_publication == []
+        assert len(at_publication) == len(record_ids)
 
     def test_idempotent_reinsertion_does_not_duplicate(
         self, db_conn: sqlite3.Connection, raw_store: RawOriginalStore
@@ -258,3 +318,10 @@ class TestEnsureMmodRecordsForWindow:
         assert record is not None
         assert len(record["checksum"]) == 64
         assert record["raw_ref"]
+        assert record["source_version"] == SOURCE_VERSION
+        assert record["spatial_context"]["publication_evidence_ref"] == (
+            PUBLICATION_EVIDENCE_REF
+        )
+        assert record["spatial_context"]["publication_evidence_checksum"] == (
+            PUBLICATION_EVIDENCE_SHA256
+        )

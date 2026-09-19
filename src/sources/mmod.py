@@ -9,8 +9,10 @@
 **Решение задачи (Jira-комментарии владельца задачи FN-39).** Научный gate
 FN-32 остался Blocked, потому что в ``sources.yaml`` не было ни одного
 подтверждённого числового значения спорадического фона, а сетевой доступ к
-первичным источникам (NASA NTRS, arXiv, IMO) заблокирован прокси песочницы
-во всех сессиях подряд (FN-25 → FN-32 → FN-37 → FN-39). Вместо того чтобы
+первичным источникам (NASA NTRS, arXiv, IMO) был заблокирован прокси
+песочницы в сессиях FN-25 → FN-32 → FN-37 → FN-39. В FN-40 официальный
+NTRS metadata endpoint стал доступен и дал проверяемый timestamp выпуска;
+он сохранён отдельным sidecar. Вместо того чтобы
 реализовывать полную направленную модель фона (Helion/Anti-Helion/Apex/
 Toroidal, ``sources.yaml#sporadic-background-dynamical-model`` — по-прежнему
 не реализована) или придумывать эвристический коэффициент (прямо запрещено
@@ -74,19 +76,39 @@ SOURCE_URL = "https://ntrs.nasa.gov/api/citations/20230015158/downloads/flux_dat
 #: лету — вся остальная кодовая база (``parse_flux_forecast`` и выше)
 #: продолжает получать те же самые, побайтово те же исходные байты
 #: документа, что и раньше.
-DEFAULT_DATA_PATH = (
+SOURCE_DATA_DIR = (
     Path(__file__).resolve().parent
     / "data"
     / "mmod"
     / "nasa_meo_leo_forecast_2024"
-    / "flux_data.txt.gz"
+)
+DEFAULT_DATA_PATH = SOURCE_DATA_DIR / "flux_data.txt.gz"
+
+#: Зафиксированный HTTP/NTRS metadata-sidecar, связывающий время публикации
+#: с конкретной записью NTRS и её файлами. Это отдельное доказательство от
+#: ``flux_data.txt``: сама таблица даты выпуска не содержит.
+PUBLICATION_EVIDENCE_PATH = SOURCE_DATA_DIR / "ntrs-citation-20230015158.meta.json"
+PUBLICATION_EVIDENCE_REF = (
+    "src/sources/data/mmod/nasa_meo_leo_forecast_2024/"
+    "ntrs-citation-20230015158.meta.json"
+)
+PUBLICATION_EVIDENCE_SHA256 = (
+    "e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+)
+NTRS_RAW_METADATA_SHA256 = (
+    "42eeb330bfc9064c2d2de10388c6088ad6f51c88098cefbe37c57e26c99b1d30"
 )
 
-#: Документ выпущен единовременно (титульный лист LEO_Forecast_2024.pdf:
-#: «Issued November 2, 2023») — одно published_at на ВСЕ почасовые записи,
-#: не отдельное время на узел сетки (в отличие от noaa-swpc-3day-forecast,
-#: где каждый бюллетень несёт собственный ``:Issued:``).
-PUBLISHED_AT = datetime(2023, 11, 2, tzinfo=UTC)
+#: Точный timestamp выпуска из официальных полей ``distributionDate`` и
+#: ``publications[0].publicationDate`` NTRS record 20230015158. Он сохранён
+#: вместе с HTTP-метаданными и их checksum в :data:`PUBLICATION_EVIDENCE_PATH`.
+#: Это НЕ полночь, восстановленная из надписи ``Issued November 2, 2023``.
+PUBLISHED_AT = datetime(2023, 11, 2, 5, 0, tzinfo=UTC)
+
+SOURCE_VERSION = (
+    "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-"
+    f"metadata-sha256-{PUBLICATION_EVIDENCE_SHA256}"
+)
 
 #: Единица value записи (main-prompt.md §2 «единица едет рядом со значением»)
 #: — безразмерный коэффициент повышения потока, КАК ОПУБЛИКОВАНО поставщиком
@@ -213,8 +235,9 @@ def build_mmod_background_records(
       представляет значение почасового грида на этот час (интерполяция
       между узлами — забота ``src/domain/mmod/background.py``, не этой
       записи);
-    - ``published_at`` = :data:`PUBLISHED_AT` — фиксировано для всех узлов
-      (документ выпущен единовременно, см. docstring модуля);
+    - ``published_at`` = :data:`PUBLISHED_AT` — точный timestamp из
+      ``distributionDate``/``publicationDate`` сохранённого официального
+      NTRS metadata-sidecar, один для всего годового выпуска;
     - ``fetched_at`` — аргумент вызывающей стороны.
 
     ``provider_record_id`` включает ISO-момент узла — устойчивый
@@ -224,7 +247,6 @@ def build_mmod_background_records(
     запись). ``source_version`` — одна версия на весь документ (единственный
     известный выпуск, см. ``sources.yaml#nasa-meo-leo-forecast-2024``).
     """
-    source_version = "ntrs-20230015158-issued-2023-11-02"
     records: list[RecordInput] = []
     for row in parsed.rows:
         records.append(
@@ -241,12 +263,21 @@ def build_mmod_background_records(
                 value=row.factor_105j,
                 unit=VALUE_UNIT,
                 spatial_context={
-                    "worst_case_unshielded_leo": True,
+                    "unshielded_radiant_facing_reference": True,
+                    "orientation_unmodeled": True,
+                    "damage_response_unmodeled": True,
+                    "earth_shielding_unmodeled": True,
                     "not_spacecraft_surface_specific": True,
                     "kinetic_energy_j": 105.0,
                     "particle_equivalent_diameter_cm": 0.1,
+                    "publication_evidence": "ntrs_distribution_date",
+                    "publication_evidence_ref": PUBLICATION_EVIDENCE_REF,
+                    "publication_evidence_checksum": PUBLICATION_EVIDENCE_SHA256,
+                    "publication_evidence_raw_response_checksum": (
+                        NTRS_RAW_METADATA_SHA256
+                    ),
                 },
-                source_version=source_version,
+                source_version=SOURCE_VERSION,
                 quality=quality,
                 raw_bytes=raw_bytes,
             )
@@ -256,10 +287,9 @@ def build_mmod_background_records(
 
 def fetch() -> bytes:
     """Читает и распаковывает бандловый файл (:data:`DEFAULT_DATA_PATH`,
-    gzip — см. docstring модуля) — эта задача не ходит в сеть за NTRS (см.
-    ``sources.yaml#nasa-meo-leo-forecast-2024``: годовой документ без
-    live-эндпоинта в объёме FN-39, сетевой прокси песочницы всё равно
-    отклоняет ``ntrs.nasa.gov``). Возвращает те же самые байты исходного
+    gzip — см. docstring модуля) — runtime не ходит в сеть за NTRS: годовой
+    документ и официальный metadata-sidecar зафиксированы и версионированы
+    в репозитории. Возвращает те же самые байты исходного
     текстового документа, что были проверены (SHA-256) при сохранении в
     репозиторий — сжатие/распаковка побайтово обратимы (`gzip` без потерь).
     Отдельная функция — тем же паттерном, что
@@ -325,8 +355,14 @@ __all__ = [
     "SOURCE_ID",
     "SOURCE_URL",
     "PUBLISHED_AT",
+    "SOURCE_VERSION",
     "VALUE_UNIT",
+    "SOURCE_DATA_DIR",
     "DEFAULT_DATA_PATH",
+    "PUBLICATION_EVIDENCE_PATH",
+    "PUBLICATION_EVIDENCE_REF",
+    "PUBLICATION_EVIDENCE_SHA256",
+    "NTRS_RAW_METADATA_SHA256",
     "MmodFluxForecastFormatError",
     "FluxForecastHourlyRow",
     "ParsedFluxForecast",
