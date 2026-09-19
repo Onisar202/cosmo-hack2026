@@ -453,3 +453,104 @@ def test_fetch_and_store_archived_bulletin_format_error_is_explicit(
     )
     assert outcome.outcome == "error_format"
     assert outcome.stored_record_ids == ()
+
+
+@pytest.fixture
+def archive_config() -> Noaa3DayForecastSourceConfig:
+    return Noaa3DayForecastSourceConfig(
+        source_id=ARCHIVE_SOURCE_ID,
+        url="https://www.ngdc.noaa.gov/.../{YYYY}/{MM}/{slot}forecast.txt",
+        connect_timeout_seconds=5.0,
+        read_timeout_seconds=15.0,
+        max_retries=2,
+        backoff_base_seconds=0.0,
+        ttl_seconds=0.0,
+        critical_staleness_seconds=0.0,
+        enabled=True,
+    )
+
+
+def test_fetch_and_store_archived_bulletin_disabled_source_never_touches_network(
+    db_conn: sqlite3.Connection,
+    raw_store: RawOriginalStore,
+    registry: SourceStatusRegistry,
+    archive_config: Noaa3DayForecastSourceConfig,
+) -> None:
+    """Round 1 ревью PR #24: документированный переключатель ``enabled``
+    (main-prompt.md §5, §10) обязан действовать и для архивной линии, не
+    только для живого продукта."""
+    from dataclasses import replace
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("disabled archive source must not be fetched")
+
+    disabled = replace(archive_config, enabled=False)
+    outcome = fetch_and_store_archived_bulletin(
+        db_conn, raw_store, "https://www.ngdc.noaa.gov/.../202501052200_3-day-forecast.txt",
+        config=disabled,
+        connect_timeout_seconds=5.0, read_timeout_seconds=15.0, max_retries=1,
+        backoff_base_seconds=0.0, registry=registry,
+        now=datetime(2025, 1, 6, 0, 0, tzinfo=UTC), http_client=_mock_client(handler),
+    )
+    assert outcome.outcome == "skipped_disabled"
+    assert outcome.status.frozen is True
+
+
+def test_fetch_and_store_archived_bulletin_frozen_never_touches_network(
+    db_conn: sqlite3.Connection,
+    raw_store: RawOriginalStore,
+    registry: SourceStatusRegistry,
+    archive_config: Noaa3DayForecastSourceConfig,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("frozen archive source must not be fetched")
+
+    registry.freeze(ARCHIVE_SOURCE_ID)
+    outcome = fetch_and_store_archived_bulletin(
+        db_conn, raw_store, "https://www.ngdc.noaa.gov/.../202501052200_3-day-forecast.txt",
+        config=archive_config,
+        connect_timeout_seconds=5.0, read_timeout_seconds=15.0, max_retries=1,
+        backoff_base_seconds=0.0, registry=registry,
+        now=datetime(2025, 1, 6, 0, 0, tzinfo=UTC), http_client=_mock_client(handler),
+    )
+    assert outcome.outcome == "skipped_frozen"
+
+
+def test_fetch_and_store_archived_bulletin_respects_quota_cooldown(
+    db_conn: sqlite3.Connection,
+    raw_store: RawOriginalStore,
+    registry: SourceStatusRegistry,
+    archive_config: Noaa3DayForecastSourceConfig,
+) -> None:
+    """Активная квотная пауза после предыдущего 429 не обходится и для
+    архивной линии (main-prompt.md §5: «повтор через секунду сделает
+    хуже» — тот же принцип, что и в fetch_and_store для живого продукта)."""
+    calls = {"n": 0}
+
+    def handler_429(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, headers={"Retry-After": "3600"})
+
+    t0 = datetime(2025, 1, 6, 0, 0, tzinfo=UTC)
+    first = fetch_and_store_archived_bulletin(
+        db_conn, raw_store, "https://www.ngdc.noaa.gov/.../slot.txt",
+        config=archive_config,
+        connect_timeout_seconds=5.0, read_timeout_seconds=15.0, max_retries=0,
+        backoff_base_seconds=0.0, registry=registry,
+        now=t0, http_client=_mock_client(handler_429),
+    )
+    assert first.outcome == "error_quota"
+    assert calls["n"] == 1
+
+    def handler_should_not_be_called(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("must not be fetched during quota cooldown")
+
+    t1 = t0 + timedelta(seconds=60)
+    second = fetch_and_store_archived_bulletin(
+        db_conn, raw_store, "https://www.ngdc.noaa.gov/.../slot.txt",
+        config=archive_config,
+        connect_timeout_seconds=5.0, read_timeout_seconds=15.0, max_retries=0,
+        backoff_base_seconds=0.0, registry=registry,
+        now=t1, http_client=_mock_client(handler_should_not_be_called),
+    )
+    assert second.outcome == "skipped_quota_cooldown"

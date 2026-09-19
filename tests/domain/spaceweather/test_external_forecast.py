@@ -158,6 +158,39 @@ def test_window_spanning_midnight_keeps_both_days_separate_not_summed() -> None:
     assert set(assessment.record_ids) == {"rec-1", "rec-2"}
 
 
+def test_partial_coverage_is_still_a_critical_gap_not_a_full_assessment() -> None:
+    """Round 1 ревью PR #24: окно 22:00-04:00 с записью только за первый
+    день не должно читаться как полностью оценённое — период после
+    полуночи прогнозом не покрыт вовсе, это критический пробел, а не
+    «правдоподобный» max_probability_percent по одному дню."""
+    day1 = _day("2025-01-05", 20.0, "2025-01-05T22:00:00+00:00", "rec-1")
+    window_start = datetime(2025, 1, 5, 22, 0, tzinfo=UTC)
+    window_end = datetime(2025, 1, 6, 4, 0, tzinfo=UTC)  # 6 часов, пересекает полночь
+
+    assessment = assess_external_forecast([day1], window_start=window_start, window_end=window_end)
+
+    # День 1 покрывает только 2 часа окна (22:00-00:00) из 6.
+    assert assessment.critical_gap is True
+    assert assessment.coverage_fraction == pytest.approx(2 / 6)
+    # Максимум по покрытой части всё ещё виден (не скрыт), но пробел не замаскирован.
+    assert assessment.max_probability_percent == 20.0
+    assert any("частично" in note for note in assessment.notes)
+
+
+def test_full_coverage_across_two_days_is_not_a_critical_gap() -> None:
+    day1 = _day("2025-01-05", 20.0, "2025-01-05T22:00:00+00:00", "rec-1")
+    day2 = _day("2025-01-06", 45.0, "2025-01-06T22:00:00+00:00", "rec-2")
+    window_start = datetime(2025, 1, 5, 22, 0, tzinfo=UTC)
+    window_end = datetime(2025, 1, 6, 4, 0, tzinfo=UTC)
+
+    assessment = assess_external_forecast(
+        [day1, day2], window_start=window_start, window_end=window_end
+    )
+
+    assert assessment.critical_gap is False
+    assert assessment.coverage_fraction == pytest.approx(1.0)
+
+
 def test_no_forecast_days_at_all_is_a_critical_gap() -> None:
     window_start = datetime(2025, 1, 5, 10, 0, tzinfo=UTC)
     window_end = datetime(2025, 1, 5, 14, 0, tzinfo=UTC)

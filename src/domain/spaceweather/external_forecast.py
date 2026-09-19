@@ -87,6 +87,7 @@ class ExternalForecastAssessment:
     window_end: datetime
     overlaps: tuple[ForecastDayWindowOverlap, ...]
     max_probability_percent: float | None
+    coverage_fraction: float
     critical_gap: bool
     notes: tuple[str, ...]
     record_ids: tuple[str, ...]
@@ -164,15 +165,34 @@ def assess_external_forecast(
     ``max_probability_percent`` — максимум ТОЛЬКО среди дней, реально
     пересекающихся с окном; ``None``, если ни один день окно не покрывает
     (критический пробел, не 0%). Сложение через полночь и деление по часам
-    здесь структурно невозможны: функция ничего не делит и не суммирует,
-    только строит попарные пересечения интервалов.
+    здесь структурно невозможны: функция ничего не делит и не суммирует
+    вероятность, только строит попарные пересечения интервалов.
+
+    ``critical_gap`` — не только «ни один день не пересёкся», но и любое
+    ЧАСТИЧНОЕ покрытие окна (round 1 ревью PR #24): окно 22:00–04:00 с
+    записью только за первый день иначе выглядело бы полностью оценённым
+    (``critical_gap=False``) с правдоподобным ``max_probability_percent``,
+    хотя период после полуночи прогнозом вообще не покрыт — main-prompt.md
+    §2 «отсутствие данных не подменяется благоприятной/спокойной оценкой»
+    распространяется и на «частично покрыто» ничем не отличимое внешне от
+    «полностью покрыто». Считается суммарная длительность непересекающихся
+    (дни — разные календарные сутки, не могут перекрываться друг с другом)
+    пересечений и сравнивается с длительностью всего окна — не через доли
+    часов вероятности, а через сравнение временны́х интервалов, что не
+    противоречит запрету делить/суммировать саму вероятность.
+    ``coverage_fraction`` — доля окна, покрытая хотя бы одним прогнозным
+    днём, для дальнейшего использования вызывающей стороной (например
+    правилом предпочтения окон, main-prompt.md §11).
     """
     if window_start.tzinfo is None or window_end.tzinfo is None:
         raise ValueError("window_start/window_end must be timezone-aware UTC datetimes")
     if window_end <= window_start:
         raise ValueError("window_end must be after window_start")
 
+    window_duration = window_end - window_start
+
     overlaps: list[ForecastDayWindowOverlap] = []
+    covered_duration = timedelta(0)
     for day in days:
         fd = day.forecast_day
         day_start = datetime(fd.year, fd.month, fd.day, tzinfo=UTC)
@@ -180,6 +200,12 @@ def assess_external_forecast(
         overlap_start = max(day_start, window_start)
         overlap_end = min(day_end, window_end)
         overlaps_window = overlap_start < overlap_end
+        if overlaps_window:
+            # Дни — разные календарные сутки, поэтому их пересечения с окном
+            # сами никогда не пересекаются друг с другом: сумма длительностей
+            # — это и есть длительность объединения, без риска задвоить один
+            # и тот же отрезок окна дважды.
+            covered_duration += overlap_end - overlap_start
         overlaps.append(
             ForecastDayWindowOverlap(
                 day=day,
@@ -191,7 +217,10 @@ def assess_external_forecast(
 
     intersecting = [o for o in overlaps if o.overlaps_window]
     max_probability = max((o.day.probability_percent for o in intersecting), default=None)
-    critical_gap = len(intersecting) == 0
+
+    covered_duration = min(covered_duration, window_duration)  # защита от некорректного входа
+    coverage_fraction = covered_duration / window_duration
+    critical_gap = covered_duration < window_duration
 
     notes: list[str] = []
     for overlap in overlaps:
@@ -211,10 +240,16 @@ def assess_external_forecast(
                 f"(вероятность S1+ {day.probability_percent:g}%, опубликовано "
                 f"{day.published_at.isoformat()}) не пересекается с этим окном."
             )
-    if critical_gap:
+    if critical_gap and not intersecting:
         notes.append(
             "Окно не покрыто ни одним днём NOAA 3-Day Forecast — это отсутствие внешнего "
             "прогноза на этот интервал, а не спокойная обстановка (main-prompt.md §2)."
+        )
+    elif critical_gap:
+        notes.append(
+            f"Окно покрыто NOAA 3-Day Forecast только частично ({coverage_fraction:.0%} "
+            "длительности) — непокрытая часть окна не имеет внешнего прогноза; это "
+            "критический пробел данных, а не спокойная обстановка (main-prompt.md §2)."
         )
 
     return ExternalForecastAssessment(
@@ -222,6 +257,7 @@ def assess_external_forecast(
         window_end=window_end,
         overlaps=tuple(overlaps),
         max_probability_percent=max_probability,
+        coverage_fraction=coverage_fraction,
         critical_gap=critical_gap,
         notes=tuple(notes),
         record_ids=tuple(o.day.record_id for o in intersecting),

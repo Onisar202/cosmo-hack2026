@@ -401,6 +401,14 @@ def load_source_config(
     for entry in entries:
         if entry.get("id") == source_id:
             network = entry.get("network") or {}
+            # Архивная запись (ARCHIVE_SOURCE_ID) намеренно не несёт секции
+            # freshness — main-prompt.md §5 «кеш архивных ответов бессрочен»,
+            # TTL/периодический refresh к ней неприменимы (архив не устаревает,
+            # fetch_and_store_archived_bulletin эти два поля не читает вовсе).
+            # Значения по умолчанию здесь — только чтобы не потребовать от
+            # архивной записи реестра неприменимого ей поля; они не означают
+            # «TTL равен нулю секунд» для живого продукта, у него freshness
+            # обязателен и настоящий (сверяется отдельным тестом ниже).
             freshness = entry.get("freshness") or {}
             return Noaa3DayForecastSourceConfig(
                 source_id=source_id,
@@ -409,8 +417,8 @@ def load_source_config(
                 read_timeout_seconds=float(network["read_timeout_seconds"]),
                 max_retries=int(network["max_retries"]),
                 backoff_base_seconds=float(network["retry_backoff_base_seconds"]),
-                ttl_seconds=float(freshness["ttl_seconds"]),
-                critical_staleness_seconds=float(freshness["critical_staleness_seconds"]),
+                ttl_seconds=float(freshness.get("ttl_seconds", 0.0)),
+                critical_staleness_seconds=float(freshness.get("critical_staleness_seconds", 0.0)),
                 enabled=bool(entry.get("enabled", True)),
             )
     raise KeyError(f"source_id {source_id!r} is not registered in {path}")
@@ -570,6 +578,7 @@ def fetch_and_store_archived_bulletin(
     url: str,
     *,
     source_id: str = ARCHIVE_SOURCE_ID,
+    config: Noaa3DayForecastSourceConfig | None = None,
     connect_timeout_seconds: float,
     read_timeout_seconds: float,
     max_retries: int,
@@ -590,10 +599,46 @@ def fetch_and_store_archived_bulletin(
     архив пакетно») — вызывающая сторона (стенд экспериментов/загрузчик
     архива), не эта функция: она нормализует и сохраняет один уже известный
     слот, по аналогии с разделением ролей в ``archive_probe``.
+
+    Round 1 ревью PR #24: до этой правки функция сразу шла в сеть, не
+    проверяя ``enabled``/заморозку/активную квотную паузу — документированный
+    переключатель источника (main-prompt.md §5, §10) для архивной линии не
+    действовал. Проверки — те же три, что и в :func:`fetch_and_store`
+    (``enabled`` из ``sources.yaml``, заморозка реестра, активный
+    ``quota_cooldown_until`` после предыдущего 429), только без TTL —
+    архивный ответ не устаревает, периодического refresh здесь нет.
     """
     moment = now if now is not None else datetime.now(UTC)
     if moment.tzinfo is None:
         raise ValueError("now must be a timezone-aware UTC datetime (.ai/main-prompt.md §1)")
+
+    cfg = config if config is not None else load_source_config(source_id=source_id)
+    raw_status = registry.get(source_id)
+    status = effective_status(raw_status, config_enabled=cfg.enabled)
+
+    if not cfg.enabled:
+        return FetchOutcome(
+            outcome="skipped_disabled",
+            message=f"source {source_id!r} is disabled in sources.yaml",
+            stored_record_ids=(),
+            status=status,
+        )
+    if status.frozen:
+        return FetchOutcome(
+            outcome="skipped_frozen",
+            message=f"source {source_id!r} is frozen",
+            stored_record_ids=(),
+            status=status,
+        )
+
+    cooldown_until = registry.quota_cooldown_until(source_id)
+    if cooldown_until is not None and moment < cooldown_until:
+        return FetchOutcome(
+            outcome="skipped_quota_cooldown",
+            message=f"quota cooldown active until {cooldown_until.isoformat()}",
+            stored_record_ids=(),
+            status=status,
+        )
 
     outcome_or_forecast = _fetch_and_parse(
         url,
