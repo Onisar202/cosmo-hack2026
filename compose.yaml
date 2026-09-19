@@ -1,9 +1,16 @@
-# Развёртывание основы этапа 1 (FN-28 / S1-10): API + UI + постоянное
-# хранилище SQLite одной командой. Собирает существующие слои
-# (src/api, web/) в две цели одного Dockerfile — новых модулей не
-# добавляет (.ai/main-prompt.md §8: контейнеры — упаковка, не логика).
+# Развёртывание основы этапа 1 (FN-28 / S1-10), доведённое до
+# production-профиля этапом 3 (FN-45): API + UI + постоянное хранилище
+# SQLite одной командой. Собирает существующие слои (src/api, web/) в две
+# цели одного Dockerfile — новых модулей не добавляет (.ai/main-prompt.md
+# §8: контейнеры — упаковка, не логика).
 #
 # Запуск: `docker compose up --build`; проверки — README.md «Развёртывание».
+# Все `${VAR:-default}` ниже читаются docker compose из host-окружения или
+# `.env` рядом с этим файлом (`cp .env.example .env`, docker compose
+# подхватывает `.env` в директории проекта автоматически) — секреты и
+# площадка-зависимые значения не попадают в этот файл и в образ
+# (main-prompt.md §7). Без `.env`/переменных все значения по умолчанию
+# воспроизводят прежнее поведение локального стека.
 
 services:
   api:
@@ -12,16 +19,20 @@ services:
       dockerfile: Dockerfile
       target: api
     environment:
-      # Обязательная настройка (src/config.py) — без значения по умолчанию,
-      # намеренно задана здесь явно, а не через host .env (docker compose up
-      # воспроизводится одной командой без предварительного `cp .env.example .env`).
-      APP_ENV: production
-      LOG_LEVEL: INFO
+      # Обязательная настройка (src/config.py) — без значения по умолчанию
+      # в приложении; здесь дефолт "production" задан явно на уровне
+      # compose, а не в коде, и переопределяется без пересборки образа.
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Путь внутри контейнера совпадает с точкой монтирования тома ниже —
       # перезапуск (`docker compose restart api`) не теряет сохранённые
       # записи источников и результаты расчёта (приёмка FN-28).
       STORE_DB_PATH: data/store.sqlite3
       STORE_RAW_DIR: data/raw
+      # Пусто по умолчанию — CORS-middleware не подключается (см.
+      # src/api/app.py), UI и API на одном origin через nginx. Задаётся,
+      # когда UI обращается к API напрямую с другого домена (FN-45).
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
     volumes:
       - api-data:/app/data
       # sources.yaml (src/sources/status.py: "изменение файла... действует без
@@ -32,7 +43,7 @@ services:
       # только читает реестр источников, не пишет в него (main-prompt.md §7).
       - ./sources.yaml:/app/sources.yaml:ro
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 10s
@@ -49,8 +60,15 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    environment:
+      # Реверс-прокси target и server_name — docker/nginx.conf.template,
+      # рендерится envsubst встроенного nginx-entrypoint при старте
+      # контейнера, без пересборки образа (FN-45). Дефолты в Dockerfile ENV
+      # совпадают с этими же значениями, если .env/окружение их не задают.
+      API_UPSTREAM: ${API_UPSTREAM:-api:8000}
+      NGINX_SERVER_NAME: ${NGINX_SERVER_NAME:-_}
     ports:
-      - "8080:80"
+      - "${WEB_PORT:-8080}:80"
     healthcheck:
       # Alpine wget resolves localhost to ::1 first, while this nginx config
       # listens on IPv4. Use the loopback address explicitly so health means
