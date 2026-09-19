@@ -81,6 +81,23 @@ class UnsupportedRecordError(ValueError):
     потерять при передаче»."""
 
 
+class ConflictingObservationsError(ValueError):
+    """После выбора последней версии каждой записи поставщика
+    (``provider_record_id``, по ``fetched_at``) на один и тот же
+    ``observed_at`` всё равно претендуют ДВЕ РАЗНЫЕ записи поставщика —
+    round 1 ревью PR #29: это не то же самое, что позднее исправление той же
+    записи (``ConflictingObservationsError`` не поднимается в этом случае,
+    см. :func:`assess_observed_flux`). Источник — единственный
+    зарегистрированный коннектор ровно одного «первичного» спутника GOES
+    (``sources.yaml`` → ``space_weather[0].independence_note``): задокументированного
+    правила, как выбирать между ДВУМЯ разными спутниками на один и тот же
+    момент, не существует, а произвольный выбор (например «взять большее
+    значение») не был бы обоснован ничем, кроме удобства — main-prompt.md §2
+    требует делать пробел/неоднозначность видимой, а не решать её тихо.
+    Вызывающая сторона (``src/api/service.py``) ловит эту ошибку как отказ
+    обработки — ``status="source_error"``, не благоприятную оценку."""
+
+
 def classify_level(value: float) -> str:
     """Классифицирует один отсчёт потока (pfu) по шкале S NOAA.
 
@@ -101,12 +118,22 @@ def classify_level(value: float) -> str:
 class ObservedProtonSample:
     """Один нормализованный отсчёт наблюдения — как уже сохранён
     ``src/sources/swpc.py`` (``record.schema.json``), без переинтерпретации
-    единиц или времени."""
+    единиц или времени.
+
+    ``provider_record_id``/``fetched_at`` (round 1 ревью PR #29) — нужны
+    :func:`assess_observed_flux`, чтобы выбрать ПОСЛЕДНЮЮ версию записи
+    поставщика, а не любую попавшую в выборку: ``select_observed_range``
+    (в отличие от ``select_as_of``) намеренно возвращает ВСЕ версии одного
+    ``provider_record_id`` в диапазоне — у этого источника нет
+    ``published_at``, чтобы отсечь их на уровне SQL так же, как
+    ``select_as_of``."""
 
     observed_at: datetime
     value: float | None  # pfu; None — заведомо невалидный/отсутствующий отсчёт
     quality: str  # "nominal" | "degraded" | "unknown" (contracts/record.schema.json)
     record_id: str
+    provider_record_id: str
+    fetched_at: datetime
 
 
 def observed_proton_samples_from_records(
@@ -152,12 +179,15 @@ def observed_proton_samples_from_records(
                 "(main-prompt.md §2: unit travels with the value)"
             )
         observed_at = datetime.fromisoformat(str(record["observed_at"]).replace("Z", "+00:00"))
+        fetched_at = datetime.fromisoformat(str(record["fetched_at"]).replace("Z", "+00:00"))
         samples.append(
             ObservedProtonSample(
                 observed_at=observed_at,
                 value=float(value) if value is not None else None,
                 quality=str(record.get("quality", "unknown")),
                 record_id=str(record["record_id"]),
+                provider_record_id=str(record["provider_record_id"]),
+                fetched_at=fetched_at,
             )
         )
     return samples
@@ -230,22 +260,44 @@ def assess_observed_flux(
     window_duration = window_end - window_start
     hold = timedelta(seconds=hold_seconds)
 
-    # Дедупликация по ``observed_at`` (может произойти только если два
-    # разных провайдерских ключа — например разные спутники — дали отсчёт на
-    # один и тот же момент; штатно у этого источника такого не бывает, см.
-    # sources.yaml, но вызывающая сторона не обязана была это исключить):
-    # консервативно — берётся БОЛЬШЕЕ из значений. Для оценки радиационной
-    # обстановки, где полнота данных важнее среднего, это безопаснее, чем
-    # произвольный выбор одной из двух версий одного момента.
-    latest_by_moment: dict[datetime, ObservedProtonSample] = {}
+    # round 1 ревью PR #29: два разных шага, не один.
+    #
+    # 1) Версионирование — сначала для КАЖДОЙ записи поставщика
+    # (``provider_record_id`` — у этого источника кодирует и спутник, и
+    # ``observed_at``, см. src/sources/swpc.py::to_record_input) берётся
+    # ПОСЛЕДНЯЯ по ``fetched_at`` версия. Без этого шага позднее исправление
+    # ошибочного отсчёта (например пересчитанное 1000 -> 5 pfu — источник
+    # прямо документирует такую возможность передискретизации,
+    # sources.yaml → space_weather[0].quality_notes) не заменяло бы старую
+    # версию в выборке ``select_observed_range`` (в отличие от
+    # ``select_as_of``, здесь нет ``published_at``, чтобы отсечь это в SQL) —
+    # старое завышенное значение продолжало бы давать ложный S3.
+    latest_by_provider: dict[str, ObservedProtonSample] = {}
     for sample in samples:
-        current = latest_by_moment.get(sample.observed_at)
-        if current is None:
-            latest_by_moment[sample.observed_at] = sample
-        elif sample.value is not None and (current.value is None or sample.value > current.value):
-            latest_by_moment[sample.observed_at] = sample
+        current = latest_by_provider.get(sample.provider_record_id)
+        if current is None or sample.fetched_at > current.fetched_at:
+            latest_by_provider[sample.provider_record_id] = sample
 
-    ordered = sorted(latest_by_moment.values(), key=lambda s: s.observed_at)
+    # 2) Только теперь, после версионирования, проверяется коллизия по
+    # ``observed_at`` между РАЗНЫМИ записями поставщика (например два разных
+    # спутника на один момент — источник документирован как единственный
+    # «первичный» спутник, sources.yaml → space_weather[0].independence_note,
+    # штатно этого не бывает). Задокументированного правила выбора между
+    # двумя разными спутниками нет — эвристика вроде «взять большее значение»
+    # была бы произвольной, main-prompt.md §2 требует делать неоднозначность
+    # видимой, а не решать её тихо (см. ConflictingObservationsError).
+    by_moment: dict[datetime, ObservedProtonSample] = {}
+    for sample in latest_by_provider.values():
+        existing = by_moment.get(sample.observed_at)
+        if existing is not None and existing.provider_record_id != sample.provider_record_id:
+            raise ConflictingObservationsError(
+                f"observed_at={sample.observed_at.isoformat()} has two conflicting "
+                f"provider records ({existing.provider_record_id!r} and "
+                f"{sample.provider_record_id!r}) with no documented rule to prefer one"
+            )
+        by_moment[sample.observed_at] = sample
+
+    ordered = sorted(by_moment.values(), key=lambda s: s.observed_at)
 
     threshold_pfu_by_level = {
         "S1": S1_THRESHOLD_PFU, "S2": S2_THRESHOLD_PFU, "S3": S3_THRESHOLD_PFU,
@@ -342,6 +394,7 @@ __all__ = [
     "S1_THRESHOLD_PFU",
     "S2_THRESHOLD_PFU",
     "S3_THRESHOLD_PFU",
+    "ConflictingObservationsError",
     "ObservedFluxAssessment",
     "ObservedProtonSample",
     "UnsupportedRecordError",

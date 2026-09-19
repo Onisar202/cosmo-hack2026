@@ -512,6 +512,32 @@ def _space_weather_mechanism(
     }
 
 
+def _space_weather_error_mechanism(
+    message: str, *, extra_notes: list[str] | None = None, extra_record_ids: list[str] | None = None
+) -> dict[str, Any]:
+    """``mechanismAssessment`` для ``space_weather`` когда классификация
+    наблюдения не может быть построена вообще — конфигурация источника
+    недоступна, или сохранённая запись/выборка повреждена (round 1 ревью
+    PR #29, 🚨/⚠️). ``status="source_error"`` всегда: main-prompt.md §2
+    запрещает отказу обработки тихо стать обычным ``missing_data`` — отличие
+    от «данных для окна правда нет» важно (О4 «видно ограничение уверенности»).
+    Не считает ничего на запасных/угаданных числах — в отличие от
+    ``_space_weather_mechanism``, здесь никакого ``ObservedFluxAssessment`` нет."""
+    notes = [message]
+    if extra_notes:
+        notes.extend(extra_notes)
+    return {
+        "mechanism": "space_weather",
+        "status": "source_error",
+        "max_level": None,
+        "exceedance_hours_by_level": None,
+        "coverage_fraction": 0.0,
+        "critical_gap": True,
+        "notes": notes,
+        "record_ids": list(extra_record_ids) if extra_record_ids else [],
+    }
+
+
 def _status_dict(status: SourceStatus, *, config_enabled: bool) -> dict[str, Any]:
     effective = effective_status(status, config_enabled=config_enabled)
     return {
@@ -555,27 +581,6 @@ def _noaa_3day_config_enabled() -> bool:
         return noaa_3day_source.load_source_config().enabled
     except Exception:  # noqa: BLE001 — см. _swpc_config_enabled выше.
         return True
-
-
-def _swpc_freshness_seconds() -> tuple[float, float]:
-    """``(ttl_seconds, critical_staleness_seconds)`` источника наблюдения
-    GOES из ``sources.yaml`` (main-prompt.md §7 «пороги... в конфиге, не в
-    коде»); запасное значение — те же числа, что документированы там же
-    (``space_weather[0].freshness``) — только на случай, если сам файл
-    сейчас нечитаем (тот же принцип отказоустойчивости, что и
-    :func:`_swpc_config_enabled`, не должен ронять расчёт из-за временной
-    проблемы с конфигом).
-
-    ``ttl_seconds`` служит здесь двум целям: как и раньше — период
-    периодического refresh, и (FN-38) как ``hold_seconds`` —
-    :func:`~src.domain.spaceweather.observed_classifier.assess_observed_flux`
-    держит один отсчёт представительным вперёд не дольше этого интервала.
-    """
-    try:
-        cfg = swpc_source.load_source_config()
-        return cfg.ttl_seconds, cfg.critical_staleness_seconds
-    except Exception:  # noqa: BLE001 — см. _swpc_config_enabled выше.
-        return 300.0, 3600.0
 
 
 def _window(
@@ -762,6 +767,15 @@ def _build_current_result(
 
     swpc_attempt_id = _fetch_attempt_id(swpc_source.SOURCE_ID, now=now)
     swpc_unexpected_error: str | None = None
+    # round 1 ревью PR #29 (🚨): ``swpc_cfg`` захватывается здесь и переиспользуется
+    # ниже (ttl_seconds/critical_staleness_seconds для классификатора) — НЕ
+    # перечитывается заново отдельным вызовом с запасными константами на
+    # случай отказа чтения. Остаётся ``None``, только если сама загрузка
+    # конфигурации не удалась — тогда классификация ниже честно возвращает
+    # ``source_error``, а не считает на угаданных числах (main-prompt.md §7
+    # «пороги/горизонты... в конфиге, не в коде», §2 «отказ не подменяется
+    # благоприятной/правдоподобной оценкой»).
+    swpc_cfg: swpc_source.SwpcSourceConfig | None = None
     try:
         swpc_cfg = swpc_source.load_source_config()
         swpc_outcome = swpc_source.fetch_and_store(
@@ -912,7 +926,6 @@ def _build_current_result(
     # читает весь диапазон [start - hold, end) по ``observed_at``, не только
     # самую свежую запись — published_at у этого источника всегда null
     # (sources.yaml), select_as_of здесь неприменим.
-    swpc_ttl_seconds, swpc_critical_staleness_seconds = _swpc_freshness_seconds()
     observed_records_by_id: dict[str, dict[str, Any]] = {}
 
     def _window_observed_mechanism(
@@ -920,39 +933,54 @@ def _build_current_result(
         forecast_record_ids: list[str],
     ) -> dict[str, Any]:
         end_at = start_at + timedelta(hours=duration_hours)
+        cfg = swpc_cfg
+        if cfg is None:
+            # round 1 ревью PR #29 (🚨): конфигурация источника недоступна —
+            # ttl_seconds/critical_staleness_seconds неизвестны для ЭТОЙ
+            # попытки расчёта, поэтому честный отказ обработки, а не расчёт
+            # на запасных/угаданных числах (main-prompt.md §7 «пороги... в
+            # конфиге, не в коде», §2 «отказ не подменяется правдоподобной
+            # оценкой»).
+            return _space_weather_error_mechanism(
+                "Классификация наблюдения GOES не построена: конфигурация "
+                "источника (sources.yaml) недоступна для этой попытки расчёта.",
+                extra_notes=forecast_notes, extra_record_ids=forecast_record_ids,
+            )
         try:
             records = select_observed_range(
                 conn,
                 source_id=swpc_source.SOURCE_ID,
                 record_kind="observation",
-                start_at=start_at - timedelta(seconds=swpc_ttl_seconds),
+                start_at=start_at - timedelta(seconds=cfg.ttl_seconds),
                 end_at=end_at,
             )
             samples = observed_proton_samples_from_records(records)
-        except Exception as exc:  # noqa: BLE001 — повреждённая сохранённая запись не
-            # должна обрушивать расчёт целиком (тот же принцип, что и
-            # noaa_3day_forecast_selection_failed выше); окно просто не увидит
-            # отсчётов наблюдения (main-prompt.md §2 — не благоприятная замена,
-            # отсутствие остаётся видимым через critical_gap/status ниже).
-            _log(
-                "swpc_observation_selection_failed",
-                error=sanitize_unexpected_error(exc),
-                **log_ctx,
+            assessment = assess_observed_flux(
+                samples, window_start=start_at, window_end=end_at, now=now,
+                hold_seconds=cfg.ttl_seconds,
             )
-            records = []
-            samples = []
+        except Exception as exc:  # noqa: BLE001 — round 1 ревью PR #29 (⚠️):
+            # повреждённая сохранённая запись, несовместимая нормализация или
+            # неразрешимый конфликт версий (ConflictingObservationsError) —
+            # явный отказ обработки (status="source_error"), а не тихое
+            # схлопывание в обычный missing_data, которое выглядело бы как
+            # «данных для окна и правда нет» (main-prompt.md §2 — три разных
+            # состояния, не два).
+            error_detail = sanitize_unexpected_error(exc)
+            _log("swpc_observation_processing_failed", error=error_detail, **log_ctx)
+            return _space_weather_error_mechanism(
+                f"Классификация наблюдения GOES не построена: {error_detail}.",
+                extra_notes=forecast_notes, extra_record_ids=forecast_record_ids,
+            )
+
         for record in records:
             observed_records_by_id[str(record["record_id"])] = record
 
-        assessment = assess_observed_flux(
-            samples, window_start=start_at, window_end=end_at, now=now,
-            hold_seconds=swpc_ttl_seconds,
-        )
         status = _space_weather_status(
             assessment,
             swpc_status=swpc_status,
             fetch_errored=swpc_fetch_errored,
-            critical_staleness_seconds=swpc_critical_staleness_seconds,
+            critical_staleness_seconds=cfg.critical_staleness_seconds,
             now=now,
         )
         return _space_weather_mechanism(

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.domain.spaceweather.observed_classifier import (
+    ConflictingObservationsError,
     ObservedProtonSample,
     UnsupportedRecordError,
     assess_observed_flux,
@@ -34,6 +35,8 @@ def _record(
     source_id: str = "noaa-swpc-proton-flux",
     record_kind: str = "observation",
     unit: str | None = "pfu",
+    provider_record_id: str | None = None,
+    fetched_at: datetime | None = None,
 ) -> dict[str, object]:
     return {
         "record_id": record_id,
@@ -43,14 +46,32 @@ def _record(
         "value": value,
         "unit": unit if value is not None else None,
         "quality": quality,
+        # По умолчанию — свой собственный provider_record_id/fetched_at (как
+        # будто это единственная известная версия этой записи): большинство
+        # тестов этого файла не проверяют версионирование само по себе, см.
+        # test_later_version_of_the_same_provider_record_replaces_the_earlier_one
+        # и test_conflicting_provider_records_at_the_same_observed_at_raise.
+        "provider_record_id": provider_record_id if provider_record_id is not None else record_id,
+        "fetched_at": (fetched_at if fetched_at is not None else observed_at).isoformat(),
     }
 
 
 def _sample(
-    *, observed_at: datetime, value: float | None, quality: str = "nominal", record_id: str = "r"
+    *,
+    observed_at: datetime,
+    value: float | None,
+    quality: str = "nominal",
+    record_id: str = "r",
+    provider_record_id: str | None = None,
+    fetched_at: datetime | None = None,
 ) -> ObservedProtonSample:
     return ObservedProtonSample(
-        observed_at=observed_at, value=value, quality=quality, record_id=record_id
+        observed_at=observed_at,
+        value=value,
+        quality=quality,
+        record_id=record_id,
+        provider_record_id=provider_record_id if provider_record_id is not None else record_id,
+        fetched_at=fetched_at if fetched_at is not None else observed_at,
     )
 
 
@@ -267,25 +288,69 @@ def test_degraded_quality_is_used_and_noted_not_excluded() -> None:
     assert any("degraded" in note or "yaw-flip" in note for note in assessment.notes)
 
 
-def test_two_samples_at_the_same_observed_at_are_deduplicated_conservatively() -> None:
-    """Штатно не должно происходить у этого источника (один спутник на
-    time_tag, см. sources.yaml), но вызывающая сторона не обязана была это
-    гарантировать — консервативно берётся БОЛЬШЕЕ значение (безопаснее для
-    оценки радиационной обстановки, main-prompt.md §1 «предпочтение
-    надёжности»)."""
-    same_moment = WINDOW_START
-    samples = [
-        _sample(observed_at=same_moment, value=50.0, record_id="low"),
-        _sample(observed_at=same_moment, value=500.0, record_id="high"),
-    ]
+def test_later_version_of_the_same_provider_record_replaces_the_earlier_one() -> None:
+    """round 1 ревью PR #29 (🚨): ``select_observed_range`` (в отличие от
+    ``select_as_of``) возвращает ВСЕ версии одного ``provider_record_id`` —
+    источник документирует возможность пересчёта отсчёта (sources.yaml →
+    space_weather[0].quality_notes). Позднее исправление ошибочного 1000 pfu
+    на настоящие 5 pfu обязано ЗАМЕНИТЬ старую версию, не усредниться и не
+    проиграть «эвристике максимума» — иначе расчёт продолжал бы показывать
+    ложный S3 после того, как источник сам его исправил."""
+    erroneous = _sample(
+        observed_at=WINDOW_START, value=1000.0, record_id="v1",
+        provider_record_id="18:2024-05-10T12:00:00+00:00",
+        fetched_at=WINDOW_START,
+    )
+    corrected = _sample(
+        observed_at=WINDOW_START, value=5.0, record_id="v2",
+        provider_record_id="18:2024-05-10T12:00:00+00:00",
+        fetched_at=WINDOW_START.replace(minute=30),  # получено позже — новая версия
+    )
 
     assessment = assess_observed_flux(
-        samples, window_start=WINDOW_START, window_end=WINDOW_START.replace(minute=5),
+        [erroneous, corrected], window_start=WINDOW_START,
+        window_end=WINDOW_START.replace(minute=5),
         now=LONG_AFTER_WINDOW, hold_seconds=300.0,
     )
 
-    assert assessment.max_level == "S2"  # 500 pfu, не 50
-    assert assessment.record_ids == ("high",)
+    assert assessment.max_level == "background"  # 5 pfu, не 1000 (ложный S3)
+    assert assessment.record_ids == ("v2",)
+
+    # Порядок появления в выборке не должен влиять на исход.
+    assessment_reversed = assess_observed_flux(
+        [corrected, erroneous], window_start=WINDOW_START,
+        window_end=WINDOW_START.replace(minute=5),
+        now=LONG_AFTER_WINDOW, hold_seconds=300.0,
+    )
+    assert assessment_reversed.max_level == "background"
+    assert assessment_reversed.record_ids == ("v2",)
+
+
+def test_conflicting_provider_records_at_the_same_observed_at_raise() -> None:
+    """После выбора последней версии КАЖДОЙ записи поставщика (тест выше)
+    две РАЗНЫЕ записи поставщика на один и тот же момент — не то же самое,
+    что версии одной записи: источник задокументирован как единственный
+    «первичный» спутник (sources.yaml → space_weather[0].independence_note),
+    задокументированного правила выбора между двумя разными спутниками нет
+    — main-prompt.md §2 требует делать эту неоднозначность видимой, не
+    решать её эвристикой «взять большее значение» (round 1 ревью PR #29)."""
+    same_moment = WINDOW_START
+    samples = [
+        _sample(
+            observed_at=same_moment, value=50.0, record_id="low",
+            provider_record_id="18:2024-05-10T12:00:00+00:00",
+        ),
+        _sample(
+            observed_at=same_moment, value=500.0, record_id="high",
+            provider_record_id="99:2024-05-10T12:00:00+00:00",
+        ),
+    ]
+
+    with pytest.raises(ConflictingObservationsError):
+        assess_observed_flux(
+            samples, window_start=WINDOW_START, window_end=WINDOW_START.replace(minute=5),
+            now=LONG_AFTER_WINDOW, hold_seconds=300.0,
+        )
 
 
 def test_rejects_naive_window_or_now() -> None:

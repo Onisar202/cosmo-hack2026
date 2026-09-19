@@ -290,3 +290,131 @@ def test_timeout_with_no_stored_observations_yields_source_error_status(
     assert space_weather["status"] == "source_error"
     assert space_weather["max_level"] is None
     assert space_weather["record_ids"] == []
+
+
+def test_unreadable_source_config_yields_source_error_not_a_guessed_ok(
+    _env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """round 1 ревью PR #29 (🚨 src/api/service.py): раньше при ошибке чтения
+    ``sources.yaml`` расчёт молча считал на запасных константах
+    (``hold_seconds=300``, ``critical_staleness_seconds=3600``) — со
+    сплошь покрытым часом в хранилище это давало ``status="ok"``, хотя сама
+    конфигурация источника была недоступна. Сейчас — явный ``source_error``,
+    без какого-либо расчёта на угаданных числах."""
+    settings, raw_store = _env
+    registry = SourceStatusRegistry()
+    window_start = datetime(2024, 5, 10, 10, 0, tzinfo=UTC)
+    # Ровно те же насеянные плотные наблюдения, что дают "ok" в
+    # test_seeded_full_hour_of_observations_yields_ok_status_via_production_path
+    # — разница только в том, что конфигурация источника недоступна.
+    _seed_dense_hour_of_observations(
+        settings=settings, raw_store=raw_store, start_at=window_start, spike_minute=15
+    )
+
+    def broken_config(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("simulated sources.yaml read failure")
+
+    monkeypatch.setattr(swpc_source, "load_source_config", broken_config)
+
+    request = CalculationRequest(
+        mode="current", start_at=window_start, duration_hours=1, search_window_hours=4,
+    )
+    result_id = _run_calculation(
+        request,
+        settings=settings,
+        raw_store=raw_store,
+        registry=registry,
+        now=window_start + timedelta(hours=10),
+    )
+
+    conn = connect_store(settings.store_db_path)
+    try:
+        result = store_get_result(conn, result_id)
+    finally:
+        conn.close()
+    assert result is not None
+
+    win_a = next(w for w in result["windows"] if w["window_id"] == "win-a")
+    space_weather = next(m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather")
+    assert space_weather["status"] == "source_error"
+    assert space_weather["max_level"] is None
+    assert space_weather["exceedance_hours_by_level"] is None
+    assert space_weather["record_ids"] == []
+    assert any("конфигурация" in note for note in space_weather["notes"])
+
+    # Плотные наблюдения при этом реально были насеяны — окно не пустое,
+    # просто не может быть классифицировано без известной конфигурации.
+    observed_manifest = [
+        m for m in result["data_manifest"] if m["record_kind"] == "observation"
+    ]
+    assert observed_manifest == []
+
+
+def test_conflicting_satellite_records_yield_source_error_not_missing_data(
+    _env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """round 1 ревью PR #29 (⚠️ src/api/service.py): ошибка обработки
+    сохранённых наблюдений (здесь — ``ConflictingObservationsError`` из двух
+    разных provider-записей на один ``observed_at``, main-prompt.md §2)
+    обязана остаться видимой как ``source_error``, а не тихо схлопнуться в
+    обычный ``missing_data`` (который выглядел бы как «данных для окна и
+    правда нет», хотя причина — повреждённая/неразрешимая выборка)."""
+    settings, raw_store = _env
+    registry = SourceStatusRegistry()
+    window_start = datetime(2024, 5, 10, 10, 0, tzinfo=UTC)
+
+    conn = connect_store(settings.store_db_path)
+    try:
+        for satellite in ("18", "99"):
+            sample = swpc_source.SwpcSample(
+                satellite=satellite,
+                observed_at=window_start,
+                value=15.0,
+                degraded=False,
+                raw_entry={
+                    "time_tag": window_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "satellite": int(satellite),
+                    "flux": 15.0,
+                    "energy": ">=10 MeV",
+                    "yaw_flip": 0,
+                },
+            )
+            record_input = swpc_source.to_record_input(
+                sample,
+                source_url="https://services.swpc.noaa.gov/json/goes/primary/"
+                "integral-protons-1-day.json",
+                fetched_at=window_start,
+            )
+            insert_record(conn, raw_store, record_input)
+    finally:
+        conn.close()
+
+    def swpc_fetch(url: str, **_kwargs: Any) -> HttpFetchResult:
+        return HttpFetchResult(
+            status_code=200, body=swpc_sample_bytes(), url=url, elapsed_seconds=0.001
+        )
+
+    monkeypatch.setattr(swpc_source, "fetch", swpc_fetch)
+
+    request = CalculationRequest(
+        mode="current", start_at=window_start, duration_hours=1, search_window_hours=4,
+    )
+    result_id = _run_calculation(
+        request,
+        settings=settings,
+        raw_store=raw_store,
+        registry=registry,
+        now=window_start + timedelta(hours=10),
+    )
+
+    conn = connect_store(settings.store_db_path)
+    try:
+        result = store_get_result(conn, result_id)
+    finally:
+        conn.close()
+    assert result is not None
+
+    win_a = next(w for w in result["windows"] if w["window_id"] == "win-a")
+    space_weather = next(m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather")
+    assert space_weather["status"] == "source_error"
+    assert space_weather["max_level"] is None
