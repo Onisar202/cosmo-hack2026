@@ -43,7 +43,13 @@ FN-28 (S1-10) собирает текущие API/UI/SQLite в единое ра
 подробности там же и в `docs/method.md` §7.5). FN-36 (S2-06, этап 2)
 реализует слой выгрузки (`src/export/`): машиночитаемый JSON и читаемый
 HTML строятся только из одного уже сохранённого результата — см. раздел
-«Выгрузка» ниже.
+«Выгрузка» ниже. FN-43 (S3-05, этап 3) добавляет стенд экспериментов Т5
+(`experiments/`) — сравнение production-метода (те же доменные/source-модули,
+что и `mode=current`, применённые к `mode=historical_forecast` напрямую, без
+`src/api/service.py`) с простым базовым методом на выраженном событии
+(10–11 мая 2024), контрольном спокойном периоде (16–27 июня 2024) и заранее
+доказанном архивном пробеле орбиты — см. раздел «Стенд экспериментов Т5
+(FN-43)» ниже и `docs/method.md` §9.
 
 ## Стек
 
@@ -777,6 +783,77 @@ main-prompt.md §9 п.7, backend-prompt.md §2): каждая фоновая з�
   HTML и структурно идентичный JSON — `result_id` и данные не меняются
   (`tests/export/`, `tests/api/test_export.py`).
 
+## Стенд экспериментов Т5 (`experiments/`, FN-43)
+
+Минимальный, честный стенд сравнения production-метода с наивным базовым
+методом на трёх сценариях (выраженное событие / контрольный период /
+доказанный архивный пробел) — критерий Т5. Полностью офлайн: читает только
+уже закоммиченные фикстуры (`tests/fixtures/sources/archive/`,
+`tests/fixtures/orbit/history/`) и уже забандленный документ NASA MEO
+(`src/sources/data/mmod/...`), не ходит в сеть.
+
+- **`experiments/production.py`** строит `CalculationResult`
+  (`contracts/result.schema.json`) для `mode="historical_forecast"`
+  напрямую из уже слитых доменных/source-модулей этого репозитория
+  (`src/sources/orbit_history.py`/`orbit.py`, `src/sources/mmod.py`,
+  `src/domain/mmod/background.py`, `src/domain/windows`) — теми же
+  модулями, что и `mode="current"` в `src/api/service.py`, но НЕ вызывая
+  этот модуль (его `mode != "current"` путь сейчас поднимает
+  `historical_mode_not_implemented`: FN-41/FN-42 — отдельные, ещё не
+  слитые задачи production-оркестрации и строгого архивного провайдера
+  космопогоды). `mechanisms[*space_weather]` в этом стенде честно всегда
+  `status="missing_data"` — в репозитории нет архивного количественного
+  наблюдения потока протонов (только живой `noaa-swpc-proton-flux`,
+  никогда не `replay_eligible`), а придумывать DONKI→шкала-S классификацию
+  значило бы подменить отсутствующую интеграцию фиктивным успехом
+  (main-prompt.md §2) — это прямо демонстрирует критерий О2 «без
+  необоснованных заявлений» и даёт честный `recommendation.status =
+  "all_windows_excluded"` по правилу критического пробела
+  (main-prompt.md §11, п.1). MMOD (`mmod`), напротив, реально `status="ok"`
+  — годовой документ NASA MEO 2024 покрывает весь обязательный период.
+- **`experiments/donki_evidence.py`** — архивная evidence-проба DONKI (**не
+  шкала S NOAA**, только факт публикации предупреждения архива,
+  пересекающегося с окном, известного к `as_of` через уже протестированный
+  `select_as_of`) — используется исключительно для сравнения с базовым
+  методом и метрик, никогда не создаёт `mechanismAssessment.status="ok"`.
+- **`experiments/baseline.py`** — наивный базовый метод (main-prompt.md
+  §11: последнее известное наблюдение переносится на весь горизонт без
+  расчёта пересечений), структурно независимый от `production.py`/
+  `donki_evidence.py` (проверено `tests/experiments/test_baseline_independence.py`
+  через `ast`-анализ импортов).
+- **`experiments/metrics.py`** — `event_miss`, `false_warning`,
+  `selected_window_change`, `coverage`; `lead_time`/`stability` честно не
+  вычисляются — DONKI-уведомления точечные, не непрерывный количественный
+  ряд (см. `lead_time_stability_note` в каждом `metrics.json`).
+
+### Запуск
+
+```bash
+uv run python -m experiments.run --config experiments/scenarios.yaml --out experiments/out
+```
+
+Детерминировано (`result_id`/`computed_at`/`record_id` — не `uuid4()`/
+`datetime.now()`, см. `experiments/run.py`/`experiments/determinism.py`):
+повторный прогон даёт побайтово идентичные JSON-артефакты. Для каждого
+сценария (`experiments/out/<scenario>/`):
+
+- `baseline_result.json` — свой вердикт базового метода по каждому окну,
+  с трассировкой к использованному уведомлению DONKI;
+- `production_result.json` (когда орбита пригодна) — провалидирован по
+  `contracts/result.schema.json`, плюс `production_result_export.json`/
+  `production_result.html` — тот же результат через реальные
+  `src/export/json_export.py`/`html_export.py` (приёмка О4/критерий Т8);
+- `production_failure.json` (только `missing_data`) — структурная,
+  машиночитаемая причина отказа отбора орбиты (`HistoricalElementsUnsupportedError`)
+  и почему это корректный исход, а не баг;
+- `metrics.json` — метрики сценария.
+
+Сводная таблица и честные выводы — `experiments/out/summary.md`, собирается
+программно из уже посчитанных метрик (не независимое утверждение поверх
+них). `experiments/out/` — воспроизводимый вывод прогона (`.gitignore`), в
+репозиторий не коммитится; конкретные цифры реального прогона, на которых
+основаны выводы `docs/method.md` §9, зафиксированы дословно там же.
+
 ## Структура проекта
 
 Полное описание слоёв и границ между ними — `.ai/main-prompt.md`, §8.
@@ -798,10 +875,12 @@ sources.yaml    # Реестр источников (main-prompt.md §7): space_
                 # nasa-donki-notifications, noaa-swpc-forecast-discussion-archive,
                 # noaa-swpc-3day-forecast[-archive]),
                 # sources (celestrak-gp, space-track-gp-history, MMOD)
+experiments/    # Стенд Т5 (FN-43): production.py/baseline.py/donki_evidence.py/metrics.py/
+                # run.py/config.py/fixtures.py/determinism.py, scenarios.yaml, out/ (артефакты)
 docs/
 ├── mechanisms.md  # Обоснование MMOD (FN-25)
 └── method.md      # Пригодность архивов космопогоды для строгого replay (FN-23);
-                   # §7 — NOAA 3-Day Forecast S1+ (FN-31)
+                   # §7 — NOAA 3-Day Forecast S1+ (FN-31); §9 — стенд Т5 (FN-43)
 tests/
 ├── api/        # test_requests.py, test_isolation.py (S1-07), test_export.py (FN-36)
 ├── sources/    # test_swpc.py, test_archive_publication.py, test_noaa_3day_forecast.py +
@@ -809,6 +888,9 @@ tests/
 │               # fixtures/sources/noaa_3day_forecast/synthetic/ (явно синтетические, FN-31)
 ├── domain/spaceweather/  # test_external_forecast.py (FN-31)
 ├── export/     # test_json_export.py, test_html_export.py, test_boundaries.py (FN-36)
+├── experiments/  # test_leak.py, test_config_driven.py, test_determinism.py,
+│               # test_artifact_shape.py, test_missing_data.py,
+│               # test_baseline_independence.py, test_metrics.py (FN-43)
 ├── orbit/      # test_propagation.py
 ├── fixtures/orbit/  # TLE-фикстуры и независимый эталон SGP4 verification
 ├── store/      # test_versions.py, test_as_of.py
