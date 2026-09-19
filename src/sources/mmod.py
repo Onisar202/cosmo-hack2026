@@ -347,8 +347,38 @@ def ensure_mmod_records_for_window(
         rows=tuple(selected_rows), grid_start=parsed.grid_start, grid_end=parsed.grid_end
     )
     records = build_mmod_background_records(windowed, raw_bytes=raw_bytes, fetched_at=fetched_at)
-    record_ids = [insert_record(conn, raw_store, record) for record in records]
+    record_ids = [
+        _insert_tolerating_concurrent_insert(conn, raw_store, record) for record in records
+    ]
     return record_ids, parsed.grid_start, parsed.grid_end
+
+
+def _insert_tolerating_concurrent_insert(
+    conn: sqlite3.Connection, raw_store: RawOriginalStore, record: RecordInput
+) -> str:
+    """``insert_record`` с одним повтором на гонку конкурентных вставок.
+
+    Два одновременных расчёта на пересекающиеся окна ОДНОГО периода (реально
+    достижимо с FN-41: исторические режимы вставляют узлы этого документа за
+    2024 год) проигрывают гонку "SELECT видит пусто у обоих -> INSERT"
+    внутри ``insert_record`` (src/store/records.py делает SELECT-затем-INSERT
+    без транзакционной защиты): один коммитит первым, второй получает от
+    sqlite ``UNIQUE constraint failed`` вместо идемпотентного возврата
+    ``record_id``. Повторный вызов застаёт уже закоммиченную строку своим же
+    SELECT — содержимое идентично (тот же узел того же бандлового
+    документа), это не ``DuplicateKeyConflictError``.
+
+    Без этого повтора проигравший расчёт получал бы
+    ``mechanisms[*mmod].status = "source_error"`` и критический пробел на
+    ровном месте — то есть два одновременных запроса давали бы РАЗНЫЕ
+    оценки одного и того же окна (приёмка FN-26 «два конкурентных запроса не
+    смешивают данные», main-prompt.md §9 п.7). Тот же приём и по той же
+    причине, что в ``src/api/service.py::fetch_and_store_orbit``.
+    """
+    try:
+        return insert_record(conn, raw_store, record)
+    except sqlite3.IntegrityError:
+        return insert_record(conn, raw_store, record)
 
 
 __all__ = [

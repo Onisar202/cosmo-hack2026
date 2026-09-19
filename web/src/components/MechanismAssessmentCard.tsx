@@ -3,7 +3,7 @@ import Chip from '@mui/material/Chip'
 import Stack from '@mui/material/Stack'
 import Typography from '@mui/material/Typography'
 import type { MechanismAssessment } from '../api/types'
-import { MECHANISM_LABELS, MECHANISM_STATUS_LABELS } from './labels'
+import { EVENT_STATE_LABELS, MECHANISM_LABELS, MECHANISM_STATUS_LABELS } from './labels'
 import { NullValue } from './NullValue'
 import { StatusBadge } from './StatusBadge'
 
@@ -13,6 +13,9 @@ const REASON_BY_STATUS: Record<string, string> = {
   stale_data: 'доступные данные устарели',
   source_error: 'отказ или квота источника',
   beyond_horizon: 'интервал за пределами горизонта прогноза — «не покрыто», а не «спокойно»',
+  qualitative_only:
+    'событие подтверждено архивной линией, но уровень и длительность превышения по ней ' +
+    'не восстанавливаются — это не «спокойно» и не «нет данных»',
 }
 
 /**
@@ -23,6 +26,12 @@ const REASON_BY_STATUS: Record<string, string> = {
 export function MechanismAssessmentCard({ assessment }: { assessment: MechanismAssessment }) {
   const statusSpec = MECHANISM_STATUS_LABELS[assessment.status]
   const nullReason = REASON_BY_STATUS[assessment.status] ?? 'нет данных для оценки'
+  // FN-41: поле обязательно контрактом, но сохранённые результаты прежних
+  // версий сервиса его не несут — хранилище неизменяемо и продолжает их
+  // отдавать (main-prompt.md §3), поэтому строка показывается только когда
+  // состояние действительно есть, а не подменяется значением по умолчанию.
+  const eventStateSpec =
+    assessment.event_state == null ? null : EVENT_STATE_LABELS[assessment.event_state]
 
   return (
     <Box sx={{ border: 1, borderColor: 'divider', borderRadius: 1, p: 1.5 }}>
@@ -32,6 +41,16 @@ export function MechanismAssessmentCard({ assessment }: { assessment: MechanismA
       </Stack>
 
       <Stack spacing={0.5}>
+        {eventStateSpec != null && (
+          <Typography variant="body2" component="div">
+            <strong>Архивная событийная линия:</strong>{' '}
+            <StatusBadge
+              label={eventStateSpec.label}
+              tone={eventStateSpec.tone}
+              icon={eventStateSpec.icon}
+            />
+          </Typography>
+        )}
         <Typography variant="body2">
           <strong>Максимальный уровень:</strong>{' '}
           {assessment.max_level == null ? <NullValue reason={nullReason} /> : assessment.max_level}

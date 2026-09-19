@@ -26,6 +26,7 @@ import type {
   MechanismStatus,
   RecommendationStatus,
   RecordKind,
+  SpaceWeatherEventState,
   WarningSeverity,
 } from '../api/types'
 
@@ -49,6 +50,37 @@ export const MECHANISM_STATUS_LABELS: Record<MechanismStatus, LabelSpec> = {
   stale_data: { label: 'данные устарели', tone: 'warning', icon: HistoryToggleOffIcon },
   source_error: { label: 'отказ источника', tone: 'error', icon: ErrorIcon },
   beyond_horizon: { label: 'за горизонтом прогноза', tone: 'info', icon: ScheduleIcon },
+  qualitative_only: {
+    label: 'событие подтверждено, уровень не восстановим',
+    tone: 'error',
+    icon: ReportProblemIcon,
+  },
+}
+
+/**
+ * FN-41: три состояния архивной событийной линии Механизма 1. Подписи
+ * намеренно НЕ сокращают «покрытие не подтверждено» до «нет данных» и не
+ * превращают «событие не выявлено» в «спокойно»: это разные утверждения о
+ * разной степени знания (main-prompt.md §2). NOT_APPLICABLE показывается
+ * нейтрально — линия не применялась, и это не вывод об обстановке.
+ */
+export const EVENT_STATE_LABELS: Record<SpaceWeatherEventState, LabelSpec> = {
+  EVENT_PRESENT: { label: 'событие выявлено', tone: 'error', icon: ReportProblemIcon },
+  NO_EVENT_DETECTED: {
+    label: 'событие не выявлено (покрытие подтверждено)',
+    tone: 'success',
+    icon: CheckCircleIcon,
+  },
+  INSUFFICIENT_DATA: {
+    label: 'оценить невозможно: покрытие не подтверждено',
+    tone: 'warning',
+    icon: HelpIcon,
+  },
+  NOT_APPLICABLE: {
+    label: 'архивная событийная линия не применялась',
+    tone: 'default',
+    icon: BlockIcon,
+  },
 }
 
 export const WARNING_SEVERITY_LABELS: Record<WarningSeverity, LabelSpec> = {

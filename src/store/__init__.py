@@ -17,6 +17,7 @@ from src.store.records import (
     get_record,
     insert_record,
     select_as_of,
+    select_by_provider_record_id,
     select_observed_range,
 )
 from src.store.results import (
@@ -41,6 +42,7 @@ __all__ = [
     "insert_record",
     "list_results",
     "select_as_of",
+    "select_by_provider_record_id",
     "select_observed_range",
     "store_result",
 ]

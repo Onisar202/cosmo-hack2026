@@ -64,7 +64,11 @@ def test_algorithm_version_was_bumped_for_the_mmod_wiring_change() -> None:
     # каждом таком изменении алгоритма, даже когда наблюдаемый результат
     # части запросов не меняется (например окно вне грида NASA MEO 2024
     # оставалось и остаётся missing_data и до, и после этого бампа).
-    assert ALGORITHM_VERSION == "0.4.0"
+    # FN-41 (этап 3) — следующее такое изменение: два реальных исторических
+    # режима, новое обязательное поле контракта event_state (видно в КАЖДОМ
+    # сохранённом результате, включая mode=current) и новый статус механизма
+    # qualitative_only.
+    assert ALGORITHM_VERSION == "0.5.0"
 
 
 def test_apply_window_dominance_selects_the_dominating_window() -> None:

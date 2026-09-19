@@ -41,8 +41,25 @@ Mode = Literal["current", "historical_analysis", "historical_forecast"]
 ARCHIVE_START = datetime(2024, 5, 1, 0, 0, 0, tzinfo=timezone.utc)
 ARCHIVE_END = datetime(2024, 6, 30, 23, 59, 59, 999999, tzinfo=timezone.utc)
 
-ALGORITHM_VERSION = "0.4.0"
-"""FN-39 (S2-08): mechanisms[*mmod] for `current` is no longer always
+ALGORITHM_VERSION = "0.5.0"
+"""FN-41 (stage 3): `historical_analysis` and `historical_forecast` are no
+longer a blanket `historical_mode_not_implemented` failure — both are real,
+separate orchestrations (`src/api/service.py`) producing a stored immutable
+result from the NASA TOPO OEM historical orbit path and the archived DONKI
+space-weather event line. Minor bump rather than patch because this changes
+what the algorithm produces in two ways that are visible in every stored
+result: (1) `contracts/result.schema.json` gains a required
+`mechanismAssessment.event_state` (EVENT_PRESENT / NO_EVENT_DETECTED /
+INSUFFICIENT_DATA / NOT_APPLICABLE — the three-way distinction confirmed
+necessary by a domain expert 2026-09-19, main-prompt.md §2) plus the
+`qualitative_only` mechanism status and the `nasa-iss-oem` orbit source; (2)
+`mode=current` results now carry `event_state = NOT_APPLICABLE` on every
+mechanism, so even a request whose levels are unchanged serializes
+differently. Same rule as the bumps below (main-prompt.md §3: version bump on
+any change to the algorithm producing the result, even where an individual
+request's observable output happens to stay the same).
+
+FN-39 (S2-08): mechanisms[*mmod] for `current` is no longer always
 not_implemented — src.domain.mmod.background computes ratio_to_background
 from the NASA MEO 2024 LEO forecast (sources.yaml#nasa-meo-leo-forecast-2024)
 against the 1.2/2 thresholds (main-prompt.md §11) and can now yield

@@ -345,6 +345,41 @@ def get_latest_record(
     return payload
 
 
+def select_by_provider_record_id(
+    conn: sqlite3.Connection, *, source_id: str, provider_record_id: str
+) -> list[dict[str, Any]]:
+    """Возвращает все сохранённые версии ОДНОГО продукта поставщика
+    (``(source_id, provider_record_id)``), новейшая по ``published_at`` первой.
+
+    Четвёртый сценарий выборки рядом с :func:`select_as_of`,
+    :func:`select_observed_range` и :func:`get_latest_record`. Нужен
+    архивному шлюзу (FN-41, ``src/sources/orbit_history.py``), которому надо
+    ответить на вопрос «этот датированный выпуск уже скачан?» ДО сетевого
+    вызова: кеш архивных ответов бессрочен (.ai/main-prompt.md §5 — архивные
+    данные не меняются), и повторный расчёт по тому же периоду не должен
+    заново тянуть многомегабайтный файл, который уже лежит в хранилище.
+    Именно ``provider_record_id``, а не ``record_kind``/``observed_at``: для
+    OEM это идентификатор датированного выпуска, к которому привязаны все
+    его версии (``src/sources/orbit_history.py``).
+
+    Возвращаются ВСЕ версии, а не только последняя: правило выбора версии —
+    забота вызывающей стороны (.ai/main-prompt.md §2 «поздние уточнения
+    хранятся рядом с прежними версиями, а не поверх них»), эта функция
+    ничего не отбрасывает.
+    """
+    _require_non_empty(source_id, "source_id")
+    _require_non_empty(provider_record_id, "provider_record_id")
+    rows = conn.execute(
+        """
+        SELECT payload_json FROM source_records
+        WHERE source_id = ? AND provider_record_id = ?
+        ORDER BY published_at DESC, record_id DESC
+        """,
+        (source_id, provider_record_id),
+    ).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
 def select_observed_range(
     conn: sqlite3.Connection,
     *,

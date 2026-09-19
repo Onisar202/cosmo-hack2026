@@ -34,6 +34,7 @@
         {
           "mechanism": "space_weather",
           "status": "ok",
+          "event_state": "NOT_APPLICABLE",
           "max_level": "background",
           "exceedance_hours_by_level": { "S1": 0, "S2": 0, "S3": 0 },
           "coverage_fraction": 1.0,
@@ -44,6 +45,7 @@
         {
           "mechanism": "mmod",
           "status": "ok",
+          "event_state": "NOT_APPLICABLE",
           "max_level": "background",
           "exceedance_hours_by_level": { "elevated": 0, "pronounced": 0 },
           "coverage_fraction": 1.0,
@@ -67,6 +69,7 @@
         {
           "mechanism": "space_weather",
           "status": "ok",
+          "event_state": "NOT_APPLICABLE",
           "max_level": "background",
           "exceedance_hours_by_level": { "S1": 0, "S2": 0, "S3": 0 },
           "coverage_fraction": 1.0,
@@ -77,6 +80,7 @@
         {
           "mechanism": "mmod",
           "status": "ok",
+          "event_state": "NOT_APPLICABLE",
           "max_level": "background",
           "exceedance_hours_by_level": { "elevated": 0, "pronounced": 0 },
           "coverage_fraction": 1.0,

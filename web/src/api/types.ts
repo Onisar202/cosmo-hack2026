@@ -29,7 +29,10 @@ export interface DataManifestEntry {
 }
 
 export interface OrbitSummary {
-  source: 'celestrak' | 'space-track'
+  // nasa-iss-oem (FN-41) — исторические эфемериды NASA TOPO CCSDS OEM:
+  // единственный источник орбиты в historical_* режимах; current-элементы
+  // CelesTrak туда не подставляются (contracts/result.schema.json).
+  source: 'celestrak' | 'space-track' | 'nasa-iss-oem'
   norad_id: string
   elements_epoch: string
   elements_age_hours: number
@@ -41,7 +44,24 @@ export interface OrbitSummary {
 export type Mechanism = 'space_weather' | 'mmod'
 
 export type MechanismStatus =
-  'ok' | 'not_implemented' | 'missing_data' | 'stale_data' | 'source_error' | 'beyond_horizon'
+  | 'ok'
+  | 'not_implemented'
+  | 'missing_data'
+  | 'stale_data'
+  | 'source_error'
+  | 'beyond_horizon'
+  // FN-41: событие подтверждено качественно (event_state = EVENT_PRESENT),
+  // но уровень/длительность по доступной архивной линии не восстанавливаются.
+  | 'qualitative_only'
+
+/**
+ * FN-41: три различимых состояния архивной событийной линии Механизма 1 —
+ * «воздействие не выявлено» отличается от «оценить невозможно»
+ * (contracts/result.schema.json, spaceWeatherEventState). NOT_APPLICABLE —
+ * линия не применялась (механизм mmod, режим current).
+ */
+export type SpaceWeatherEventState =
+  'EVENT_PRESENT' | 'NO_EVENT_DETECTED' | 'INSUFFICIENT_DATA' | 'NOT_APPLICABLE'
 
 export interface SpaceWeatherExceedance {
   S1: number
@@ -57,6 +77,14 @@ export interface MmodExceedance {
 export interface MechanismAssessment {
   mechanism: Mechanism
   status: MechanismStatus
+  /**
+   * FN-41: обязательное поле контракта. В TypeScript — необязательное
+   * намеренно: хранилище неизменяемо и продолжает отдавать результаты,
+   * сохранённые до FN-41, у которых этого поля нет (main-prompt.md §3).
+   * Интерфейс показывает строку только когда состояние действительно есть,
+   * а не подставляет значение по умолчанию.
+   */
+  event_state?: SpaceWeatherEventState
   max_level: string | null
   exceedance_hours_by_level: SpaceWeatherExceedance | MmodExceedance | null
   coverage_fraction: number

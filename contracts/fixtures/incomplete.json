@@ -34,6 +34,7 @@
         {
           "mechanism": "space_weather",
           "status": "missing_data",
+          "event_state": "NOT_APPLICABLE",
           "max_level": null,
           "exceedance_hours_by_level": null,
           "coverage_fraction": 0.0,
@@ -46,6 +47,7 @@
         {
           "mechanism": "mmod",
           "status": "not_implemented",
+          "event_state": "NOT_APPLICABLE",
           "max_level": null,
           "exceedance_hours_by_level": null,
           "coverage_fraction": 0.0,
@@ -69,6 +71,7 @@
         {
           "mechanism": "space_weather",
           "status": "ok",
+          "event_state": "NOT_APPLICABLE",
           "max_level": "background",
           "exceedance_hours_by_level": { "S1": 0, "S2": 0, "S3": 0 },
           "coverage_fraction": 0.6,
@@ -81,6 +84,7 @@
         {
           "mechanism": "mmod",
           "status": "not_implemented",
+          "event_state": "NOT_APPLICABLE",
           "max_level": null,
           "exceedance_hours_by_level": null,
           "coverage_fraction": 0.0,

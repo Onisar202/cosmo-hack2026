@@ -38,6 +38,7 @@ _MECHANISM_STATUS_LABELS: dict[str, str] = {
     "stale_data": "данные устарели",
     "source_error": "отказ источника",
     "beyond_horizon": "за горизонтом прогноза",
+    "qualitative_only": "событие подтверждено, количественная оценка невозможна",
 }
 
 _MECHANISM_STATUS_NULL_REASONS: dict[str, str] = {
@@ -46,6 +47,21 @@ _MECHANISM_STATUS_NULL_REASONS: dict[str, str] = {
     "stale_data": "доступные данные устарели",
     "source_error": "отказ или квота источника",
     "beyond_horizon": "интервал за пределами горизонта прогноза — «не покрыто», не «спокойно»",
+    "qualitative_only": (
+        "событие подтверждено архивной линией, но уровень и длительность превышения "
+        "по ней не восстанавливаются — это не «спокойно» и не «нет данных»"
+    ),
+}
+
+#: FN-41: три состояния архивной событийной линии обязаны быть различимы не
+#: только в сохранённом объекте и JSON-выгрузке, но и в HTML (main-prompt.md
+#: §3 «интерфейс и обе выгрузки читают один и тот же сохранённый объект» —
+#: значит и показывают одно и то же).
+_EVENT_STATE_LABELS: dict[str, str] = {
+    "EVENT_PRESENT": "событие выявлено (EVENT_PRESENT)",
+    "NO_EVENT_DETECTED": "событие не выявлено при подтверждённом покрытии (NO_EVENT_DETECTED)",
+    "INSUFFICIENT_DATA": "оценить невозможно: покрытие не подтверждено (INSUFFICIENT_DATA)",
+    "NOT_APPLICABLE": "архивная событийная линия не применялась (NOT_APPLICABLE)",
 }
 _DEFAULT_NULL_REASON = "нет данных для оценки"
 
@@ -78,6 +94,7 @@ _RECORD_KIND_LABELS: dict[str, str] = {
 _ORBIT_SOURCE_LABELS: dict[str, str] = {
     "celestrak": "CelesTrak (текущие элементы)",
     "space-track": "Space-Track GP_HISTORY (исторические элементы)",
+    "nasa-iss-oem": "NASA TOPO CCSDS OEM (исторические эфемериды, интерполяция)",
 }
 
 _MECHANISM_UNITS_NOTE = (
@@ -188,6 +205,10 @@ def _orbit_section(result: dict[str, Any]) -> str:
 
 def _mechanism_html(mechanism: dict[str, Any]) -> str:
     status = mechanism["status"]
+    # Поле обязательно контрактом с FN-41; ``.get`` только на случай
+    # результата, сохранённого более старой версией сервиса (хранилище
+    # неизменяемо, старые результаты продолжают читаться, main-prompt.md §3).
+    event_state = mechanism.get("event_state", "NOT_APPLICABLE")
     reason = _MECHANISM_STATUS_NULL_REASONS.get(status, _DEFAULT_NULL_REASON)
     max_level_html = (
         _esc(mechanism["max_level"]) if mechanism["max_level"] is not None else _null_span(reason)
@@ -204,6 +225,10 @@ def _mechanism_html(mechanism: dict[str, Any]) -> str:
     rows = [
         _row("Механизм", _esc(_MECHANISM_LABELS.get(mechanism_kind, mechanism_kind))),
         _row("Статус", _esc(_MECHANISM_STATUS_LABELS.get(status, status))),
+        _row(
+            "Архивная событийная линия",
+            _esc(_EVENT_STATE_LABELS.get(event_state, event_state)),
+        ),
         _row("Максимальный уровень в окне", max_level_html),
         _row("Длительность превышения по порогам", exceedance_html),
         _row("Полнота данных (coverage_fraction)", f"{mechanism['coverage_fraction'] * 100:.0f}%"),
