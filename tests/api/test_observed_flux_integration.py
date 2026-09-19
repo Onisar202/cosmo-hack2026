@@ -352,7 +352,7 @@ def test_unreadable_source_config_yields_source_error_not_a_guessed_ok(
 
 
 def test_conflicting_satellite_records_yield_source_error_not_missing_data(
-    _env: _Env, monkeypatch: pytest.MonkeyPatch
+    _env: _Env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """round 1 ревью PR #29 (⚠️ src/api/service.py): ошибка обработки
     сохранённых наблюдений (здесь — ``ConflictingObservationsError`` из двух
@@ -432,6 +432,19 @@ def test_conflicting_satellite_records_yield_source_error_not_missing_data(
     )
     assert processing_warning["window_id"] == "win-a"
     assert set(conflicting_record_ids) <= set(processing_warning["record_ids"])
+
+    # round 4 ревью PR #29 (⚠️ «событие с этим fetch_attempt_id не
+    # записывается в лог»): предупреждение обязано доказуемо вести к своей
+    # же строке структурного лога, не к несуществующей попытке.
+    attempt_id = processing_warning["fetch_attempt_id"]
+    assert attempt_id
+    logs = capsys.readouterr().err
+    processing_log_lines = [
+        line for line in logs.splitlines() if "swpc_observation_processing_failed" in line
+    ]
+    assert any(
+        attempt_id in line and "win-a" in line for line in processing_log_lines
+    ), processing_log_lines
 
     observed_manifest_ids = {
         m["record_id"] for m in result["data_manifest"] if m["record_kind"] == "observation"

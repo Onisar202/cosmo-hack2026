@@ -1032,8 +1032,21 @@ def _build_current_result(
             # секретов из НЕИЗВЕСТНЫХ исключений, не от собственных доменных
             # ошибок); id конкретных конфликтующих записей — из exc.record_ids,
             # не всей выборки окна.
+            #
+            # round 4 ревью PR #29 (⚠️): эта ветка возвращала warning с
+            # fetch_attempt_id, для которого не было ни одной записи в логе —
+            # тот же принцип прослеживаемости, что и у соседнего except ниже
+            # (и у _fetch_attempt_id для сетевых источников, round 1 ревью
+            # PR #19), обязан выполняться и здесь: id логируется ДО возврата,
+            # не только передаётся в warning.
+            conflicting_ids = list(exc.record_ids)
+            _log(
+                "swpc_observation_processing_failed",
+                error=str(exc), window_id=window_id, record_ids=conflicting_ids,
+                fetch_attempt_id=observation_attempt_id, **log_ctx,
+            )
             return _observation_processing_failed_mechanism(
-                window_id, observation_attempt_id, str(exc), record_ids=list(exc.record_ids),
+                window_id, observation_attempt_id, str(exc), record_ids=conflicting_ids,
                 forecast_notes=forecast_notes, forecast_record_ids=forecast_record_ids,
             )
         except Exception as exc:  # noqa: BLE001 — повреждённая нормализация
