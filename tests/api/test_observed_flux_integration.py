@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from src.api import service as service_module
 from src.api.schemas import CalculationRequest
 from src.api.service import ensure_store_ready
 from src.api.service import run_calculation as _run_calculation
@@ -436,3 +437,78 @@ def test_conflicting_satellite_records_yield_source_error_not_missing_data(
         m["record_id"] for m in result["data_manifest"] if m["record_kind"] == "observation"
     }
     assert set(conflicting_record_ids) <= observed_manifest_ids
+
+
+def test_selection_failure_warning_is_traceable_to_its_own_log_entry(
+    _env: _Env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """round 3 ревью PR #29 (⚠️ src/api/service.py:951): предупреждение об
+    ошибке ``select_observed_range`` раньше ссылалось на ``swpc_attempt_id``
+    — идентификатор попытки СЕТЕВОГО получения потока протонов, которая к
+    этому моменту вполне могла уже успешно завершиться (как здесь: получение
+    намеренно замокано успешным). Единственное доказательство предупреждения
+    указывало бы на постороннее, успешное событие. Теперь у попытки
+    выборки/обработки свой отдельный идентификатор, залогированный вместе с
+    ``window_id`` — warning доказуемо ведёт именно к своей записи лога
+    (contracts/README.md «каждое предупреждение доказуемо»), не к чужой."""
+    settings, raw_store = _env
+    registry = SourceStatusRegistry()
+
+    def swpc_fetch(url: str, **_kwargs: Any) -> HttpFetchResult:
+        return HttpFetchResult(
+            status_code=200, body=swpc_sample_bytes(), url=url, elapsed_seconds=0.001
+        )
+
+    monkeypatch.setattr(swpc_source, "fetch", swpc_fetch)  # получение — успешно
+
+    def failing_select(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("simulated storage failure")
+
+    monkeypatch.setattr(service_module, "select_observed_range", failing_select)
+
+    now = datetime(2024, 5, 10, 14, 0, tzinfo=UTC)
+    request = CalculationRequest(
+        mode="current",
+        start_at=now - timedelta(hours=2),
+        duration_hours=1,
+        search_window_hours=4,
+    )
+    result_id = _run_calculation(
+        request, settings=settings, raw_store=raw_store, registry=registry, now=now,
+    )
+
+    conn = connect_store(settings.store_db_path)
+    try:
+        result = store_get_result(conn, result_id)
+    finally:
+        conn.close()
+    assert result is not None
+
+    # Получение потока протонов реально успешно — swpc_attempt_id из него
+    # НЕ должен быть тем, на что ссылается предупреждение об ошибке выборки.
+    swpc_status = next(
+        s for s in result["source_status"] if s["source_id"] == swpc_source.SOURCE_ID
+    )
+    assert swpc_status["last_success_at"] is not None
+
+    win_a = next(w for w in result["windows"] if w["window_id"] == "win-a")
+    space_weather = next(m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather")
+    assert space_weather["status"] == "source_error"
+
+    processing_warning = next(
+        w for w in result["warnings"]
+        if w["code"] == "space-weather-observation-processing-error" and w["window_id"] == "win-a"
+    )
+    attempt_id = processing_warning["fetch_attempt_id"]
+    assert attempt_id
+
+    logs = capsys.readouterr().err
+    assert "swpc_observation_selection_failed" in logs
+    # Идентификатор и window_id обязаны стоять в ОДНОЙ и той же строке лога
+    # (одно событие), не просто где-то в общем выводе.
+    selection_failure_lines = [
+        line for line in logs.splitlines() if "swpc_observation_selection_failed" in line
+    ]
+    assert any(
+        attempt_id in line and "win-a" in line for line in selection_failure_lines
+    ), selection_failure_lines

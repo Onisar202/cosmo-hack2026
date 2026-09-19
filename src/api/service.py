@@ -930,7 +930,7 @@ def _build_current_result(
     observed_records_by_id: dict[str, dict[str, Any]] = {}
 
     def _observation_processing_failed_mechanism(
-        window_id: str, error_detail: str, *, record_ids: list[str],
+        window_id: str, attempt_id: str, error_detail: str, *, record_ids: list[str],
         forecast_notes: list[str], forecast_record_ids: list[str],
     ) -> dict[str, Any]:
         # round 2 ревью PR #29 (⚠️ «остаётся непрослеживаемой»): отдельное
@@ -948,7 +948,7 @@ def _build_current_result(
                     f"{error_detail}."
                 ),
                 "record_ids": record_ids,
-                "fetch_attempt_id": swpc_attempt_id,
+                "fetch_attempt_id": attempt_id,
                 "window_id": window_id,
             }
         )
@@ -980,6 +980,18 @@ def _build_current_result(
                 extra_notes=forecast_notes, extra_record_ids=forecast_record_ids,
             )
 
+        # round 3 ревью PR #29 (⚠️): СВОЙ идентификатор попытки выборки/
+        # обработки для ЭТОГО окна — не переиспользует swpc_attempt_id
+        # (сетевое получение потока, залогированное раньше в этой же функции
+        # и вполне могло уже завершиться успехом к этому моменту). Логируется
+        # вместе с window_id в оба except ниже — тот же принцип, что и
+        # _fetch_attempt_id для сетевых источников (round 1 ревью PR #19):
+        # warning.fetch_attempt_id обязан доказуемо вести к залогированной
+        # попытке именно этой обработки, а не к постороннему событию.
+        observation_attempt_id = _fetch_attempt_id(
+            f"{swpc_source.SOURCE_ID}:{window_id}", now=now
+        )
+
         try:
             records = select_observed_range(
                 conn,
@@ -993,9 +1005,13 @@ def _build_current_result(
             # только их обработка; текст маскируется как непредвиденное
             # исключение (main-prompt.md §7).
             error_detail = sanitize_unexpected_error(exc)
-            _log("swpc_observation_selection_failed", error=error_detail, **log_ctx)
+            _log(
+                "swpc_observation_selection_failed",
+                error=error_detail, window_id=window_id,
+                fetch_attempt_id=observation_attempt_id, **log_ctx,
+            )
             return _observation_processing_failed_mechanism(
-                window_id, error_detail, record_ids=[],
+                window_id, observation_attempt_id, error_detail, record_ids=[],
                 forecast_notes=forecast_notes, forecast_record_ids=forecast_record_ids,
             )
 
@@ -1017,7 +1033,7 @@ def _build_current_result(
             # ошибок); id конкретных конфликтующих записей — из exc.record_ids,
             # не всей выборки окна.
             return _observation_processing_failed_mechanism(
-                window_id, str(exc), record_ids=list(exc.record_ids),
+                window_id, observation_attempt_id, str(exc), record_ids=list(exc.record_ids),
                 forecast_notes=forecast_notes, forecast_record_ids=forecast_record_ids,
             )
         except Exception as exc:  # noqa: BLE001 — повреждённая нормализация
@@ -1028,9 +1044,13 @@ def _build_current_result(
             # набор ID, ЗАТРОНУТЫХ этой попыткой обработки, остаётся видимым
             # — уже не «где-то в логе», а в warnings/data_manifest.
             error_detail = sanitize_unexpected_error(exc)
-            _log("swpc_observation_processing_failed", error=error_detail, **log_ctx)
+            _log(
+                "swpc_observation_processing_failed",
+                error=error_detail, window_id=window_id,
+                fetch_attempt_id=observation_attempt_id, **log_ctx,
+            )
             return _observation_processing_failed_mechanism(
-                window_id, error_detail,
+                window_id, observation_attempt_id, error_detail,
                 record_ids=sorted({str(r["record_id"]) for r in records}),
                 forecast_notes=forecast_notes, forecast_record_ids=forecast_record_ids,
             )
