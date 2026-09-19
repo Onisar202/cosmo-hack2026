@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 
@@ -30,7 +31,7 @@ def _record(
     value: float | None = 20.0,
     valid_from: str = "2025-01-05T00:00:00Z",
     published_at: str | None = "2025-01-05T22:00:00Z",
-) -> dict:
+) -> dict[str, Any]:
     return {
         "record_id": record_id,
         "source_id": source_id,

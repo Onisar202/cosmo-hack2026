@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -45,7 +46,7 @@ VELOCITY_TOLERANCE_KM_S = 1e-6
 # ---------------------------------------------------------------------------
 
 
-def _load_vallado_case() -> tuple[domain.OrbitalElements, dict]:
+def _load_vallado_case() -> tuple[domain.OrbitalElements, dict[str, Any]]:
     tle_lines = (FIXTURES_DIR / "vallado_sgp4_verification_sat5.tle").read_text().splitlines()
     line1, line2 = tle_lines[0], tle_lines[1]
     expected = json.loads(
@@ -258,7 +259,9 @@ def test_parse_tle_response_rejects_mismatched_line1_line2_norad_id() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _client_with_transport(handler) -> httpx.Client:
+def _client_with_transport(
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
@@ -329,13 +332,17 @@ def test_require_supported_mode_allows_current() -> None:
 
 
 @pytest.mark.parametrize("mode", ["historical_analysis", "historical_forecast"])
-def test_require_supported_mode_rejects_historical_modes(mode: str) -> None:
+def test_require_supported_mode_rejects_historical_modes(
+    mode: sources_orbit.RequestMode,
+) -> None:
     with pytest.raises(sources_orbit.HistoricalElementsUnsupportedError):
         sources_orbit.require_supported_mode(mode)
 
 
 @pytest.mark.parametrize("mode", ["historical_analysis", "historical_forecast"])
-def test_fetch_elements_for_request_rejects_historical_without_network_call(mode: str) -> None:
+def test_fetch_elements_for_request_rejects_historical_without_network_call(
+    mode: sources_orbit.RequestMode,
+) -> None:
     """Исторический запрос не берёт современные TLE: отказ происходит до
     любого сетевого вызова, а не после тихой подстановки CelesTrak
     (.ai/main-prompt.md §11 «Траектория»).
@@ -347,7 +354,7 @@ def test_fetch_elements_for_request_rejects_historical_without_network_call(mode
     client = _client_with_transport(handler)
     try:
         with pytest.raises(sources_orbit.HistoricalElementsUnsupportedError):
-            sources_orbit.fetch_elements_for_request(mode, client=client)  # type: ignore[arg-type]
+            sources_orbit.fetch_elements_for_request(mode, client=client)
     finally:
         client.close()
 
@@ -466,4 +473,8 @@ def test_refined_elements_at_the_same_epoch_get_a_new_version_not_a_conflict(
     refined_id = insert_record(db_conn, raw_store, refined_record)
 
     assert original_id != refined_id
-    assert get_record(db_conn, original_id)["value"] != get_record(db_conn, refined_id)["value"]
+    original_stored = get_record(db_conn, original_id)
+    refined_stored = get_record(db_conn, refined_id)
+    assert original_stored is not None
+    assert refined_stored is not None
+    assert original_stored["value"] != refined_stored["value"]

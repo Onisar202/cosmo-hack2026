@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -70,7 +70,7 @@ def registry() -> SourceStatusRegistry:
 
 
 @pytest.fixture
-def db_conn(tmp_path: Path) -> sqlite3.Connection:
+def db_conn(tmp_path: Path) -> Iterator[sqlite3.Connection]:
     from src.store import connect
 
     conn = connect(tmp_path / "store.sqlite3")

@@ -21,6 +21,7 @@ from src.sources.archive_probe import (
     DONKI_SOURCE_ID,
     SWPC_ARCHIVE_SOURCE_ID,
     ArchiveFormatError,
+    DonkiNotification,
     GapRun,
     build_coverage_report,
     donki_notification_to_record_input,
@@ -56,8 +57,8 @@ SWPC_FILES = [
 ]
 
 
-def _load_all_donki_notifications() -> list:
-    notifications = []
+def _load_all_donki_notifications() -> list[DonkiNotification]:
+    notifications: list[DonkiNotification] = []
     for name in DONKI_FILES:
         raw = (ARCHIVE_DIR / name).read_bytes()
         notifications.extend(parse_donki_notifications(raw))
@@ -82,10 +83,14 @@ def test_donki_archive_covers_the_whole_mandatory_period_with_245_notifications(
 def test_donki_notification_issue_times_are_utc_aware() -> None:
     for notification in _load_all_donki_notifications():
         assert notification.reported_issue_time.tzinfo is not None
-        assert notification.reported_issue_time.utcoffset().total_seconds() == 0
+        reported_offset = notification.reported_issue_time.utcoffset()
+        assert reported_offset is not None
+        assert reported_offset.total_seconds() == 0
         if notification.resolved_issue_time is not None:
             assert notification.resolved_issue_time.tzinfo is not None
-            assert notification.resolved_issue_time.utcoffset().total_seconds() == 0
+            resolved_offset = notification.resolved_issue_time.utcoffset()
+            assert resolved_offset is not None
+            assert resolved_offset.total_seconds() == 0
 
 
 def test_donki_resolved_issue_time_matches_reported_for_almost_all_notifications() -> None:
