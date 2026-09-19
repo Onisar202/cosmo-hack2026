@@ -65,6 +65,10 @@ def test_repeated_export_is_deterministic_and_does_not_change_the_result_id(
             ),
             id="max_level-null-while-status-ok",
         ),
+        pytest.param(
+            lambda r: r.update(computed_at="2026-99-99T25:61:61+99:99"),
+            id="calendar-invalid-datetime-matches-pattern-but-not-a-real-moment",
+        ),
     ],
 )
 def test_export_json_rejects_a_corrupted_payload_instead_of_a_plausible_report(
@@ -75,6 +79,11 @@ def test_export_json_rejects_a_corrupted_payload_instead_of_a_plausible_report(
     Каждый вариант здесь — повреждение, которое ``store_result`` в норме не
     пропустило бы, но не то, на что можно полагаться при выгрузке: контракт
     может отличаться от того, что фактически лежит в старой строке SQLite.
+    ``calendar-invalid-datetime...`` — round 1 ревью PR #26: строка вроде
+    ``2026-99-99T25:61:61+99:99`` проходит regex-паттерн ``utcDateTime``
+    (цифры на нужных позициях, смещение указано), но не является реальным
+    календарным моментом — без проверки ``format: date-time`` она могла бы
+    попасть в JSON-выгрузку как корректное время.
     """
     corrupt(success_result)
 

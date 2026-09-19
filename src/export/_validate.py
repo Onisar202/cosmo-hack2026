@@ -13,16 +13,39 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
 from src.export.errors import ExportError
 
 _CONTRACTS_DIR = Path(__file__).resolve().parents[2] / "contracts"
+
+_FORMAT_CHECKER = FormatChecker()
+
+
+@_FORMAT_CHECKER.checks("date-time", raises=ValueError)
+def _is_a_real_calendar_moment(value: object) -> bool:
+    """Дополняет ``#/$defs/utcDateTime`` в ``result.schema.json``: паттерн
+    схемы проверяет только позиции цифр и обязательное смещение, а не то,
+    что месяц/день/час — реальные календарные значения. Без этой проверки
+    строка вроде ``2026-99-99T25:61:61+99:99`` проходит паттерн и могла бы
+    попасть в JSON-/HTML-выгрузку как корректное время (round 1 ревью PR #26).
+
+    ``jsonschema`` без опционального пакета ``rfc3339-validator`` не
+    регистрирует проверку ``date-time`` вовсе (``FormatChecker().checkers``
+    не содержит ``date-time``) — обычный ``FORMAT_CHECKER`` здесь был бы
+    молчаливым no-op, поэтому проверка написана на стандартной библиотеке, не
+    добавляя новую зависимость.
+    """
+    if not isinstance(value, str):
+        return True  # тип уже проверяет сама схема (type: string)
+    datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return True
 
 
 @lru_cache(maxsize=1)
@@ -34,7 +57,9 @@ def _result_validator() -> Draft202012Validator:
     registry: Registry[Any] = Registry().with_resources(
         (schema["$id"], Resource.from_contents(schema)) for schema in schemas.values()
     )
-    return Draft202012Validator(schemas["result"], registry=registry)
+    return Draft202012Validator(
+        schemas["result"], registry=registry, format_checker=_FORMAT_CHECKER
+    )
 
 
 def validate_result_or_raise(result: Any) -> dict[str, Any]:
