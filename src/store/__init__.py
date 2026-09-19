@@ -7,6 +7,7 @@
 (.ai/main-prompt.md §2–3, .ai/backend-prompt.md §1–2).
 """
 
+from src.store.coverage import pin_and_filter_ingested_intervals, pin_coverage_cutoff
 from src.store.records import (
     ChecksumMismatchError,
     DuplicateKeyConflictError,
@@ -41,6 +42,8 @@ __all__ = [
     "get_result",
     "insert_record",
     "list_results",
+    "pin_and_filter_ingested_intervals",
+    "pin_coverage_cutoff",
     "select_as_of",
     "select_observed_range",
     "select_verification_records",

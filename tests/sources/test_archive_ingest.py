@@ -39,7 +39,7 @@ from src.sources.archive_ingest import (
     merged_ingested_intervals,
     select_forecast_inputs,
 )
-from src.store import RawOriginalStore, get_original, get_record
+from src.store import RawOriginalStore, get_original, get_record, pin_and_filter_ingested_intervals
 
 UTC = timezone.utc
 ARCHIVE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "sources" / "archive"
@@ -390,6 +390,116 @@ def test_a_later_ingested_coverage_interval_does_not_change_an_unaffected_histor
         as_of=as_of,
     )
 
+    assert after == before
+
+
+def test_a_relevantly_intersecting_late_load_does_not_leak_into_a_pinned_historical_result(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    """Round 4 ревью PR #37: предыдущий тест выше добавляет покрытие, не
+    пересекающееся с оцениваемым окном — по построению не может обнаружить
+    утечку. Здесь окно **специально** лежит на стыке двух окон загрузки
+    (31 мая / 1 июня), и вторая половина стыка загружается ПОЗДНЕЕ, с бо́льшим
+    ``fetched_at``, реально расширяя покрытие именно этого окна.
+
+    Без закрепления (``src/store/coverage.py::pin_and_filter_ingested_intervals``)
+    вторая загрузка превратила бы уже установленный ``INSUFFICIENT_DATA``
+    (пробел в 50% окна) в ``NO_EVENT_DETECTED`` — это и демонстрирует
+    контрольная проверка на «сыром», не закреплённом наборе интервалов ниже.
+    С закреплением результат для того же ``as_of`` остаётся прежним.
+
+    ``donki_2024-06-01_2024-06-15.json`` реально содержит SEP-уведомления
+    (11 шт., 8 и 12 июня — main-prompt.md §11 упоминает и это событие), но
+    все они начинаются ПОСЛЕ конца окна и ПОСЛЕ ``as_of`` этого теста —
+    выбраны дата окна и ``as_of`` так, чтобы не пересечься с механизмом
+    «открытого конца» (round 3 ревью, отдельно протестирован выше) и
+    проверить именно закрепление предела ``fetched_at``, а не его."""
+    as_of = datetime(2024, 6, 5, tzinfo=UTC)
+    window_start = datetime(2024, 5, 31, 12, 0, tzinfo=UTC)
+    window_end = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
+    strategy = _donki_strategy(horizon_hours=6.0)
+    policy = ArchiveProductPolicy.from_config(strategy.product_for(DONKI_SOURCE_ID))
+    relevant_types = strategy.product_for(DONKI_SOURCE_ID).event_message_types
+
+    early_fetched_at = datetime(2026, 1, 1, tzinfo=UTC)
+    first_report = ingest_donki_notifications(
+        db_conn,
+        raw_store,
+        (ARCHIVE_DIR / "donki_2024-05-16_2024-05-31.json").read_bytes(),
+        source_url=DONKI_URL,
+        fetched_at=early_fetched_at,
+        interval_start=datetime(2024, 5, 16, tzinfo=UTC),
+        interval_end=datetime(2024, 6, 1, tzinfo=UTC),
+    )
+    selected = select_forecast_inputs(db_conn, as_of=as_of, strategy=strategy)
+    pinned_before = pin_and_filter_ingested_intervals(
+        db_conn,
+        merged_ingested_intervals(
+            [first_report], source_id=DONKI_SOURCE_ID, relevant_message_types=relevant_types
+        ),
+        source_id=DONKI_SOURCE_ID,
+        as_of=as_of,
+    )
+    before = assess_archive_window(
+        selected[DONKI_SOURCE_ID],
+        policy=policy,
+        ingested_intervals=_as_coverage_intervals(pinned_before),
+        window_start=window_start,
+        window_end=window_end,
+        as_of=as_of,
+    )
+    assert before.status == "INSUFFICIENT_DATA"
+    assert before.critical_gap is True
+    assert before.coverage_fraction == pytest.approx(0.5)
+
+    # Позднее — бо́льший fetched_at — и это реально заполняет ровно
+    # недостающую половину окна.
+    later_fetched_at = datetime(2026, 6, 1, tzinfo=UTC)
+    second_report = ingest_donki_notifications(
+        db_conn,
+        raw_store,
+        (ARCHIVE_DIR / "donki_2024-06-01_2024-06-15.json").read_bytes(),
+        source_url=DONKI_URL,
+        fetched_at=later_fetched_at,
+        interval_start=datetime(2024, 6, 1, tzinfo=UTC),
+        interval_end=datetime(2024, 6, 16, tzinfo=UTC),
+    )
+    grown_intervals = merged_ingested_intervals(
+        [first_report, second_report],
+        source_id=DONKI_SOURCE_ID,
+        relevant_message_types=relevant_types,
+    )
+
+    # Контроль: БЕЗ закрепления эта поздняя загрузка деиствительно
+    # превращает результат в NO_EVENT_DETECTED — то есть воспроизводит
+    # утечку, которую закрепление обязано предотвратить.
+    unpinned_after = assess_archive_window(
+        select_forecast_inputs(db_conn, as_of=as_of, strategy=strategy)[DONKI_SOURCE_ID],
+        policy=policy,
+        ingested_intervals=_as_coverage_intervals(grown_intervals),
+        window_start=window_start,
+        window_end=window_end,
+        as_of=as_of,
+    )
+    assert unpinned_after.status == "NO_EVENT_DETECTED"
+    assert unpinned_after.coverage_fraction == 1.0
+
+    # С закреплением (тот же source_id/as_of, что и у первого вызова —
+    # предел уже установлен по ``early_fetched_at``) поздний интервал
+    # исключается, и результат для ЭТОГО as_of остаётся прежним.
+    pinned_after = pin_and_filter_ingested_intervals(
+        db_conn, grown_intervals, source_id=DONKI_SOURCE_ID, as_of=as_of
+    )
+    assert pinned_after == pinned_before
+
+    after = assess_archive_window(
+        select_forecast_inputs(db_conn, as_of=as_of, strategy=strategy)[DONKI_SOURCE_ID],
+        policy=policy,
+        ingested_intervals=_as_coverage_intervals(pinned_after),
+        window_start=window_start,
+        window_end=window_end,
+        as_of=as_of,
+    )
     assert after == before
 
 

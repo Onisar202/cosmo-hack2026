@@ -59,6 +59,20 @@ CREATE TABLE IF NOT EXISTS calculation_results (
 
 CREATE INDEX IF NOT EXISTS idx_calculation_results_mode
     ON calculation_results (mode, computed_at);
+
+-- FN-42 round 4 ревью PR #37: до какого fetched_at покрытие архива
+-- признано доверенным для конкретной пары (source_id, as_of) строгого
+-- historical_forecast. Только вставка, без UPDATE — тот же принцип, что и
+-- у source_records/calculation_results выше: первое значение, увиденное
+-- для этой пары, закрепляется навсегда (src/store/coverage.py), и более
+-- поздняя загрузка архива (больший fetched_at) не может задним числом
+-- расширить покрытие уже оценённого historical_forecast.
+CREATE TABLE IF NOT EXISTS archive_coverage_cutoffs (
+    source_id TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    fetched_at_cutoff TEXT NOT NULL,
+    PRIMARY KEY (source_id, as_of)
+);
 """
 
 
