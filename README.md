@@ -40,7 +40,10 @@ FN-28 (S1-10) собирает текущие API/UI/SQLite в единое ра
 (`src/domain/spaceweather/external_forecast.py`) — см. раздел «Внешний
 прогноз NOAA 3-Day S1+» ниже; включает известное ограничение сессии
 (парсер проверен на синтетических, не на реальных сохранённых фикстурах —
-подробности там же и в `docs/method.md` §7.5).
+подробности там же и в `docs/method.md` §7.5). FN-36 (S2-06, этап 2)
+реализует слой выгрузки (`src/export/`): машиночитаемый JSON и читаемый
+HTML строятся только из одного уже сохранённого результата — см. раздел
+«Выгрузка» ниже.
 
 ## Стек
 
@@ -477,6 +480,10 @@ shapes для S1-07»; тонкие роутеры — `src/api/routes.py`, вс
   `{"code", "message"}` при отказе — без трассировок.
 - **`GET /api/results/{result_id}`** / **`GET /api/results`** — сохранённый
   результат целиком или постранично урезанный список.
+- **`GET /api/results/{result_id}/export.json`** / **`GET
+  /api/results/{result_id}/export.html`** (FN-36, S2-06) — машиночитаемый
+  JSON и читаемый HTML из этого же сохранённого результата, см. раздел
+  «Выгрузка» ниже.
 - **`POST /api/sources/refresh`** / **`GET /api/sources/status`** —
   принудительное обновление и статусы источников (`celestrak-gp`,
   `noaa-swpc-proton-flux`, `noaa-swpc-3day-forecast` — FN-31).
@@ -602,6 +609,52 @@ main-prompt.md §9 п.7, backend-prompt.md §2): каждая фоновая з�
 сопоставления), и в структурированном логе, и в общем реестре статусов
 источников.
 
+## Выгрузка (`src/export/`, FN-36)
+
+Машиночитаемый JSON и читаемый HTML строятся **только** из одного уже
+сохранённого immutable-результата — `src/api/routes.py` читает его тем же
+запросом (`_get_stored_result_or_404`), что и `GET /api/results/{result_id}`,
+и передаёт этот же объект обеим функциям выгрузки. `src/export/` не ходит в
+сеть, не выбирает записи в хранилище и не пересчитывает домен — единственный
+вход это уже собранный `dict` в форме `contracts/result.schema.json`
+(`.ai/main-prompt.md` §3 «интерфейс и оба формата выгрузки читают один и тот
+же сохранённый объект»; граница закреплена автоматической проверкой
+импортов — `tests/export/test_boundaries.py`).
+
+- **`GET /api/results/{result_id}/export.json`** — `src/export/json_export.py`
+  проверяет форму сохранённого результата по `contracts/result.schema.json`
+  (`src/export/_validate.py`) и возвращает его независимую JSON-копию —
+  семантически равную тому, что отдал бы `GET /api/results/{result_id}` в
+  этот же момент (без добавленных, убранных или переупорядоченных полей).
+- **`GET /api/results/{result_id}/export.html`** — `src/export/html_export.py`
+  строит самодостаточную HTML-страницу с той же терминологией, что и
+  `web/src/components` (`labels.ts`): запрос и `mode`/`as_of`; оба окна
+  одинаковой длительности; раздельные оценки по механизмам
+  (`space_weather`/`mmod`) с их единицами (pfu-пороги S1/S2/S3, безразмерное
+  отношение к фону elevated/pronounced); `coverage`/архивные пробелы;
+  рекомендация или причина её отсутствия; орбита (источник, эпоха, давность,
+  признак реконструкции); `data_manifest`; статусы источников;
+  `algorithm_version`; ограничения и предупреждения. Все времена печатаются
+  явно в UTC (`_format_utc` отказывает, если время результата пришло без
+  явного смещения — main-prompt.md §1); каждое `null`-значение показывает
+  причину его отсутствия рядом (`_null_span`), а не пустую ячейку; шаблон не
+  добавляет собственных формулировок вроде «безопасно» — текст
+  предупреждений/пояснений/рекомендации выводится ровно так, как хранится в
+  результате (main-prompt.md §4, §12).
+- **Неизвестный `result_id`** — тот же `404 {"error": {"code":
+  "result_not_found", ...}}`, что и у `GET /api/results/{result_id}`: оба
+  формата выгрузки используют один и тот же вызов чтения хранилища.
+- **Повреждённый/невалидный сохранённый payload** (например будущий дрейф
+  контракта без изменения уже записанных строк SQLite) не превращается в
+  правдоподобно выглядящий отчёт: обе функции сначала проверяют результат по
+  `contracts/result.schema.json` и поднимают `ExportError` при нарушении —
+  роутер отвечает `500 {"error": {"code": "result_export_failed", ...}}`, а
+  не отдаёт частично собранный HTML/JSON.
+- **Детерминизм.** Ни одна из функций не мутирует переданный результат;
+  повторный вызов с тем же сохранённым объектом даёт побайтово идентичный
+  HTML и структурно идентичный JSON — `result_id` и данные не меняются
+  (`tests/export/`, `tests/api/test_export.py`).
+
 ## Структура проекта
 
 Полное описание слоёв и границ между ними — `.ai/main-prompt.md`, §8.
@@ -617,7 +670,8 @@ src/
 ├── store/      # Хранение, версии, выборка по as_of — schema.py/records.py/results.py
 ├── domain/     # Расчёты: spaceweather (external_forecast.py — FN-31), orbit (propagate.py —
 │               # SGP4), mmod, lighting, windows
-└── export/     # HTML и JSON из сохранённого результата (пока не реализовано)
+└── export/     # HTML и JSON из одного сохранённого результата (json_export.py,
+                # html_export.py, _validate.py — FN-36)
 sources.yaml    # Реестр источников (main-prompt.md §7): space_weather (noaa-swpc-proton-flux,
                 # nasa-donki-notifications, noaa-swpc-forecast-discussion-archive,
                 # noaa-swpc-3day-forecast[-archive]),
@@ -627,11 +681,12 @@ docs/
 └── method.md      # Пригодность архивов космопогоды для строгого replay (FN-23);
                    # §7 — NOAA 3-Day Forecast S1+ (FN-31)
 tests/
-├── api/        # test_requests.py, test_isolation.py (S1-07)
+├── api/        # test_requests.py, test_isolation.py (S1-07), test_export.py (FN-36)
 ├── sources/    # test_swpc.py, test_archive_publication.py, test_noaa_3day_forecast.py +
 │               # fixtures/sources/{swpc,archive}/ (сохранённые реальные ответы),
 │               # fixtures/sources/noaa_3day_forecast/synthetic/ (явно синтетические, FN-31)
 ├── domain/spaceweather/  # test_external_forecast.py (FN-31)
+├── export/     # test_json_export.py, test_html_export.py, test_boundaries.py (FN-36)
 ├── orbit/      # test_propagation.py
 ├── fixtures/orbit/  # TLE-фикстуры и независимый эталон SGP4 verification
 ├── store/      # test_versions.py, test_as_of.py

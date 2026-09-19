@@ -96,6 +96,16 @@ export function getResult(resultId: string, signal?: AbortSignal): Promise<Calcu
   return request<CalculationResult>(`/results/${encodeURIComponent(resultId)}`, { signal })
 }
 
+/**
+ * Прямая ссылка на скачивание сохранённого результата (FN-36, S2-06) —
+ * не проходит через `request()`: ответ здесь не JSON-тело для разбора, а
+ * файл, который браузер должен сохранить/открыть сам (интерфейс использует
+ * `<a href={...} download>`, а не `fetch`).
+ */
+export function getResultExportUrl(resultId: string, format: 'json' | 'html'): string {
+  return `${BASE_URL}/results/${encodeURIComponent(resultId)}/export.${format}`
+}
+
 export function listResults(
   params: { mode?: Mode; limit?: number; offset?: number } = {},
   signal?: AbortSignal,

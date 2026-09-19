@@ -2,12 +2,15 @@ import Accordion from '@mui/material/Accordion'
 import AccordionDetails from '@mui/material/AccordionDetails'
 import AccordionSummary from '@mui/material/AccordionSummary'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
+import DownloadIcon from '@mui/icons-material/Download'
 import Alert from '@mui/material/Alert'
 import Box from '@mui/material/Box'
+import Button from '@mui/material/Button'
 import Chip from '@mui/material/Chip'
 import Divider from '@mui/material/Divider'
 import Stack from '@mui/material/Stack'
 import Typography from '@mui/material/Typography'
+import { getResultExportUrl } from '../api/client'
 import type { CalculationResult } from '../api/types'
 import { DataManifestTable } from './DataManifestTable'
 import { OrbitSummaryCard } from './OrbitSummaryCard'
@@ -58,6 +61,31 @@ export function ResultView({
           nullReason="не применяется для этого режима"
         />
       </Stack>
+
+      {!demo && (
+        <Stack direction="row" spacing={1}>
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<DownloadIcon />}
+            component="a"
+            href={getResultExportUrl(result.result_id, 'json')}
+            download
+          >
+            Скачать JSON
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<DownloadIcon />}
+            component="a"
+            href={getResultExportUrl(result.result_id, 'html')}
+            download
+          >
+            Скачать HTML
+          </Button>
+        </Stack>
+      )}
 
       {stale && !demo && (
         <Alert severity="warning">

@@ -15,6 +15,7 @@ import sys
 from typing import Any
 
 from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from src.api.schemas import (
     ApiErrorBody,
@@ -33,6 +34,7 @@ from src.api.service import (
     sanitize_unexpected_error,
 )
 from src.api.service import run_calculation as _run_calculation
+from src.export import ExportError, export_result_html, export_result_json
 from src.store import connect as connect_store
 from src.store import get_result as store_get_result
 from src.store import list_results as store_list_results
@@ -118,8 +120,15 @@ def get_calculation_status(task_id: str, request: Request) -> TaskStatusResponse
     )
 
 
-@router.get("/results/{result_id}")
-def get_result(result_id: str, request: Request) -> dict[str, Any]:
+def _get_stored_result_or_404(result_id: str, request: Request) -> dict[str, Any]:
+    """Единственное место, которое читает сохранённый результат по id.
+
+    ``GET /api/results/{result_id}`` и оба формата выгрузки
+    (``export.json``/``export.html``) вызывают именно эту функцию — так они
+    гарантированно читают один и тот же сохранённый объект одним и тем же
+    запросом к хранилищу, а не собирают отчёт из отдельной выборки
+    (main-prompt.md §3, приёмка FN-36 п.1 и п.5).
+    """
     conn = connect_store(request.app.state.settings.store_db_path)
     try:
         result = store_get_result(conn, result_id)
@@ -128,6 +137,37 @@ def get_result(result_id: str, request: Request) -> dict[str, Any]:
     if result is None:
         raise ApiError(404, "result_not_found", f"unknown result_id: {result_id!r}")
     return result
+
+
+@router.get("/results/{result_id}")
+def get_result(result_id: str, request: Request) -> dict[str, Any]:
+    return _get_stored_result_or_404(result_id, request)
+
+
+@router.get("/results/{result_id}/export.json")
+def export_result_json_endpoint(result_id: str, request: Request) -> JSONResponse:
+    result = _get_stored_result_or_404(result_id, request)
+    try:
+        payload = export_result_json(result)
+    except ExportError as exc:
+        raise ApiError(500, "result_export_failed", str(exc)) from exc
+    return JSONResponse(
+        content=payload,
+        headers={"Content-Disposition": f'attachment; filename="{result_id}.json"'},
+    )
+
+
+@router.get("/results/{result_id}/export.html")
+def export_result_html_endpoint(result_id: str, request: Request) -> HTMLResponse:
+    result = _get_stored_result_or_404(result_id, request)
+    try:
+        html = export_result_html(result)
+    except ExportError as exc:
+        raise ApiError(500, "result_export_failed", str(exc)) from exc
+    return HTMLResponse(
+        content=html,
+        headers={"Content-Disposition": f'attachment; filename="{result_id}.html"'},
+    )
 
 
 @router.get("/results", response_model=list[ResultListItem])
