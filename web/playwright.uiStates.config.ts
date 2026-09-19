@@ -23,10 +23,14 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: 'npm run preview -- --port 4173 --strictPort',
+    // `npx vite preview` напрямую, а не `npm run preview --` — на раннере CI
+    // (round 1 ревью, повторный прогон после первого фикса) обёртка npm
+    // добавляла задержку старта, из-за которой первый прогон в
+    // frontend-checks не укладывался в 30 с ожидания вебсервера.
+    command: 'npx vite preview --port 4173 --strictPort',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: !process.env.CI,
-    timeout: 30_000,
+    timeout: 60_000,
   },
   projects: [
     {
