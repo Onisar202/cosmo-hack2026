@@ -17,6 +17,7 @@ from src.api.schemas import CalculationRequest
 from src.api.service import ensure_store_ready
 from src.api.service import run_calculation as _run_calculation
 from src.config import get_settings
+from src.sources import noaa_3day_forecast as noaa_3day_source
 from src.sources import orbit as orbit_source
 from src.sources import swpc as swpc_source
 from src.sources.http import HttpFetchResult, SourceTimeoutError
@@ -110,7 +111,9 @@ def test_current_mode_full_flow_returns_real_orbit_and_not_implemented_mechanism
     assert body["recommendation"]["window_id"] is None
 
     source_ids = {s["source_id"] for s in body["source_status"]}
-    assert source_ids == {"celestrak-gp", "noaa-swpc-proton-flux"}
+    # FN-31: NOAA 3-Day Forecast (S1+) — отдельная от потока протонов линия
+    # того же Механизма 1, тоже получается и сохраняется каждым расчётом.
+    assert source_ids == {"celestrak-gp", "noaa-swpc-proton-flux", "noaa-swpc-3day-forecast"}
     swpc_status = next(
         s for s in body["source_status"] if s["source_id"] == "noaa-swpc-proton-flux"
     )
@@ -278,7 +281,7 @@ def test_list_results_and_sources_status(app_client: TestClient) -> None:
     statuses = app_client.get("/api/sources/status")
     assert statuses.status_code == 200
     ids = {s["source_id"] for s in statuses.json()}
-    assert ids == {"celestrak-gp", "noaa-swpc-proton-flux"}
+    assert ids == {"celestrak-gp", "noaa-swpc-proton-flux", "noaa-swpc-3day-forecast"}
 
 
 def test_refresh_sources_forces_a_fetch(app_client: TestClient) -> None:
@@ -375,6 +378,96 @@ def test_negative_elements_age_is_clamped_to_non_negative_in_the_stored_result(
     assert result is not None
     assert result["orbit"]["elements_age_hours"] >= 0
     assert any("рассинхронизация" in note for note in result["limitations"])
+
+    get_settings.cache_clear()
+
+
+def test_noaa_3day_forecast_is_used_in_windows_and_manifest_when_it_overlaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FN-31 (round 3 ревью PR #24 — «линия не подключена к расчёту»):
+    суточная вероятность S1+, реально пересекающаяся с окном, обязана быть
+    видна в notes/record_ids окна и в data_manifest — не только получена и
+    сохранена (это уже проверяет test_current_mode_full_flow_…), но и
+    использована результатом (main-prompt.md §3 «манифест собирается
+    фактически использованными записями»). ``mechanisms[*].status`` при
+    этом остаётся ``not_implemented`` — комбинирование с наблюдением GOES
+    в один уровень всё ещё не реализовано (main-prompt.md §2: частичный
+    прогресс не выдаётся за готовую оценку)."""
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("STORE_DB_PATH", str(tmp_path / "store.sqlite3"))
+    monkeypatch.setenv("STORE_RAW_DIR", str(tmp_path / "raw"))
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(orbit_source, "fetch_current_tle", lambda **_kwargs: orbit_tle_bytes())
+    monkeypatch.setattr(
+        swpc_source,
+        "fetch",
+        lambda url, **_kwargs: HttpFetchResult(
+            status_code=200, body=swpc_sample_bytes(), url=url, elapsed_seconds=0.001
+        ),
+    )
+    noaa_3day_bytes = (
+        Path(__file__).resolve().parent.parent
+        / "fixtures" / "sources" / "noaa_3day_forecast" / "synthetic"
+        / "bulletin_2025-01-05_2200.txt"
+    ).read_bytes()
+    monkeypatch.setattr(
+        noaa_3day_source,
+        "fetch",
+        lambda url, **_kwargs: HttpFetchResult(
+            status_code=200, body=noaa_3day_bytes, url=url, elapsed_seconds=0.001
+        ),
+    )
+
+    settings = get_settings()
+    ensure_store_ready(settings)
+    raw_store = RawOriginalStore(settings.store_raw_dir)
+    registry = SourceStatusRegistry()
+
+    # Бюллетень (fixture) несёт S1+ на 05/06/07 января 2025: 20%/10%/5%,
+    # выпущен 2025-01-05 22:00 UTC. Окно win-a (10:00-14:00 того же 05
+    # января) целиком лежит внутри первого прогнозного дня.
+    request = CalculationRequest(
+        mode="current",
+        start_at=datetime(2025, 1, 5, 10, 0, tzinfo=timezone.utc),
+        duration_hours=4,
+        search_window_hours=8,
+    )
+    result_id = _run_calculation(
+        request,
+        settings=settings,
+        raw_store=raw_store,
+        registry=registry,
+        now=datetime(2025, 1, 6, 0, 0, tzinfo=timezone.utc),  # после выпуска бюллетеня
+    )
+
+    conn = connect_store(settings.store_db_path)
+    try:
+        result = store_get_result(conn, result_id)
+    finally:
+        conn.close()
+    assert result is not None
+
+    win_a = next(w for w in result["windows"] if w["window_id"] == "win-a")
+    space_weather = next(m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather")
+    assert space_weather["status"] == "not_implemented"
+    assert space_weather["max_level"] is None
+    assert space_weather["record_ids"]  # реально использованная запись прогноза
+    assert any("20%" in note for note in space_weather["notes"])
+    assert any("не вероятность ВКД" in note for note in space_weather["notes"])
+
+    manifest_forecast_entries = [
+        m for m in result["data_manifest"] if m["record_kind"] == "forecast"
+    ]
+    assert manifest_forecast_entries
+    assert manifest_forecast_entries[0]["record_id"] in space_weather["record_ids"]
+    assert manifest_forecast_entries[0]["source_id"] == noaa_3day_source.SOURCE_ID
+
+    forecast_status = next(
+        s for s in result["source_status"] if s["source_id"] == noaa_3day_source.SOURCE_ID
+    )
+    assert forecast_status["last_success_at"] is not None
 
     get_settings.cache_clear()
 

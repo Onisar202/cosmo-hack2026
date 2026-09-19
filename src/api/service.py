@@ -51,10 +51,16 @@ from src.domain.orbit.propagate import (
     propagate,
     time_grid,
 )
+from src.domain.spaceweather.external_forecast import (
+    ExternalForecastDay,
+    assess_external_forecast,
+    external_forecast_days_from_records,
+)
+from src.sources import noaa_3day_forecast as noaa_3day_source
 from src.sources import orbit
 from src.sources import swpc as swpc_source
 from src.sources.status import SourceStatus, SourceStatusRegistry, effective_status
-from src.store import RawOriginalStore, get_latest_record, insert_record, store_result
+from src.store import RawOriginalStore, get_latest_record, insert_record, select_as_of, store_result
 from src.store.schema import connect as connect_store
 
 OrbitOutcome = Literal[
@@ -344,12 +350,74 @@ def _swpc_attempt_status(
     return registry.get(swpc_source.SOURCE_ID)
 
 
-def _not_implemented_mechanism(mechanism: Literal["space_weather", "mmod"]) -> dict[str, Any]:
+def _noaa_3day_attempt_status(
+    outcome: noaa_3day_source.FetchOutcome | None,
+    *,
+    registry: SourceStatusRegistry,
+    now: datetime,
+    unexpected_error: str | None,
+) -> SourceStatus:
+    """Статус источника NOAA 3-Day Forecast для ИМЕННО этой попытки — тот же
+    принцип, что и :func:`_swpc_attempt_status` (FN-31, следующая после
+    FN-22 линия того же Механизма 1)."""
+    frozen = registry.get(noaa_3day_source.SOURCE_ID).frozen
+    if outcome is None:
+        return _attempt_error_status(
+            noaa_3day_source.SOURCE_ID,
+            at=now,
+            message=unexpected_error or "unexpected error",
+            quota_limited=False,
+            frozen=frozen,
+        )
+    if outcome.outcome == "stored":
+        return _attempt_success_status(noaa_3day_source.SOURCE_ID, at=now, frozen=frozen)
+    if outcome.outcome.startswith("error_"):
+        return _attempt_error_status(
+            noaa_3day_source.SOURCE_ID,
+            at=now,
+            message=outcome.message or outcome.outcome,
+            quota_limited=(outcome.outcome == "error_quota"),
+            frozen=frozen,
+        )
+    return registry.get(noaa_3day_source.SOURCE_ID)
+
+
+def _not_implemented_mechanism(
+    mechanism: Literal["space_weather", "mmod"],
+    *,
+    extra_notes: list[str] | None = None,
+    extra_record_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Заглушка ``mechanismAssessment`` для механизма без готовой пороговой
+    интерпретации (main-prompt.md §11: комбинирование наблюдения и внешнего
+    прогноза в один уровень/exceedance ещё не реализовано).
+
+    ``extra_notes``/``extra_record_ids`` (FN-31) — реальные, уже полученные
+    входные данные, которые ЭТА версия сервиса умеет показать без готовой
+    пороговой логики: суточная вероятность S1+ NOAA 3-Day Forecast для
+    конкретного окна (``assess_external_forecast``). ``status`` остаётся
+    ``not_implemented``, а ``critical_gap``/``coverage_fraction`` — ``True``/
+    ``0.0`` как и раньше: они описывают полноту данных ДЛЯ ГОТОВОЙ ОЦЕНКИ
+    механизма в целом (наблюдение + внешний прогноз главной формулой §11), а
+    не полноту одной лишь линии внешнего прогноза — наблюдение GOES pfu всё
+    ещё не входит ни в один расчёт уровня (main-prompt.md §2: не подменять
+    частичный прогресс благоприятной/готовой на вид оценкой). ``notes`` и
+    ``record_ids`` контрактом не ограничены статусом ``not_implemented``
+    (contracts/result.schema.json → mechanismAssessment), поэтому реальная
+    информация, полученная и сохранённая этим сервисом, доходит до клиента
+    уже сейчас — О4 «от предупреждения — к значению и первоисточнику».
+    """
     label = (
         "космической погоды (main-prompt.md §11, Механизм 1)"
         if mechanism == "space_weather"
         else "MMOD (main-prompt.md §11, Механизм 2)"
     )
+    notes = [
+        f"Интерпретация механизма {label} не реализована в этой версии "
+        "сервиса — оценка не имитируется готовым значением."
+    ]
+    if extra_notes:
+        notes.extend(extra_notes)
     return {
         "mechanism": mechanism,
         "status": "not_implemented",
@@ -357,11 +425,8 @@ def _not_implemented_mechanism(mechanism: Literal["space_weather", "mmod"]) -> d
         "exceedance_hours_by_level": None,
         "coverage_fraction": 0.0,
         "critical_gap": True,
-        "notes": [
-            f"Интерпретация механизма {label} не реализована в этой версии "
-            "сервиса — оценка не имитируется готовым значением."
-        ],
-        "record_ids": [],
+        "notes": notes,
+        "record_ids": list(extra_record_ids) if extra_record_ids else [],
     }
 
 
@@ -403,7 +468,21 @@ def _swpc_config_enabled() -> bool:
         return True
 
 
-def _window(window_id: str, start_at: datetime, duration_hours: float) -> dict[str, Any]:
+def _noaa_3day_config_enabled() -> bool:
+    try:
+        return noaa_3day_source.load_source_config().enabled
+    except Exception:  # noqa: BLE001 — см. _swpc_config_enabled выше.
+        return True
+
+
+def _window(
+    window_id: str,
+    start_at: datetime,
+    duration_hours: float,
+    *,
+    space_weather_notes: list[str] | None = None,
+    space_weather_record_ids: list[str] | None = None,
+) -> dict[str, Any]:
     end_at = start_at + timedelta(hours=duration_hours)
     return {
         "window_id": window_id,
@@ -411,7 +490,11 @@ def _window(window_id: str, start_at: datetime, duration_hours: float) -> dict[s
         "end_at": iso_utc(end_at),
         "duration_hours": duration_hours,
         "mechanisms": [
-            _not_implemented_mechanism("space_weather"),
+            _not_implemented_mechanism(
+                "space_weather",
+                extra_notes=space_weather_notes,
+                extra_record_ids=space_weather_record_ids,
+            ),
             _not_implemented_mechanism("mmod"),
         ],
         "lighting": {"requested": False, "status": "not_requested", "note": None},
@@ -597,29 +680,152 @@ def _build_current_result(
             }
         )
 
+    # NOAA 3-Day Forecast (S1+) — FN-31: отдельная от наблюдения выше линия
+    # внешнего прогноза Механизма 1. Тот же управляемый шлюз/статус/warning
+    # паттерн, что и у потока протонов (main-prompt.md §5 «отказ одного
+    # источника не должен обрушивать расчёт целиком»).
+    noaa_3day_attempt_id = _fetch_attempt_id(noaa_3day_source.SOURCE_ID, now=now)
+    noaa_3day_unexpected_error: str | None = None
+    try:
+        noaa_3day_cfg = noaa_3day_source.load_source_config()
+        noaa_3day_outcome = noaa_3day_source.fetch_and_store(
+            conn, raw_store, config=noaa_3day_cfg, registry=registry, now=now
+        )
+    except Exception as exc:  # noqa: BLE001 — см. swpc-блок выше.
+        noaa_3day_unexpected_error = sanitize_unexpected_error(exc)
+        registry.record_error(
+            noaa_3day_source.SOURCE_ID,
+            at=now,
+            message=noaa_3day_unexpected_error,
+            quota_limited=False,
+        )
+        noaa_3day_outcome = None
+
+    noaa_3day_status = _noaa_3day_attempt_status(
+        noaa_3day_outcome, registry=registry, now=now, unexpected_error=noaa_3day_unexpected_error
+    )
+    noaa_3day_outcome_code = (
+        noaa_3day_outcome.outcome if noaa_3day_outcome is not None else "error_unexpected"
+    )
+    _log(
+        "noaa_3day_forecast_fetch",
+        outcome=noaa_3day_outcome_code,
+        source_id=noaa_3day_source.SOURCE_ID,
+        fetch_attempt_id=noaa_3day_attempt_id,
+        **log_ctx,
+    )
+    if noaa_3day_outcome is None or noaa_3day_outcome.outcome.startswith("error_"):
+        failure_detail = (
+            noaa_3day_outcome.message
+            if noaa_3day_outcome is not None
+            else noaa_3day_unexpected_error
+        )
+        warnings.append(
+            {
+                "code": f"space-weather-forecast-{noaa_3day_outcome_code}",
+                "severity": "advisory",
+                "mechanism": "space_weather",
+                "message": (
+                    f"Получение суточного прогноза NOAA 3-Day (S1+) не удалось: "
+                    f"{failure_detail}. Ранее сохранённые версии (если есть) всё "
+                    "равно используются ниже через select_as_of — отказ этой "
+                    "попытки не означает отсутствие любых данных."
+                ),
+                "record_ids": [],
+                "fetch_attempt_id": noaa_3day_attempt_id,
+                "window_id": None,
+            }
+        )
+
+    # select_as_of(as_of=now, ...) для record_kind="forecast" реализует и
+    # режим current: published_at каждой записи этой линии всегда известен
+    # (парсер требует ':Issued:'), поэтому "текущая" выборка — это просто
+    # строгий replay на момент now, тем же уже протестированным правилом,
+    # что и historical_forecast (main-prompt.md §1) — без отдельного кода.
+    forecast_records: list[dict[str, Any]] = []
+    forecast_days: list[ExternalForecastDay] = []
+    try:
+        forecast_records = select_as_of(
+            conn, now, source_id=noaa_3day_source.SOURCE_ID, record_kind="forecast"
+        )
+        forecast_days = external_forecast_days_from_records(forecast_records)
+    except Exception as exc:  # noqa: BLE001 — повреждённая сохранённая запись не
+        # должна обрушивать расчёт целиком; окна ниже просто не увидят
+        # прогнозных дней (main-prompt.md §2 — это не благоприятная замена,
+        # отсутствие данных остаётся видимым через notes/warnings выше).
+        _log(
+            "noaa_3day_forecast_selection_failed",
+            error=sanitize_unexpected_error(exc),
+            **log_ctx,
+        )
+        forecast_records = []
+        forecast_days = []
+
+    forecast_records_by_id = {str(r["record_id"]): r for r in forecast_records}
+
+    def _window_forecast_assessment(start_at: datetime, duration_hours: float) -> tuple[
+        list[str], list[str]
+    ]:
+        end_at = start_at + timedelta(hours=duration_hours)
+        assessment = assess_external_forecast(
+            forecast_days, window_start=start_at, window_end=end_at
+        )
+        return list(assessment.notes), list(assessment.record_ids)
+
+    win_a_notes, win_a_record_ids = _window_forecast_assessment(
+        request.start_at, request.duration_hours
+    )
+    win_b_notes, win_b_record_ids = _window_forecast_assessment(
+        request.search_end_at, request.duration_hours
+    )
+
     windows = [
-        _window("win-a", request.start_at, request.duration_hours),
-        _window("win-b", request.search_end_at, request.duration_hours),
+        _window(
+            "win-a", request.start_at, request.duration_hours,
+            space_weather_notes=win_a_notes, space_weather_record_ids=win_a_record_ids,
+        ),
+        _window(
+            "win-b", request.search_end_at, request.duration_hours,
+            space_weather_notes=win_b_notes, space_weather_record_ids=win_b_record_ids,
+        ),
+    ]
+
+    forecast_manifest_entries = [
+        {
+            "record_id": record_id,
+            "source_id": noaa_3day_source.SOURCE_ID,
+            "source_version": forecast_records_by_id[record_id]["source_version"],
+            "record_kind": "forecast",
+        }
+        for record_id in sorted(set(win_a_record_ids) | set(win_b_record_ids))
     ]
 
     # Статусы, построенные из СОБСТВЕННОГО исхода именно этой попытки
-    # (orbit_fetch.status, swpc_status) — не из общего реестра ни поздним
-    # повторным registry.get() (round 1 ревью), ни через возвращаемое
-    # значение record_success/record_error, которое само строится из
-    # текущего общего состояния и может унаследовать поля чужой,
-    # конкурентной попытки (round 2 ревью PR #19, приёмка FN-26 «два
+    # (orbit_fetch.status, swpc_status, noaa_3day_status) — не из общего
+    # реестра ни поздним повторным registry.get() (round 1 ревью), ни через
+    # возвращаемое значение record_success/record_error, которое само
+    # строится из текущего общего состояния и может унаследовать поля
+    # чужой, конкурентной попытки (round 2 ревью PR #19, приёмка FN-26 «два
     # конкурентных запроса не смешивают статусы»).
     source_status = [
         _status_dict(orbit_fetch.status, config_enabled=True),
         _status_dict(swpc_status, config_enabled=_swpc_config_enabled()),
+        _status_dict(noaa_3day_status, config_enabled=_noaa_3day_config_enabled()),
     ]
 
     limitations = [
         "Интерпретация обоих обязательных механизмов воздействия (космическая "
         "погода, MMOD) не реализована в этой версии сервиса — этот эндпоинт "
         "получает и сохраняет реальные исходные данные (орбитальные элементы "
-        "МКС и, при доступности источника, поток протонов), но не вычисляет "
-        "уровень риска.",
+        "МКС, при доступности источника — поток протонов, и суточную "
+        "вероятность S1+ NOAA 3-Day Forecast), но не вычисляет уровень риска.",
+        "Суточная вероятность S1+ NOAA 3-Day Forecast (FN-31) показана в "
+        "notes/record_ids каждого окна как есть, без деления по часам, "
+        "умножения на длительность окна или суммирования через полночь — но "
+        "не создаёт оценку уровня механизма: комбинирование с наблюдением "
+        "GOES pfu (пороги S1/S2/S3, main-prompt.md §11) ещё не реализовано, "
+        "поэтому mechanisms[*].status для space_weather остаётся "
+        "not_implemented.",
         "Траектория станции рассчитана по SGP4 на предоставленных элементах "
         "(см. orbit.elements_age_hours/is_reconstructed).",
     ]
@@ -643,7 +849,8 @@ def _build_current_result(
                 "source_id": orbit.SOURCE_ID_CURRENT,
                 "source_version": orbit_fetch.source_version,
                 "record_kind": "orbital_elements",
-            }
+            },
+            *forecast_manifest_entries,
         ],
         "orbit": {
             "source": "celestrak",
@@ -783,9 +990,28 @@ def refresh_sources(
             )
             swpc_enabled = True
 
+        try:
+            noaa_3day_cfg = noaa_3day_source.load_source_config()
+            noaa_3day_outcome = noaa_3day_source.fetch_and_store(
+                conn, raw_store, config=noaa_3day_cfg, registry=registry, now=moment, force=True
+            )
+            _log("noaa_3day_forecast_refresh", outcome=noaa_3day_outcome.outcome)
+            noaa_3day_enabled = noaa_3day_cfg.enabled
+        except Exception as exc:  # noqa: BLE001 — см. swpc-блок выше.
+            registry.record_error(
+                noaa_3day_source.SOURCE_ID,
+                at=moment,
+                message=sanitize_unexpected_error(exc),
+                quota_limited=False,
+            )
+            noaa_3day_enabled = True
+
         return [
             _source_status_dict(registry, orbit.SOURCE_ID_CURRENT, config_enabled=True),
             _source_status_dict(registry, swpc_source.SOURCE_ID, config_enabled=swpc_enabled),
+            _source_status_dict(
+                registry, noaa_3day_source.SOURCE_ID, config_enabled=noaa_3day_enabled
+            ),
         ]
     finally:
         conn.close()
@@ -797,6 +1023,9 @@ def get_all_source_status(*, registry: SourceStatusRegistry) -> list[dict[str, A
         _source_status_dict(registry, orbit.SOURCE_ID_CURRENT, config_enabled=True),
         _source_status_dict(
             registry, swpc_source.SOURCE_ID, config_enabled=_swpc_config_enabled()
+        ),
+        _source_status_dict(
+            registry, noaa_3day_source.SOURCE_ID, config_enabled=_noaa_3day_config_enabled()
         ),
     ]
 

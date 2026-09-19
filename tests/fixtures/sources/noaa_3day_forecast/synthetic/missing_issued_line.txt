@@ -1,0 +1,10 @@
+:Product: 3-Day Forecast
+# Prepared by the U.S. Dept. of Commerce, NOAA, Space Weather Prediction Center
+#
+B. NOAA Solar Radiation Storm Forecast for Jan 05-Jan 07 2025
+
+Solar Radiation Storm Forecast for Next 3 Days:
+                  Jan 05  Jan 06  Jan 07
+S1 or greater        20%     10%      5%
+
+Rationale: Synthetic fixture without an ':Issued:' line (main-prompt.md §1).
