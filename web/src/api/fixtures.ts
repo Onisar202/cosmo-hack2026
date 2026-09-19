@@ -42,7 +42,8 @@ export const DEMO_FIXTURES: DemoFixture[] = [
   {
     id: 'equal-windows',
     label: 'Равнозначные окна',
-    description: 'Оба окна равнозначны по правилу доминирования v2 — рекомендация не выдаётся (tie).',
+    description:
+      'Оба окна равнозначны по правилу доминирования v2 — рекомендация не выдаётся (tie).',
     result: equalWindows as CalculationResult,
   },
 ]
