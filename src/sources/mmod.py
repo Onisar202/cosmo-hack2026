@@ -82,11 +82,37 @@ DEFAULT_DATA_PATH = (
     / "flux_data.txt.gz"
 )
 
-#: Документ выпущен единовременно (титульный лист LEO_Forecast_2024.pdf:
-#: «Issued November 2, 2023») — одно published_at на ВСЕ почасовые записи,
-#: не отдельное время на узел сетки (в отличие от noaa-swpc-3day-forecast,
-#: где каждый бюллетень несёт собственный ``:Issued:``).
-PUBLISHED_AT = datetime(2023, 11, 2, tzinfo=UTC)
+#: Титульный лист LEO_Forecast_2024.pdf называет только КАЛЕНДАРНУЮ ДАТУ
+#: («Issued November 2, 2023»), без времени суток и без подтверждённого
+#: часового пояса — round 1 ревью PR #32 (FN-40): выдавать эту дату без
+#: времени за точный ``published_at=2023-11-02T00:00:00Z`` нарушает
+#: временную честность (.ai/main-prompt.md §1) и делает записи
+#: ``replay_eligible`` РАНЬШЕ доказанного момента публикации.
+#:
+#: Вместо точного момента — консервативная ГРАНИЦА доступности: начало
+#: следующих суток UTC после заявленной даты. Это НЕ заявленный поставщиком
+#: момент публикации (тот неизвестен и не восстанавливается по календарной
+#: дате) — это самый ранний момент, для которого можно быть уверенным, что
+#: он не предшествует фактической публикации, с большим запасом (документ
+#: не может быть публикован ПОСЛЕ 2023-11-02 по любому реалистичному
+#: часовому поясу, если титульный лист называет эту дату). Используется
+#: только чтобы ``published_at <= as_of`` не мог ошибочно включить запись
+#: раньше реального момента публикации (главная ловушка Т4/§1) — обязательный
+#: период 2024 года остаётся далеко после этой границы при любом разумном
+#: допущении о часовом поясе титульного листа.
+#:
+#: **Открытый пробел provenance (FN-40, не устранён этой сессией):** ни PDF
+#: (``LEO_Forecast_2024.pdf``), ни отдельные метаданные NTRS-цитирования
+#: 20230015158 не сохранены в репозитории с контрольной суммой — сетевой
+#: прокси этой сессии отклоняет и ``ntrs.nasa.gov``, и
+#: ``api.media.atlassian.com`` (напрямую проверено в этой сессии, см.
+#: ``sources.yaml#nasa-meo-leo-forecast-2024`` → ``access_restrictions``),
+#: тем же классом ограничения, что блокировал FN-25/FN-32/FN-37/FN-39.
+#: Поэтому заявленная календарная дата «2023-11-02» опирается только на
+#: пересказ в истории Jira-задачи, не на проверяемый в этой сессии артефакт
+#: — отсюда консервативная (никогда не более ранняя, чем могла быть на
+#: самом деле) граница, а не точный момент, и явная пометка ниже.
+PUBLISHED_AT_AVAILABILITY_BOUNDARY = datetime(2023, 11, 3, tzinfo=UTC)
 
 #: Единица value записи (main-prompt.md §2 «единица едет рядом со значением»)
 #: — безразмерный коэффициент повышения потока, КАК ОПУБЛИКОВАНО поставщиком
@@ -213,8 +239,10 @@ def build_mmod_background_records(
       представляет значение почасового грида на этот час (интерполяция
       между узлами — забота ``src/domain/mmod/background.py``, не этой
       записи);
-    - ``published_at`` = :data:`PUBLISHED_AT` — фиксировано для всех узлов
-      (документ выпущен единовременно, см. docstring модуля);
+    - ``published_at`` = :data:`PUBLISHED_AT_AVAILABILITY_BOUNDARY` —
+      консервативная граница доступности, ОДНА и та же для всех узлов
+      (документ выпущен единовременно), НЕ точный момент публикации (см.
+      docstring модуля — временная честность, FN-40);
     - ``fetched_at`` — аргумент вызывающей стороны.
 
     ``provider_record_id`` включает ISO-момент узла — устойчивый
@@ -236,12 +264,20 @@ def build_mmod_background_records(
                 observed_at=row.ut_datetime,
                 valid_from=row.ut_datetime,
                 valid_to=row.ut_datetime + timedelta(hours=1),
-                published_at=PUBLISHED_AT,
+                published_at=PUBLISHED_AT_AVAILABILITY_BOUNDARY,
                 fetched_at=fetched_at,
                 value=row.factor_105j,
                 unit=VALUE_UNIT,
                 spatial_context={
-                    "worst_case_unshielded_leo": True,
+                    # round 1 ревью PR #32 (FN-40): "worst_case_unshielded_leo"
+                    # вводило в заблуждение — sources.yaml документирует, что
+                    # неучтённая ориентация способна УДВОИТЬ показатель для
+                    # площадки, строго обращённой к радианту, так что этот
+                    # factor не является абсолютным худшим случаем ни для
+                    # какой конкретной поверхности. Явные, не обобщающие поля:
+                    "unshielded_radiant_facing_reference": True,
+                    "orientation_unmodeled": True,
+                    "damage_response_unmodeled": True,
                     "not_spacecraft_surface_specific": True,
                     "kinetic_energy_j": 105.0,
                     "particle_equivalent_diameter_cm": 0.1,
@@ -324,7 +360,7 @@ def ensure_mmod_records_for_window(
 __all__ = [
     "SOURCE_ID",
     "SOURCE_URL",
-    "PUBLISHED_AT",
+    "PUBLISHED_AT_AVAILABILITY_BOUNDARY",
     "VALUE_UNIT",
     "DEFAULT_DATA_PATH",
     "MmodFluxForecastFormatError",

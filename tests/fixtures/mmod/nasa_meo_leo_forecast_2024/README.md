@@ -91,10 +91,37 @@ PDF приводит полный почасовой ряд на весь год
   directly facing the shower, this can further boost the significance… by
   another factor of approximately 2», «it is possible for the Earth to
   shield the spacecraft from all or part of a shower» — то есть `factor`
-  уже соответствует худшему случаю (полностью открытый, направленный на
-  радиант приёмник), а не траекторной оценке конкретной станции. Поэтому
-  `ratio_to_background` этой задачи НЕ умножается на
-  `effective_flux_ratio`/результат экранирования
-  (`src/domain/mmod/geometry.py`, FN-32) — они выводятся отдельно как
-  `trajectory_context`, результат помечается `worst_case_unshielded_leo` и
-  `not_spacecraft_surface_specific` (решение владельца задачи, FN-39).
+  соответствует РЕФЕРЕНСНОЙ геометрии (полностью открытый, направленный на
+  радиант приёмник), **не доказанному абсолютному худшему случаю** для
+  конкретной поверхности станции: неучтённая ориентация способна как
+  обнулить эффект (полное экранирование), так и примерно удвоить его
+  (поверхность строго по нормали к радианту). Поэтому `ratio_to_background`
+  этой задачи НЕ умножается на `effective_flux_ratio`/результат
+  экранирования (`src/domain/mmod/geometry.py`, FN-32) — они выводятся
+  отдельно как `trajectory_context`, результат помечается
+  `unshielded_radiant_facing_reference`, `orientation_unmodeled`,
+  `damage_response_unmodeled` и `not_spacecraft_surface_specific`
+  (`spatial_context`, `src/sources/mmod.py::build_mmod_background_records`;
+  решение владельца задачи FN-39, честные названия полей — FN-40,
+  заменяет вводившее в заблуждение `worst_case_unshielded_leo`, review PR #32
+  round 1).
+- **`published_at` — консервативная граница, не точный момент публикации
+  (FN-40, review PR #32 round 1).** Титульный лист называет только
+  календарную дату «Issued November 2, 2023», без времени суток и без
+  подтверждённого часового пояса. Выдавать её за точный
+  `published_at=2023-11-02T00:00:00Z` нарушало бы временную честность
+  (`main-prompt.md` §1) — записи несут `published_at=2023-11-03T00:00:00Z`
+  (`src/sources/mmod.py::PUBLISHED_AT_AVAILABILITY_BOUNDARY` — начало
+  следующих суток UTC), заведомо не раньше факта, с большим запасом до
+  обязательного периода 2024 года.
+- **Открытый пробел provenance (FN-40, не устранён этой сессией).** Ни PDF
+  (`LEO_Forecast_2024.pdf`), ни отдельный NTRS-metadata/HTTP sidecar для
+  citation 20230015158 не сохранены в репозитории с контрольной суммой —
+  единственный сохранённый артефакт (`flux_data.txt.gz`) не содержит дату
+  выпуска. Заявленная дата и SHA-256 PDF/таблицы (`sources.yaml` →
+  `access_restrictions`) опираются на пересказ в истории Jira-задачи FN-39
+  (получено прямой загрузкой пользователем в чат), не на артефакт,
+  проверяемый из этого репозитория — сетевой прокси этой сессии отклоняет и
+  `ntrs.nasa.gov`, и `api.media.atlassian.com` (проверено повторно в сессии
+  FN-40). Требуется сетевое исключение либо прямая передача файла сессии с
+  доступом для сохранения и проверки контрольной суммы.

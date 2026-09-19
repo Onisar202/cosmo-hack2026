@@ -20,7 +20,7 @@ import pytest
 from src.domain.mmod.background import ratio_to_background
 from src.sources import mmod as mmod_module
 from src.sources.mmod import (
-    PUBLISHED_AT,
+    PUBLISHED_AT_AVAILABILITY_BOUNDARY,
     SOURCE_ID,
     VALUE_UNIT,
     MmodFluxForecastFormatError,
@@ -155,11 +155,23 @@ class TestBuildMmodBackgroundRecords:
         assert first.unit == VALUE_UNIT
         assert first.value == subset[0].factor_105j
         assert first.value != ratio_to_background(subset[0].factor_105j)
-        assert first.published_at == PUBLISHED_AT
+        assert first.published_at == PUBLISHED_AT_AVAILABILITY_BOUNDARY
+        # Граница, не точный момент публикации (FN-40, main-prompt.md §1):
+        # титульный лист называет только календарную дату «2023-11-02» без
+        # времени суток, поэтому published_at — начало СЛЕДУЮЩИХ суток UTC,
+        # заведомо не раньше факта, а не точный timestamp документа.
+        assert first.published_at == datetime(2023, 11, 3, tzinfo=UTC)
         assert first.valid_from == subset[0].ut_datetime
         assert first.valid_to == subset[0].ut_datetime + timedelta(hours=1)
-        assert first.spatial_context["worst_case_unshielded_leo"] is True
+        # "worst_case_unshielded_leo" (FN-39) вводило в заблуждение —
+        # sources.yaml документирует, что неучтённая ориентация способна
+        # УДВОИТЬ показатель для площадки, обращённой к радианту, так что
+        # это не абсолютный худший случай ни для какой поверхности (FN-40).
+        assert first.spatial_context["unshielded_radiant_facing_reference"] is True
+        assert first.spatial_context["orientation_unmodeled"] is True
+        assert first.spatial_context["damage_response_unmodeled"] is True
         assert first.spatial_context["not_spacecraft_surface_specific"] is True
+        assert "worst_case_unshielded_leo" not in first.spatial_context
 
     def test_provider_record_id_is_unique_per_hour(self) -> None:
         parsed = parse_flux_forecast(REAL_FILE_BYTES)
@@ -172,6 +184,53 @@ class TestBuildMmodBackgroundRecords:
             windowed, raw_bytes=REAL_FILE_BYTES, fetched_at=datetime(2026, 1, 1, tzinfo=UTC)
         )
         assert len({r.provider_record_id for r in records}) == 5
+
+
+class TestPublishedAtTemporalHonesty:
+    """FN-40: ``published_at`` — консервативная ГРАНИЦА доступности, не
+    заявленный поставщиком точный момент публикации (main-prompt.md §1).
+    Обязательный тест на утечку времени (§9 п.1): запись не должна стать
+    ``replay_eligible`` для ``as_of`` РАНЬШЕ этой границы, даже если реальная
+    публикация могла произойти раньше (титульный лист называет только
+    календарную дату, без времени суток)."""
+
+    def _insert_one_record(
+        self, db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+    ) -> None:
+        ensure_mmod_records_for_window(
+            db_conn,
+            raw_store,
+            window_start=datetime(2024, 5, 5, 14, 0, tzinfo=UTC),
+            window_end=datetime(2024, 5, 5, 14, 0, tzinfo=UTC),
+            fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    def test_not_eligible_before_the_conservative_boundary(
+        self, db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+    ) -> None:
+        self._insert_one_record(db_conn, raw_store)
+        # За несколько часов до границы (2023-11-03T00:00:00Z) — запись не
+        # должна быть доступна строгому replay, даже если фактическая
+        # публикация НА САМОМ ДЕЛЕ могла произойти раньше в тот же
+        # календарный день «2023-11-02» — граница обязана быть консервативной
+        # (не выдавать более раннюю доступность, чем доказано).
+        as_of = datetime(2023, 11, 2, 12, 0, tzinfo=UTC)
+        assert select_as_of(db_conn, as_of, source_id=SOURCE_ID, record_kind="forecast") == []
+
+    def test_eligible_at_and_after_the_conservative_boundary(
+        self, db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+    ) -> None:
+        self._insert_one_record(db_conn, raw_store)
+        at_boundary = select_as_of(
+            db_conn,
+            datetime(2023, 11, 3, tzinfo=UTC),
+            source_id=SOURCE_ID,
+            record_kind="forecast",
+        )
+        assert len(at_boundary) >= 1
+        assert all(
+            record["published_at"] == "2023-11-03T00:00:00.000000Z" for record in at_boundary
+        )
 
 
 class TestEnsureMmodRecordsForWindow:
