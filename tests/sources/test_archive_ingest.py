@@ -26,7 +26,9 @@ from src.domain.spaceweather.archive_assessment import (
     ArchiveProductPolicy,
     CoverageInterval,
     assess_archive_window,
+    source_assessment_for_agreement,
 )
+from src.domain.spaceweather.source_agreement import SourceAssessment, compute_source_agreement
 from src.sources.archive_ingest import (
     ArchiveConfigError,
     ArchiveIngestReport,
@@ -1108,3 +1110,94 @@ def test_unresolved_relevant_notification_drops_the_whole_interval_from_coverage
     assert assessment.status == "INSUFFICIENT_DATA"
     assert assessment.critical_gap is True
     assert assessment.coverage_fraction == 0.0
+
+
+# ---------------------------------------------------------------------------
+# FN-47 п.4 — adapter-level historical gate для source_agreement
+# ---------------------------------------------------------------------------
+
+
+def test_source_agreement_is_pinned_by_the_same_frozen_snapshot_as_its_inputs(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    """FN-47 п.4: минимальный adapter-level historical gate для
+    ``source_agreement`` не переизобретает выборку/закрепление — он целиком
+    наследует их от :func:`assemble_historical_forecast_input` (FN-42/46, тот
+    же снимок, что и в
+    ``test_assemble_historical_forecast_input_also_freezes_the_record_set_not_only_coverage``
+    выше). Здесь то же самое проверяется на один уровень выше: результат
+    :func:`compute_source_agreement`, построенный поверх закреплённого снимка
+    ОДНОГО и того же ``computation_id``, не меняется при повторной загрузке
+    архива, случившейся ПОСЛЕ того, как расчёт уже увидел снимок в первый
+    раз — «поздняя загрузка не меняет frozen snapshot при повторном чтении».
+
+    Второй источник здесь — синтетическая заглушка, а не реальный SWPC
+    Forecast Discussion: у него сегодня в реестре пустой
+    ``event_message_types`` (см.
+    ``test_registry_declares_no_hardcoded_horizon_for_archive_products``),
+    поэтому он структурно не может дать применимую классификацию — ответ на
+    это открытый вопрос кейсодержателя, не предмет FN-47 (main-prompt.md
+    §11 «Строгий прогноз из прошлого... источник документирован»).
+    """
+    as_of = datetime(2024, 6, 5, tzinfo=UTC)
+    strategy = _donki_strategy(horizon_hours=6.0)
+    policy = ArchiveProductPolicy.from_config(strategy.product_for(DONKI_SOURCE_ID))
+    window_start = datetime(2024, 6, 4, 18, 0, tzinfo=UTC)
+    window_end = as_of
+    computation_id = "test-fn47-source-agreement-pin"
+    second_independent_source = SourceAssessment(
+        source_id="test-second-independent-source", classification="NO_EVENT_DETECTED"
+    )
+
+    def _agreement_for(forecast_input):
+        assessment = assess_archive_window(
+            forecast_input.records,
+            policy=policy,
+            ingested_intervals=_as_coverage_intervals(forecast_input.ingested_intervals),
+            window_start=window_start,
+            window_end=window_end,
+            as_of=as_of,
+        )
+        return compute_source_agreement(
+            [source_assessment_for_agreement(assessment), second_independent_source]
+        )
+
+    first_report = ingest_donki_notifications(
+        db_conn,
+        raw_store,
+        (ARCHIVE_DIR / "donki_2024-05-16_2024-05-31.json").read_bytes(),
+        source_url=DONKI_URL,
+        fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+        interval_start=datetime(2024, 5, 16, tzinfo=UTC),
+        interval_end=datetime(2024, 6, 1, tzinfo=UTC),
+    )
+    before_input = assemble_historical_forecast_input(
+        db_conn, [first_report], computation_id=computation_id, as_of=as_of, strategy=strategy
+    )[DONKI_SOURCE_ID]
+    before = _agreement_for(before_input)
+
+    # Поздняя ЗАГРУЗКА (не поздняя публикация): реальное архивное окно
+    # 1-15 июня, загруженное в хранилище только сейчас, добавляет реальные
+    # записи с published_at <= as_of этого теста (контроль — см. соседний
+    # тест выше, который явно проверяет рост честной выборки на этих же
+    # файлах). Расчёт с ТЕМ ЖЕ computation_id не обязан их увидеть.
+    second_report = ingest_donki_notifications(
+        db_conn,
+        raw_store,
+        (ARCHIVE_DIR / "donki_2024-06-01_2024-06-15.json").read_bytes(),
+        source_url=DONKI_URL,
+        fetched_at=datetime(2026, 6, 1, tzinfo=UTC),
+        interval_start=datetime(2024, 6, 1, tzinfo=UTC),
+        interval_end=datetime(2024, 6, 16, tzinfo=UTC),
+    )
+    after_input = assemble_historical_forecast_input(
+        db_conn,
+        [first_report, second_report],
+        computation_id=computation_id,
+        as_of=as_of,
+        strategy=strategy,
+    )[DONKI_SOURCE_ID]
+    assert after_input == before_input, "the underlying adapter-level gate itself must stay pinned"
+
+    after = _agreement_for(after_input)
+    assert after == before, "source_agreement must inherit the pinned snapshot, not recompute it"

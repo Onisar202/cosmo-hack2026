@@ -53,6 +53,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Protocol
 
+from src.domain.spaceweather.source_agreement import SourceAssessment
+
 UTC = timezone.utc
 
 #: Три состояния оценки — ровно те, что перечислены в постановке FN-42.
@@ -540,6 +542,33 @@ def _build_notes(
     return tuple(notes)
 
 
+def source_assessment_for_agreement(assessment: ArchiveWindowAssessment) -> SourceAssessment:
+    """Адаптирует оценку одного архивного продукта в провайдер-агностичный
+    вид, которым оперирует
+    ``src/domain/spaceweather/source_agreement.py::compute_source_agreement``
+    (FN-47).
+
+    ``AssessmentStatus.INSUFFICIENT_DATA`` этого продукта — не decision-relevant
+    классификация, а «оценить невозможно» (main-prompt.md §2), поэтому здесь
+    она превращается в ``classification=None`` и не войдёт в подсчёт
+    ПРИМЕНИМЫХ независимых оценок FN-47 — но ``record_ids``/``notes`` этого
+    продукта сохраняются целиком, а не отбрасываются (main-prompt.md §2
+    «сохранить оценки и provenance каждого источника»).
+
+    ``EVENT_PRESENT``/``NO_EVENT_DETECTED`` переносятся как есть: это и есть
+    decision-relevant классификация двух независимых архивных продуктов
+    одного механизма (DONKI, SWPC Forecast Discussion — оба
+    задокументированы как независимые друг от друга в ``sources.yaml``
+    → ``independence_note``)."""
+    classification = None if assessment.status == "INSUFFICIENT_DATA" else assessment.status
+    return SourceAssessment(
+        source_id=assessment.source_id,
+        classification=classification,
+        record_ids=assessment.record_ids,
+        notes=assessment.notes,
+    )
+
+
 __all__ = [
     "ArchiveEvent",
     "ArchiveProductPolicy",
@@ -549,4 +578,5 @@ __all__ = [
     "TemporalLeakError",
     "UnsupportedRecordError",
     "assess_archive_window",
+    "source_assessment_for_agreement",
 ]

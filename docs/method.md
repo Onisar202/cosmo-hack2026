@@ -31,6 +31,7 @@ replay всего сервиса: полная загрузка архива в 
    - [7.5 Известный, явно не скрытый пробел приёмки: реальные фикстуры](#75-известный-явно-не-скрытый-пробел-приёмки-реальные-фикстуры)
 8. [Наблюдаемый GOES S-классификатор — Механизм 1 (FN-38, S2-08)](#8-наблюдаемый-goes-s-классификатор--механизм-1-fn-38-s2-08)
 9. [Адаптер строгой выборки архивной космопогоды (FN-42) — публичный контракт](#9-адаптер-строгой-выборки-архивной-космопогоды-fn-42--публичный-контракт)
+   - [9.5 Source agreement foundation (FN-47)](#95-source-agreement-foundation-fn-47--готовится-под-fn-41)
 10. [Стенд экспериментов Т5 (FN-43)](#10-стенд-экспериментов-т5-fn-43)
 
 ## 1. Кандидаты и выбор
@@ -1021,6 +1022,33 @@ Forecast Discussion перечень пуст — продукт предста�
   `forecast_horizon_hours`/`event_message_types` ей добавлены, но реальных
   сохранённых ответов этого продукта в репозитории нет (§7.5), поэтому
   загрузка на ней не проверялась.
+
+### 9.5 Source agreement foundation (FN-47) — готовится под FN-41
+
+`src/domain/spaceweather/source_agreement.py` добавляет провайдер-агностичный
+расчёт `source_agreement = CONSISTENT | CONFLICT | INSUFFICIENT_DATA` поверх
+уже существующего адаптера этого раздела: `CONSISTENT`/`CONFLICT` требуют
+минимум двух ПРИМЕНИМЫХ независимых оценок с одинаковой/разной
+decision-relevant классификацией, `INSUFFICIENT_DATA` — меньше двух. Оценки
+и provenance КАЖДОГО источника сохраняются целиком (main-prompt.md §2) —
+модуль не выбирает «лучший» источник и не производит weights/общий risk
+score. `src/domain/spaceweather/archive_assessment.py::source_assessment_for_agreement`
+адаптирует `ArchiveWindowAssessment` (DONKI, SWPC Forecast Discussion — оба
+продукта §9 выше) в этот общий вид; `AssessmentStatus.INSUFFICIENT_DATA`
+одного продукта не несёт decision-relevant классификации и не участвует в
+подсчёте применимых оценок.
+
+Adapter-level historical gate для этой комбинации ничего заново не
+реализует: он целиком наследуется от `assemble_historical_forecast_input`
+(§9.1) — тот же закреплённый снимок (`computation_id`, `source_id`,
+`as_of`), которым уже гарантировано, что запись с `published_at > as_of` не
+участвует и что поздняя загрузка не меняет уже вычисленный вход при
+повторном чтении (`tests/sources/test_archive_ingest.py::test_source_agreement_is_pinned_by_the_same_frozen_snapshot_as_its_inputs`).
+
+**Явно НЕ входит в эту задачу** (main-prompt.md §11 «Зависимость»): ни
+`CONFLICT`→`CHECK_REQUIRED`/понижение confidence (решение FN-41), ни
+включение `source_agreement` в `src/api/service.py`/`contracts/result.schema.json`
+— оба ждут завершения FN-41.
 
 ## 10. Стенд экспериментов Т5 (FN-43)
 
