@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -22,6 +22,9 @@ from src.store import RawOriginalStore
 from src.store.schema import connect as connect_store
 
 from .conftest import scenario_by_name
+
+#: This test does not assert on computed_at — any fixed value works.
+_RUN_STARTED_AT = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
 
 
 def _future_leaking_notification(scenario: Scenario) -> archive_probe.DonkiNotification:
@@ -118,7 +121,9 @@ def test_late_publication_does_not_change_the_production_result(
             store = RawOriginalStore(tmp_path / "raw")
             try:
                 with deterministic_record_ids("leak-test"):
-                    build = production.build_production_result(scenario, conn=conn, raw_store=store)
+                    build = production.build_production_result(
+                        scenario, conn=conn, raw_store=store, run_started_at=_RUN_STARTED_AT
+                    )
             finally:
                 conn.close()
         assert build.result is not None

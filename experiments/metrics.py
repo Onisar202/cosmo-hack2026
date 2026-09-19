@@ -41,9 +41,44 @@ def baseline_flags_event(baseline: BaselineResult) -> bool:
     return baseline.verdict == "event_carried_forward"
 
 
+def production_flags_event(production_result: dict[str, Any] | None) -> bool | None:
+    """Whether the production method's OWN ``space_weather`` mechanism
+    genuinely classified the event — ``None`` (not applicable/N/A) unless
+    at least one window's ``space_weather`` mechanism reaches
+    ``status="ok"`` for this scenario (FN-46 round 7 review, point 4).
+
+    Today ``experiments/production.py`` always reports
+    ``space_weather.status="missing_data"`` for every window (no archived
+    quantitative pfu observation in this repository, pending FN-41/FN-42 —
+    see that module's docstring): there is no production classification to
+    grade here, so this returns ``None`` rather than fabricating a
+    True/False verdict out of the informal DONKI evidence probe. When a
+    future production build DOES reach ``status="ok"`` on some window (once
+    FN-41/FN-42 land), this reports whether ANY such window's ``max_level``
+    is above background — the real production-vs-baseline comparison the
+    ticket asks for, computed from ``build.result`` itself rather than from
+    ``experiments/donki_evidence.py``'s separate, informal probe.
+    """
+    if production_result is None:
+        return None
+    any_classified = False
+    flagged = False
+    for window in production_result["windows"]:
+        for mechanism in window["mechanisms"]:
+            if mechanism["mechanism"] != "space_weather":
+                continue
+            if mechanism["status"] != "ok":
+                continue
+            any_classified = True
+            if mechanism.get("max_level") not in (None, "background"):
+                flagged = True
+    return flagged if any_classified else None
+
+
 @dataclass(frozen=True)
 class EventMissResult:
     applicable: bool
+    production_missed: bool | None
     evidence_missed: bool | None
     baseline_missed: bool | None
     note: str
@@ -52,29 +87,48 @@ class EventMissResult:
 def compute_event_miss(
     *,
     expected_event: bool | None,
+    production_result: dict[str, Any] | None,
     evidence_by_window: dict[str, list[DonkiEvidenceEntry]],
     baseline: BaselineResult,
 ) -> EventMissResult:
     """Meaningful only for a scenario with ``expected_event=True`` — did the
-    evidence probe / baseline fail to flag ANY event-overlap at all for this
-    scenario?"""
+    production method / evidence probe / baseline fail to flag ANY
+    event-overlap at all for this scenario?
+
+    ``production_missed`` is graded from ``production_result`` itself (the
+    real production-method output), never from the informal DONKI evidence
+    probe — see :func:`production_flags_event`. It is ``None`` (N/A) rather
+    than a computed miss while production's own ``space_weather`` mechanism
+    never reaches ``status="ok"`` here (FN-46 round 7 review, point 4: the
+    ticket's summary previously read as a production-vs-baseline
+    comparison while actually comparing the evidence probe, which
+    production explicitly forbids treating as its own classification).
+    """
     if expected_event is not True:
         return EventMissResult(
             applicable=False,
+            production_missed=None,
             evidence_missed=None,
             baseline_missed=None,
             note="expected_event is not True for this scenario — event_miss does not apply.",
         )
+    production_flag = production_flags_event(production_result)
     evidence_missed = not evidence_flags_event(evidence_by_window)
     baseline_missed = not baseline_flags_event(baseline)
     return EventMissResult(
         applicable=True,
+        production_missed=None if production_flag is None else not production_flag,
         evidence_missed=evidence_missed,
         baseline_missed=baseline_missed,
         note=(
-            "evidence_missed: the DONKI evidence probe found no SEP/GST "
-            "notification overlapping any window. baseline_missed: the "
-            "naive baseline's flat verdict was not event_carried_forward."
+            "production_missed: N/A (null) while the production method's own "
+            "space_weather mechanism never reaches status=\"ok\" here (no "
+            "archived quantitative pfu observation, pending FN-41/FN-42) — "
+            "there is nothing for production to have missed or caught. "
+            "evidence_missed: the DONKI evidence probe (archival, informal, "
+            "NOT a production classification) found no SEP/GST notification "
+            "overlapping any window. baseline_missed: the naive baseline's "
+            "flat verdict was not event_carried_forward."
         ),
     )
 
@@ -82,6 +136,7 @@ def compute_event_miss(
 @dataclass(frozen=True)
 class FalseWarningResult:
     applicable: bool
+    production_false_warning: bool | None
     evidence_false_warning: bool | None
     baseline_false_warning: bool | None
     note: str
@@ -90,24 +145,36 @@ class FalseWarningResult:
 def compute_false_warning(
     *,
     expected_event: bool | None,
+    production_result: dict[str, Any] | None,
     evidence_by_window: dict[str, list[DonkiEvidenceEntry]],
     baseline: BaselineResult,
 ) -> FalseWarningResult:
     """Meaningful only for a scenario with ``expected_event=False`` — did the
-    evidence probe / baseline flag an event when none is expected?"""
+    production method / evidence probe / baseline flag an event when none
+    is expected? ``production_false_warning`` follows the same N/A rule as
+    ``EventMissResult.production_missed`` — see
+    :func:`production_flags_event` and :func:`compute_event_miss`."""
     if expected_event is not False:
         return FalseWarningResult(
             applicable=False,
+            production_false_warning=None,
             evidence_false_warning=None,
             baseline_false_warning=None,
             note="expected_event is not False for this scenario — false_warning does not apply.",
         )
+    production_flag = production_flags_event(production_result)
     return FalseWarningResult(
         applicable=True,
+        production_false_warning=production_flag,
         evidence_false_warning=evidence_flags_event(evidence_by_window),
         baseline_false_warning=baseline_flags_event(baseline),
         note=(
-            "evidence_false_warning: the DONKI evidence probe found a "
+            "production_false_warning: N/A (null) while the production "
+            "method's own space_weather mechanism never reaches "
+            "status=\"ok\" here (no archived quantitative pfu observation, "
+            "pending FN-41/FN-42) — there is nothing for production to have "
+            "flagged. evidence_false_warning: the DONKI evidence probe "
+            "(archival, informal, NOT a production classification) found a "
             "SEP/GST notification overlapping some window despite "
             "expected_event=false. baseline_false_warning: the naive "
             "baseline's flat verdict was event_carried_forward despite "
@@ -240,6 +307,7 @@ def compute_coverage(
 def event_miss_to_dict(result: EventMissResult) -> dict[str, Any]:
     return {
         "applicable": result.applicable,
+        "production_missed": result.production_missed,
         "evidence_missed": result.evidence_missed,
         "baseline_missed": result.baseline_missed,
         "note": result.note,
@@ -249,6 +317,7 @@ def event_miss_to_dict(result: EventMissResult) -> dict[str, Any]:
 def false_warning_to_dict(result: FalseWarningResult) -> dict[str, Any]:
     return {
         "applicable": result.applicable,
+        "production_false_warning": result.production_false_warning,
         "evidence_false_warning": result.evidence_false_warning,
         "baseline_false_warning": result.baseline_false_warning,
         "note": result.note,
@@ -289,5 +358,6 @@ __all__ = [
     "evidence_flags_event",
     "event_miss_to_dict",
     "false_warning_to_dict",
+    "production_flags_event",
     "selected_window_change_to_dict",
 ]

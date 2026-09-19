@@ -151,7 +151,8 @@ def _mmod_mechanism_assessment(
     raw_store: RawOriginalStore,
     *,
     window: WindowSpec,
-    now: datetime,
+    as_of: datetime,
+    fetched_at: datetime,
 ) -> dict[str, Any]:
     """Small, independent equivalent of
     ``src/api/service.py::_mmod_mechanism_assessment`` for ``mode="current"``
@@ -159,13 +160,26 @@ def _mmod_mechanism_assessment(
     ``select_as_of``, ``mmod_background.background_nodes_from_records``,
     ``mmod_background.assess_mmod_background``), same shape, no geometry
     multiplied in (production itself does not multiply MMOD geometry into
-    the numeric level either — see that function's docstring)."""
+    the numeric level either — see that function's docstring).
+
+    ``as_of``/``fetched_at`` are deliberately separate (FN-46 round 7
+    review, point 2): ``as_of`` gates ``select_as_of``'s strict replay
+    filter (``published_at <= as_of``) — it must stay the scenario's own
+    cutoff; ``fetched_at`` is the record's own provenance field (when WE
+    retrieved this document) — it must be the real retrieval time
+    (:func:`experiments.fixtures.mmod_fetched_at`), never the scenario's
+    ``as_of`` substituted in its place.
+    """
     try:
         _record_ids, doc_start, doc_end = mmod_source.ensure_mmod_records_for_window(
-            conn, raw_store, window_start=window.start_at, window_end=window.end_at, fetched_at=now
+            conn,
+            raw_store,
+            window_start=window.start_at,
+            window_end=window.end_at,
+            fetched_at=fetched_at,
         )
         mmod_records = select_as_of(
-            conn, now, source_id=mmod_source.SOURCE_ID, record_kind="forecast"
+            conn, as_of, source_id=mmod_source.SOURCE_ID, record_kind="forecast"
         )
         nodes = mmod_background.background_nodes_from_records(mmod_records)
         assessment = mmod_background.assess_mmod_background(
@@ -331,9 +345,22 @@ def build_production_result(
     *,
     conn: sqlite3.Connection,
     raw_store: RawOriginalStore,
+    run_started_at: datetime,
 ) -> ProductionBuild:
     """Builds the production-method result for one scenario, or an honest
-    structured failure when the real archival gap makes that impossible."""
+    structured failure when the real archival gap makes that impossible.
+
+    ``run_started_at`` is the real moment THIS calculation run was executed
+    (``result.computed_at`` — "когда расчёт был выполнен и сохранён",
+    contracts/result.schema.json) — deliberately a caller-supplied,
+    explicit value rather than an internal ``datetime.now()`` call (FN-46
+    round 7 review, point 2): it must never be the scenario's own
+    ``as_of`` (a different one of the four times, main-prompt.md §1), and
+    callers that need byte-identical determinism across two runs (
+    ``tests/experiments/test_determinism.py``) get it by passing the same
+    explicit value twice, not by this function silently reusing ``as_of``
+    as a deterministic stand-in.
+    """
     windows = [
         WindowSpec("win-a", scenario.window_a_start, scenario.window_a_end),
         WindowSpec("win-b", scenario.window_b_start, scenario.window_b_end),
@@ -361,7 +388,7 @@ def build_production_result(
     orbit_record = orbit_history.build_oem_orbital_elements_record(
         release,
         raw_bytes=raw_bytes,
-        fetched_at=scenario.as_of,
+        fetched_at=fixtures.oem_release_fetched_at(release.release_date),
         quality="reconstructed" if selection.is_reconstruction else "nominal",
     )
     orbit_record_id = insert_record(conn, raw_store, orbit_record)
@@ -369,7 +396,12 @@ def build_production_result(
     elements_epoch = release.parsed.creation_date
     age_hours = abs((scenario.as_of - elements_epoch).total_seconds()) / 3600.0
     orbit_block: dict[str, Any] = {
-        "source": "space-track",
+        # The actual source used here is NASA OEM (orbit_history.SOURCE_ID),
+        # never Space-Track GP_HISTORY (still unimplemented, see
+        # src/sources/orbit.py SOURCE_ID_HISTORICAL) — FN-46 round 7 review,
+        # point 3: the hardcoded "space-track" literal previously here
+        # claimed a source this build never reads from.
+        "source": orbit_history.SOURCE_ID,
         "norad_id": orbit_history.ISS_NORAD_ID,
         "elements_epoch": _iso(elements_epoch),
         "elements_age_hours": age_hours,
@@ -384,16 +416,17 @@ def build_production_result(
         raw_store,
         notifications=notifications,
         source_url=fixtures.DONKI_SOURCE_URL,
-        fetched_at=scenario.as_of,
+        fetched_at=fixtures.donki_fetched_at(),
     )
 
     warnings: list[dict[str, Any]] = []
     window_dicts: list[dict[str, Any]] = []
     evidence_by_window: dict[str, list[donki_evidence.DonkiEvidenceEntry]] = {}
     mmod_record_ids: list[str] = []
+    mmod_fetched_at = fixtures.mmod_fetched_at()
     for window in windows:
         mmod_mechanism = _mmod_mechanism_assessment(
-            conn, raw_store, window=window, now=scenario.as_of
+            conn, raw_store, window=window, as_of=scenario.as_of, fetched_at=mmod_fetched_at
         )
         mmod_record_ids.extend(mmod_mechanism["record_ids"])
         evidence = donki_evidence.evidence_for_window(
@@ -496,7 +529,7 @@ def build_production_result(
 
     result: dict[str, Any] = {
         "result_id": f"res-experiment-{scenario.name}",
-        "computed_at": _iso(scenario.as_of),
+        "computed_at": _iso(run_started_at),
         "request": _request_dict(scenario),
         "mode": scenario.mode,
         "as_of": _iso(scenario.as_of),

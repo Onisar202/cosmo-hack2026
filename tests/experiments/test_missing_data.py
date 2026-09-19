@@ -9,6 +9,7 @@ plausible-looking calm result.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 
 from experiments import fixtures, production
 from experiments.config import Scenario
@@ -18,6 +19,9 @@ from src.store import RawOriginalStore
 
 from .conftest import scenario_by_name
 
+#: The orbit-failure path never reaches computed_at — any fixed value works.
+_RUN_STARTED_AT = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
+
 
 def test_missing_data_scenario_raises_historical_elements_unsupported(
     real_scenarios: list[Scenario], db_conn: sqlite3.Connection, raw_store: RawOriginalStore
@@ -25,7 +29,9 @@ def test_missing_data_scenario_raises_historical_elements_unsupported(
     scenario = scenario_by_name(real_scenarios, "missing_data")
 
     with deterministic_record_ids(scenario.name):
-        build = production.build_production_result(scenario, conn=db_conn, raw_store=raw_store)
+        build = production.build_production_result(
+            scenario, conn=db_conn, raw_store=raw_store, run_started_at=_RUN_STARTED_AT
+        )
 
     assert build.result is None
     assert build.failure is not None
