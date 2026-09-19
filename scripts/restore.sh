@@ -2,11 +2,15 @@
 # FN-45: восстановление постоянного тома api-data из бэкапа scripts/backup.sh.
 # ДЕСТРУКТИВНО по намерению (заменяет текущие данные архивом) но не по
 # отказу: архив проверяется в отдельном временном томе до того, как рабочий
-# том вообще трогается, а прежние данные снимаются в свой временный том
-# перед заменой — если что-то пойдёт не так (сбой копирования, не запустился
-# healthy api), EXIT-trap возвращает снятый снимок и поднимает сервисы, а не
-# оставляет том частично заполненным и сервисы остановленными
-# (round 1 + round 2 ревью PR #36).
+# том вообще трогается, прежние данные снимаются в свой временный том перед
+# заменой, а EXIT-trap отдельно отслеживает два независимых факта —
+# "сервисы были остановлены этим скриптом" и "рабочий том уже тронут" — и
+# на любом сбое до подтверждённого health-check: останавливает сервисы (если
+# ещё не остановлены) ПЕРЕД тем как трогать том, возвращает снимок через
+# rm && cp (не `;`) с проверкой результата, поднимает сервисы обратно и
+# только при успешном возврате снимка удаляет rollback-том — при неудачном
+# автоматическом откате том сохраняется, а его имя печатается для ручного
+# восстановления (round 1 + round 2 + round 3 ревью PR #36).
 #
 #   scripts/restore.sh <архив.tar.gz> [--yes]
 set -euo pipefail
@@ -56,28 +60,59 @@ rollback_volume="fn45-restore-rollback-$$"
 docker volume create "$staging_volume" >/dev/null
 docker volume create "$rollback_volume" >/dev/null
 
-# restore_touched_volume: рабочий том api-data ещё не менялся (пока только
-# staging/rollback тома существуют) — реагировать на сбой откатом нечего.
-# restore_failed: сбрасывается в 0 только после успешного health-check в
-# самом конце — до этого момента ЛЮБОЙ выход из скрипта (set -e на любой
-# команде ниже) считается неудачей. Один trap отвечает и за откат (только
-# если оба флага это требуют), и за очистку временных томов на любом выходе
-# (round 2 ревью PR #36: явное `trap - EXIT` снималось раньше, чем
-# подтверждался health-check, и оставляло частично применённое восстановление
-# без отката).
-restore_touched_volume=0
-restore_failed=1
+# Три независимых флага для trap ниже (round 3 ревью PR #36: одного
+# "restore_touched_volume" было недостаточно — сервисы могли быть остановлены
+# ДО того, как том вообще тронут, и trap обязан вернуть их независимо от
+# того, дошло ли дело до замены данных):
+#   services_stopped   — этот скрипт остановил api/web (значит обязан их
+#                         поднять обратно на любом выходе, что бы ни случилось);
+#   volume_touched      — рабочий том уже заменяется/заменён (снимок нужно
+#                         вернуть, а не просто поднять сервисы со старыми данными);
+#   restore_confirmed   — health-check после восстановления прошёл; ДО этого
+#                         момента любой выход считается неудачей.
+services_stopped=0
+volume_touched=0
+restore_confirmed=0
 cleanup_and_revert() {
-    if [[ "$restore_touched_volume" -eq 1 && "$restore_failed" -eq 1 ]]; then
-        log "восстановление не подтверждено health-check'ом — возвращаю предыдущие данные из снимка (trap)"
-        docker run --rm \
-            -v "${VOLUME_NAME}:/data" \
-            -v "${rollback_volume}:/rollback:ro" \
-            alpine:3.20 \
-            sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null; cp -a /rollback/. /data/' >/dev/null 2>&1 || true
-        compose up -d api web >/dev/null 2>&1 || true
+    local exit_code=$?
+    local revert_ok=1
+
+    if [[ "$restore_confirmed" -ne 1 ]]; then
+        if [[ "$volume_touched" -eq 1 ]]; then
+            log "восстановление не подтверждено — возвращаю предыдущие данные из снимка (trap)"
+            # Сервисы обязаны быть остановлены ПЕРЕД тем как trap трогает том —
+            # если health-check уронил set -e уже после `compose up -d`,
+            # контейнеры на этот момент запущены и пишут в тот же том.
+            compose stop api web >/dev/null 2>&1 || true
+            # rm и cp связаны && (не ;), как и в основном пути ниже — иначе
+            # неудачная очистка не остановит попытку копирования поверх
+            # недочищенного тома. Результат проверяется, а не глушится
+            # безусловным `|| true` (round 3 ревью PR #36).
+            if docker run --rm \
+                    -v "${VOLUME_NAME}:/data" \
+                    -v "${rollback_volume}:/rollback:ro" \
+                    alpine:3.20 \
+                    sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null && cp -a /rollback/. /data/' \
+                && docker run --rm -v "${VOLUME_NAME}:/data" alpine:3.20 test -f /data/store.sqlite3
+            then
+                log "ok: снимок успешно возвращён в том $VOLUME_NAME"
+            else
+                revert_ok=0
+                log "ОШИБКА: автоматический откат не удался! rollback-том СОХРАНЁН (не удаляется): $rollback_volume"
+                log "Восстановите вручную: docker run --rm -v ${VOLUME_NAME}:/data -v ${rollback_volume}:/rollback:ro alpine:3.20 sh -c 'rm -rf /data/* /data/.[!.]*; cp -a /rollback/. /data/'"
+            fi
+        fi
+        if [[ "$services_stopped" -eq 1 ]]; then
+            log "поднимаю api/web (trap)"
+            compose up -d api web >/dev/null 2>&1 || true
+        fi
     fi
-    docker volume rm -f "$staging_volume" "$rollback_volume" >/dev/null 2>&1 || true
+
+    docker volume rm -f "$staging_volume" >/dev/null 2>&1 || true
+    if [[ "$revert_ok" -eq 1 ]]; then
+        docker volume rm -f "$rollback_volume" >/dev/null 2>&1 || true
+    fi
+    exit "$exit_code"
 }
 trap cleanup_and_revert EXIT
 
@@ -97,11 +132,14 @@ api_container="$(compose ps -q api)"
 if [[ -n "$api_container" ]]; then
     log "останавливаю api и web (восстановление тома под работающим сервисом небезопасно)"
     compose stop api web
+    services_stopped=1
 fi
 
 # Снимок ПОСЛЕ остановки сервисов — консистентный (тот же принцип, что и
 # backup.sh: копирование "на лету" под записью рискует захватить SQLite в
-# промежуточном состоянии), и именно он возвращается trap'ом при сбое ниже.
+# промежуточном состоянии). Если этот шаг упадёт, volume_touched всё ещё 0
+# (рабочий том не тронут) — trap просто поднимет остановленные сервисы
+# обратно (services_stopped=1), не пытаясь ничего откатывать.
 log "сохраняю снимок текущих данных тома $VOLUME_NAME (на случай отката)"
 docker run --rm \
     -v "${VOLUME_NAME}:/data:ro" \
@@ -110,10 +148,10 @@ docker run --rm \
     sh -c 'cp -a /data/. /rollback/'
 
 log "архив проверен — заменяю содержимое тома $VOLUME_NAME"
-restore_touched_volume=1
+volume_touched=1
 # rm и cp связаны && (не ;): если очистка не завершится успешно, копирование
 # не запустится поверх недочищенного тома, и следующая же команда всё равно
-# провалится через set -e — сработает trap-откат (round 2 ревью PR #36).
+# провалится через set -e — сработает trap-откат.
 docker run --rm \
     -v "${VOLUME_NAME}:/data" \
     -v "${staging_volume}:/staging:ro" \
@@ -131,6 +169,6 @@ compose up -d api web
 
 # Только теперь восстановление подтверждено — trap на выходе script'а не
 # станет откатывать снимок (но всё ещё уберёт staging/rollback тома).
-restore_failed=0
+restore_confirmed=1
 
 log "восстановление завершено из $archive"
