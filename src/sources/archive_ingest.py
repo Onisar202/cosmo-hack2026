@@ -258,14 +258,25 @@ class IngestedInterval:
     действительно запросили и разобрали». Ровно это превращает отсутствие
     записей в утверждение «события не зафиксировано» вместо «оценить
     невозможно» (main-prompt.md §2) — см. модульный докстринг.
+
+    ``fetched_at`` — когда этот интервал был реально прочитан (тот же момент,
+    что передан в ``ingest_donki_notifications``/``ingest_swpc_forecast_discussion``).
+    Прокидывается в доменный двойник ``archive_assessment.CoverageInterval``
+    как факт со своим временем получения (round 3 ревью PR #37), а не
+    анонимная пара границ.
     """
 
     source_id: str
     start: datetime
     end: datetime
+    fetched_at: datetime
 
     def __post_init__(self) -> None:
-        for name, value in (("start", self.start), ("end", self.end)):
+        for name, value in (
+            ("start", self.start),
+            ("end", self.end),
+            ("fetched_at", self.fetched_at),
+        ):
             if value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError(f"{name} must be timezone-aware UTC (.ai/main-prompt.md §1)")
         if self.end <= self.start:
@@ -291,11 +302,19 @@ class ArchiveIngestReport:
     #: создавалась вовсе (``archive_probe`` вернул ``None``), а не создавалась
     #: с подставленным временем.
     skipped_without_event_time: tuple[str, ...]
+    #: ``messageType`` каждой пропущенной записи выше, тот же порядок и та же
+    #: длина, что у ``skipped_without_event_time`` (round 3 ревью PR #37) —
+    #: нужно, чтобы вызывающая сторона могла решить, пропущена ли запись
+    #: РЕЛЕВАНТНОГО для конкретного механизма типа, не переизобретая парсинг.
+    skipped_message_types: tuple[str, ...]
     #: Провайдерские id, сохранённые, но навсегда непригодные для строгого
     #: replay: ``published_at`` неизвестен (main-prompt.md §1).
     stored_not_replay_eligible: tuple[str, ...]
     #: Сообщения о конфликте дедуп-ключа с другим содержимым — не «дубликат».
     conflicts: tuple[str, ...]
+    #: ``messageType`` записи, вызвавшей каждый конфликт выше — тот же
+    #: порядок и та же длина, что у ``conflicts`` (round 3 ревью PR #37).
+    conflict_message_types: tuple[str, ...]
     #: Дни публикаций внутри интервала — сырьё для карты наличия/пробелов.
     publication_days: tuple[date, ...]
 
@@ -303,12 +322,29 @@ class ArchiveIngestReport:
     def stored_count(self) -> int:
         return len(self.stored_record_ids)
 
+    def has_unresolved_notifications_of(self, relevant_message_types: frozenset[str]) -> bool:
+        """True, если РЕЛЕВАНТНОЕ (для оцениваемого механизма) уведомление в
+        этом ответе не нормализовалось (``skipped_message_types``) либо
+        конфликтовало по дедуп-ключу (``conflict_message_types``).
+
+        Round 3 ревью PR #37: ошибка нормализации именно релевантного
+        уведомления не должна тихо превращаться в «интервал полностью
+        прочитан и чист» — см. :func:`merged_ingested_intervals`. Нерелевантный
+        сбой (например нераспознанный ``FLR`` без ``Activity ID`` — реальные
+        ~18% архива, docs/method.md §6) не портит доверие к интервалу для
+        механизма, который эти типы не использует.
+        """
+        return bool(
+            (set(self.skipped_message_types) | set(self.conflict_message_types))
+            & relevant_message_types
+        )
+
 
 def _insert_all(
     conn: sqlite3.Connection,
     raw_store: RawOriginalStore,
     record_inputs: Iterable[RecordInput],
-) -> tuple[list[tuple[str, RecordInput]], list[str], list[str]]:
+) -> tuple[list[tuple[str, RecordInput]], list[str], list[tuple[str, str]]]:
     """Вставляет записи, разделяя пригодные/непригодные/конфликтные.
 
     Возвращает пары ``(record_id, RecordInput)``, а не два независимых
@@ -321,15 +357,22 @@ def _insert_all(
     тот же ``record_id`` — дубликат не создаёт второго воздействия
     (main-prompt.md §2). Поздняя версия того же продукта приходит с другим
     ``source_version`` и поэтому ложится **рядом**, не поверх.
+
+    Конфликты возвращаются парами ``(сообщение, message_type)`` — тип берётся
+    из ``spatial_context`` записи, которая конфликтовала (доступна в момент
+    перехвата исключения, до того как запись потеряна), чтобы вызывающая
+    сторона могла отличить конфликт релевантного типа от нерелевантного
+    (round 3 ревью PR #37, :meth:`ArchiveIngestReport.has_unresolved_notifications_of`).
     """
     stored: list[tuple[str, RecordInput]] = []
     not_eligible: list[str] = []
-    conflicts: list[str] = []
+    conflicts: list[tuple[str, str]] = []
     for record_input in record_inputs:
         try:
             record_id = insert_record(conn, raw_store, record_input)
         except DuplicateKeyConflictError as exc:
-            conflicts.append(str(exc))
+            message_type = str(record_input.spatial_context.get("message_type", ""))
+            conflicts.append((str(exc), message_type))
             continue
         stored.append((record_id, record_input))
         if record_input.published_at is None:
@@ -363,11 +406,15 @@ def ingest_donki_notifications(
     """
     notifications = parse_donki_notifications(raw_bytes)
     interval = IngestedInterval(
-        source_id=DONKI_SOURCE_ID, start=interval_start, end=interval_end
+        source_id=DONKI_SOURCE_ID,
+        start=interval_start,
+        end=interval_end,
+        fetched_at=fetched_at,
     )
 
     record_inputs: list[RecordInput] = []
     skipped: list[str] = []
+    skipped_types: list[str] = []
     publication_days: list[date] = []
     for notification in notifications:
         record_input = donki_notification_to_record_input(
@@ -378,12 +425,13 @@ def ingest_donki_notifications(
             # создаётся с временем публикации вместо времени события
             # (archive_probe, round 1 ревью PR #18).
             skipped.append(notification.message_id)
+            skipped_types.append(notification.message_type)
             continue
         record_inputs.append(record_input)
         if record_input.published_at is not None:
             publication_days.append(record_input.published_at.astimezone(UTC).date())
 
-    stored, not_eligible, conflicts = _insert_all(conn, raw_store, record_inputs)
+    stored, not_eligible, conflict_pairs = _insert_all(conn, raw_store, record_inputs)
     eligible = [
         record_id
         for record_id, record_input in stored
@@ -395,8 +443,10 @@ def ingest_donki_notifications(
         stored_record_ids=tuple(record_id for record_id, _ in stored),
         replay_eligible_record_ids=tuple(eligible),
         skipped_without_event_time=tuple(skipped),
+        skipped_message_types=tuple(skipped_types),
         stored_not_replay_eligible=tuple(not_eligible),
-        conflicts=tuple(conflicts),
+        conflicts=tuple(c for c, _ in conflict_pairs),
+        conflict_message_types=tuple(t for _, t in conflict_pairs),
         publication_days=tuple(publication_days),
     )
 
@@ -425,12 +475,15 @@ def ingest_swpc_forecast_discussion(
     """
     discussion = parse_swpc_forecast_discussion(raw_bytes)
     interval = IngestedInterval(
-        source_id=SWPC_ARCHIVE_SOURCE_ID, start=interval_start, end=interval_end
+        source_id=SWPC_ARCHIVE_SOURCE_ID,
+        start=interval_start,
+        end=interval_end,
+        fetched_at=fetched_at,
     )
     record_input = swpc_forecast_discussion_to_record_input(
         discussion, source_url=source_url, fetched_at=fetched_at
     )
-    stored, not_eligible, conflicts = _insert_all(conn, raw_store, [record_input])
+    stored, not_eligible, conflict_pairs = _insert_all(conn, raw_store, [record_input])
     stored_ids = tuple(record_id for record_id, _ in stored)
     eligible = stored_ids if record_input.published_at is not None else ()
     return ArchiveIngestReport(
@@ -439,8 +492,10 @@ def ingest_swpc_forecast_discussion(
         stored_record_ids=stored_ids,
         replay_eligible_record_ids=eligible,
         skipped_without_event_time=(),
+        skipped_message_types=(),
         stored_not_replay_eligible=tuple(not_eligible),
-        conflicts=tuple(conflicts),
+        conflicts=tuple(c for c, _ in conflict_pairs),
+        conflict_message_types=tuple(t for _, t in conflict_pairs),
         publication_days=(discussion.issued_at.astimezone(UTC).date(),),
     )
 
@@ -469,7 +524,10 @@ def coverage_report_for(
 
 
 def merged_ingested_intervals(
-    reports: Iterable[ArchiveIngestReport], *, source_id: str
+    reports: Iterable[ArchiveIngestReport],
+    *,
+    source_id: str,
+    relevant_message_types: frozenset[str],
 ) -> tuple[IngestedInterval, ...]:
     """Склеивает пересекающиеся/смежные загруженные интервалы одного продукта.
 
@@ -478,9 +536,31 @@ def merged_ingested_intervals(
     приходиться на стык двух окон загрузки. Без склейки стык выглядел бы
     пробелом покрытия, то есть ложным ``INSUFFICIENT_DATA`` — ошибка в
     безопасную сторону, но всё же ошибка.
+
+    ``relevant_message_types`` — обычно ``policy.event_message_types`` того
+    же продукта. Отчёт о загрузке, в котором есть непронормализованное
+    (``skipped_message_types``) или конфликтное (``conflict_message_types``)
+    уведомление хотя бы одного из этих типов, **не** участвует в склейке —
+    его интервал целиком выбывает из «доказанно прочитанного» покрытия
+    (round 3 ревью PR #37: `archive_ingest.py`, было — интервал объявлялся
+    покрытым независимо от таких сбоев, и ошибка нормализации релевантного
+    уведомления могла тихо превратиться в ``NO_EVENT_DETECTED``). Сбой
+    нерелевантного типа (например нераспознанный ``FLR`` без ``Activity ID``
+    — реальные ~18% архива, docs/method.md §6) интервал не портит: механизм,
+    не использующий этот тип, не теряет доверие к покрытию из-за него.
+
+    Параметр обязателен, а не по умолчанию пуст: пустое множество молча
+    отключило бы всю эту проверку для любого вызова, который забыл его
+    передать (main-prompt.md §7 — не молчаливый дефолт для того, что решает
+    корректность вывода).
     """
     intervals = sorted(
-        (r.interval for r in reports if r.source_id == source_id),
+        (
+            r.interval
+            for r in reports
+            if r.source_id == source_id
+            and not r.has_unresolved_notifications_of(relevant_message_types)
+        ),
         key=lambda i: i.start,
     )
     merged: list[IngestedInterval] = []
@@ -489,7 +569,17 @@ def merged_ingested_intervals(
             previous = merged[-1]
             if interval.end > previous.end:
                 merged[-1] = IngestedInterval(
-                    source_id=source_id, start=previous.start, end=interval.end
+                    source_id=source_id,
+                    start=previous.start,
+                    end=interval.end,
+                    fetched_at=max(previous.fetched_at, interval.fetched_at),
+                )
+            elif interval.fetched_at > previous.fetched_at:
+                merged[-1] = IngestedInterval(
+                    source_id=source_id,
+                    start=previous.start,
+                    end=previous.end,
+                    fetched_at=interval.fetched_at,
                 )
             continue
         merged.append(interval)

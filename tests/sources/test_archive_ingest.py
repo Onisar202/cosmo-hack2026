@@ -13,8 +13,10 @@ README этой папки о происхождении и задокумент
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import sqlite3
+from collections.abc import Iterable
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -95,6 +97,18 @@ def _ingest_donki(
         interval_start=start,
         interval_end=end,
     )
+
+
+def _as_coverage_intervals(intervals: Iterable[IngestedInterval]) -> list[CoverageInterval]:
+    """``IngestedInterval`` (``sources/``) -> ``CoverageInterval`` (``domain/``).
+
+    Ручное преобразование, а не общий тип: домен не импортирует ``sources/``
+    (main-prompt.md §8) — то же самое делает production-код (docs/method.md
+    §9.1), здесь просто без orchestration-обёртки.
+    """
+    return [
+        CoverageInterval(start=i.start, end=i.end, fetched_at=i.fetched_at) for i in intervals
+    ]
 
 
 def _ingest_all_donki(
@@ -272,7 +286,11 @@ def test_adding_a_record_published_after_as_of_changes_neither_selection_nor_ass
     strategy = _donki_strategy()
     policy = ArchiveProductPolicy.from_config(strategy.product_for(DONKI_SOURCE_ID))
     intervals = [
-        CoverageInterval(start=first_report.interval.start, end=first_report.interval.end)
+        CoverageInterval(
+            start=first_report.interval.start,
+            end=first_report.interval.end,
+            fetched_at=first_report.interval.fetched_at,
+        )
     ]
 
     before_selected = select_forecast_inputs(db_conn, as_of=as_of, strategy=strategy)
@@ -309,6 +327,72 @@ def test_adding_a_record_published_after_as_of_changes_neither_selection_nor_ass
     assert after == before
 
 
+def test_a_later_ingested_coverage_interval_does_not_change_an_unaffected_historical_assessment(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    """Round 3 ревью PR #37: предыдущий тест выше переиспользует ОДИН и тот
+    же список ``intervals`` для «до» и «после», поэтому не проверяет путь,
+    в котором сама КАРТА ПОКРЫТИЯ (не только набор записей) растёт между
+    двумя вычислениями — как это происходит на практике, когда
+    ``merged_ingested_intervals`` пересчитывается заново из всех отчётов о
+    загрузке, накопленных к текущему моменту.
+
+    Здесь интервалы покрытия для «после» **пересчитываются заново**
+    (``merged_ingested_intervals`` по ВСЕМ четырём загруженным окнам, а не
+    список из одного окна, зафиксированный до дополнительной загрузки) — и
+    всё равно не меняют оценку окна 10 мая, потому что дополнительно
+    прочитанные интервалы (16 мая — 30 июня) не затрагивают ни это окно, ни
+    его горизонт.
+    """
+    as_of = datetime(2024, 5, 10, 14, 0, tzinfo=UTC)
+    window_start = datetime(2024, 5, 10, 13, 0, tzinfo=UTC)
+    window_end = as_of
+    strategy = _donki_strategy()
+    policy = ArchiveProductPolicy.from_config(strategy.product_for(DONKI_SOURCE_ID))
+    relevant_types = strategy.product_for(DONKI_SOURCE_ID).event_message_types
+
+    first_report = _ingest_donki(db_conn, raw_store, "donki_2024-05-01_2024-05-15.json")
+    # Записи фиксируются один раз здесь: этот тест изолированно проверяет
+    # рост КАРТЫ ПОКРЫТИЯ, рост набора записей — предмет теста выше.
+    selected = select_forecast_inputs(db_conn, as_of=as_of, strategy=strategy)
+    before_intervals = merged_ingested_intervals(
+        [first_report], source_id=DONKI_SOURCE_ID, relevant_message_types=relevant_types
+    )
+    before = assess_archive_window(
+        selected[DONKI_SOURCE_ID],
+        policy=policy,
+        ingested_intervals=_as_coverage_intervals(before_intervals),
+        window_start=window_start,
+        window_end=window_end,
+        as_of=as_of,
+    )
+
+    later_reports = [first_report]
+    for name in (
+        "donki_2024-05-16_2024-05-31.json",
+        "donki_2024-06-01_2024-06-15.json",
+        "donki_2024-06-16_2024-06-30.json",
+    ):
+        later_reports.append(_ingest_donki(db_conn, raw_store, name))
+    after_intervals = merged_ingested_intervals(
+        later_reports, source_id=DONKI_SOURCE_ID, relevant_message_types=relevant_types
+    )
+    assert after_intervals != before_intervals, (
+        "the coverage map must actually have grown for this test to exercise anything"
+    )
+
+    after = assess_archive_window(
+        selected[DONKI_SOURCE_ID],
+        policy=policy,
+        ingested_intervals=_as_coverage_intervals(after_intervals),
+        window_start=window_start,
+        window_end=window_end,
+        as_of=as_of,
+    )
+
+    assert after == before
+
+
 # ---------------------------------------------------------------------------
 # Приёмка п.3 — событие и доказанное отсутствие события, на реальных данных
 # ---------------------------------------------------------------------------
@@ -328,7 +412,11 @@ def test_real_sep_event_window_is_event_present(
         selected[DONKI_SOURCE_ID],
         policy=ArchiveProductPolicy.from_config(load_archive_product(DONKI_SOURCE_ID)),
         ingested_intervals=[
-            CoverageInterval(start=report.interval.start, end=report.interval.end)
+            CoverageInterval(
+                start=report.interval.start,
+                end=report.interval.end,
+                fetched_at=report.interval.fetched_at,
+            )
         ],
         window_start=datetime(2024, 5, 10, 13, 0, tzinfo=UTC),
         window_end=as_of,
@@ -361,7 +449,11 @@ def test_control_quiet_period_is_no_event_detected_not_insufficient(
         selected[DONKI_SOURCE_ID],
         policy=ArchiveProductPolicy.from_config(strategy.product_for(DONKI_SOURCE_ID)),
         ingested_intervals=[
-            CoverageInterval(start=report.interval.start, end=report.interval.end)
+            CoverageInterval(
+                start=report.interval.start,
+                end=report.interval.end,
+                fetched_at=report.interval.fetched_at,
+            )
         ],
         window_start=as_of,
         window_end=datetime(2024, 6, 20, 6, 0, tzinfo=UTC),
@@ -392,7 +484,11 @@ def test_same_quiet_window_is_insufficient_data_when_horizon_is_not_established(
         selected[DONKI_SOURCE_ID],
         policy=ArchiveProductPolicy.from_config(strategy.product_for(DONKI_SOURCE_ID)),
         ingested_intervals=[
-            CoverageInterval(start=report.interval.start, end=report.interval.end)
+            CoverageInterval(
+                start=report.interval.start,
+                end=report.interval.end,
+                fetched_at=report.interval.fetched_at,
+            )
         ],
         window_start=as_of,
         window_end=datetime(2024, 6, 20, 6, 0, tzinfo=UTC),
@@ -468,7 +564,11 @@ def test_window_inside_the_swpc_gap_is_insufficient_data(
         selected[SWPC_SOURCE_ID],
         policy=ArchiveProductPolicy.from_config(product),
         ingested_intervals=[
-            CoverageInterval(start=report.interval.start, end=report.interval.end)
+            CoverageInterval(
+                start=report.interval.start,
+                end=report.interval.end,
+                fetched_at=report.interval.fetched_at,
+            )
         ],
         window_start=datetime(2024, 5, 20, 6, 0, tzinfo=UTC),
         window_end=as_of,
@@ -555,11 +655,71 @@ def test_merged_intervals_join_adjacent_archive_windows(
 ) -> None:
     """Стык двух окон загрузки (15/16 мая) не должен выглядеть пробелом."""
     reports = _ingest_all_donki(db_conn, raw_store)
-    merged = merged_ingested_intervals(reports, source_id=DONKI_SOURCE_ID)
+    merged = merged_ingested_intervals(
+        reports, source_id=DONKI_SOURCE_ID, relevant_message_types=frozenset({"SEP"})
+    )
     assert merged == (
         IngestedInterval(
             source_id=DONKI_SOURCE_ID,
             start=datetime(2024, 5, 1, tzinfo=UTC),
             end=datetime(2024, 7, 1, tzinfo=UTC),
+            fetched_at=FETCHED_AT,
         ),
     )
+
+
+def test_unresolved_relevant_notification_drops_the_whole_interval_from_coverage(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    """Round 3 ревью PR #37: в реальных фикстурах ни один ``SEP`` никогда не
+    пропускается и не конфликтует (единственный пропускаемый тип — ``FLR``,
+    ``test_notifications_without_event_time_are_skipped_not_faked``), поэтому
+    этот сценарий целенаправленно смоделирован через ``dataclasses.replace``
+    поверх РЕАЛЬНОГО отчёта о загрузке — не выдуманы ни архивный ответ, ни
+    хранимые записи, только сам факт «в этом ответе не нормализовалось
+    релевантное уведомление».
+
+    Раньше (до этого раунда) ``IngestedInterval`` отчёта объявлял весь
+    запрошенный интервал прочитанным независимо от ``skipped_message_types``/
+    ``conflict_message_types`` — ошибка нормализации именно SEP-уведомления
+    могла тихо превратиться в ``NO_EVENT_DETECTED``. Теперь такой отчёт
+    целиком выбывает из ``merged_ingested_intervals`` для релевantных типов,
+    и окно внутри него получает ``INSUFFICIENT_DATA`` через обычный
+    ``critical_gap`` — тот же путь, что и для любого непрочитанного
+    интервала, а не специальный код на эту ситуацию.
+    """
+    clean_report = _ingest_donki(db_conn, raw_store, "donki_2024-06-16_2024-06-30.json")
+    tainted_report = dataclasses.replace(
+        clean_report,
+        skipped_without_event_time=(*clean_report.skipped_without_event_time, "fake-sep-001"),
+        skipped_message_types=(*clean_report.skipped_message_types, "SEP"),
+    )
+
+    relevant = frozenset({"SEP"})
+    trusted = merged_ingested_intervals(
+        [tainted_report], source_id=DONKI_SOURCE_ID, relevant_message_types=relevant
+    )
+    assert trusted == (), "a report with an unresolved SEP notification must not be trusted"
+
+    # Для нерелевантного типа (сконфигурирован только GST) тот же самый
+    # отчёт остаётся доверенным — испорчена не запись, а конкретно доверие
+    # к покрытию SEP.
+    trusted_for_gst = merged_ingested_intervals(
+        [tainted_report], source_id=DONKI_SOURCE_ID, relevant_message_types=frozenset({"GST"})
+    )
+    assert len(trusted_for_gst) == 1
+
+    as_of = datetime(2024, 6, 20, 0, 0, tzinfo=UTC)
+    strategy = _donki_strategy(horizon_hours=6.0)
+    selected = select_forecast_inputs(db_conn, as_of=as_of, strategy=strategy)
+    assessment = assess_archive_window(
+        selected[DONKI_SOURCE_ID],
+        policy=ArchiveProductPolicy.from_config(strategy.product_for(DONKI_SOURCE_ID)),
+        ingested_intervals=_as_coverage_intervals(trusted),
+        window_start=as_of,
+        window_end=datetime(2024, 6, 20, 6, 0, tzinfo=UTC),
+        as_of=as_of,
+    )
+    assert assessment.status == "INSUFFICIENT_DATA"
+    assert assessment.critical_gap is True
+    assert assessment.coverage_fraction == 0.0

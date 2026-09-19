@@ -115,10 +115,14 @@ def _eligible(records: list[dict[str, Any]], as_of: datetime) -> list[dict[str, 
 
 
 MAY_INTERVAL = CoverageInterval(
-    start=datetime(2024, 5, 1, tzinfo=UTC), end=datetime(2024, 5, 16, tzinfo=UTC)
+    start=datetime(2024, 5, 1, tzinfo=UTC),
+    end=datetime(2024, 5, 16, tzinfo=UTC),
+    fetched_at=FETCHED_AT,
 )
 JUNE_INTERVAL = CoverageInterval(
-    start=datetime(2024, 6, 16, tzinfo=UTC), end=datetime(2024, 7, 1, tzinfo=UTC)
+    start=datetime(2024, 6, 16, tzinfo=UTC),
+    end=datetime(2024, 7, 1, tzinfo=UTC),
+    fetched_at=FETCHED_AT,
 )
 
 
@@ -144,6 +148,33 @@ def test_real_proton_event_gives_event_present() -> None:
 
     assert assessment.status == "EVENT_PRESENT"
     assert "20240510-AL-004" in {e.provider_record_id for e in assessment.events}
+
+
+def test_window_after_a_continuing_sep_onset_is_insufficient_not_calm() -> None:
+    """Round 3 ревью PR #37: реальный SEP ``2024-05-10T13:35:00-SEP-001``
+    (``20240510-AL-004``, выпущено 13:46Z) сообщает только НАЧАЛО явления —
+    DONKI не публикует структурированного момента его завершения. Окно,
+    целиком лежащее ПОСЛЕ 13:46Z в тот же день, не может получить
+    ``NO_EVENT_DETECTED`` только из-за отсутствия точного пересечения с
+    точкой начала: продолжалось ли явление на 16:00Z — неизвестно."""
+    as_of = datetime(2024, 5, 10, 18, 0, tzinfo=UTC)
+    records = _eligible(_real_donki_records("donki_2024-05-01_2024-05-15.json"), as_of)
+
+    assessment = assess_archive_window(
+        records,
+        policy=DONKI_POLICY_6H,
+        ingested_intervals=[MAY_INTERVAL],
+        window_start=datetime(2024, 5, 10, 16, 0, tzinfo=UTC),
+        window_end=datetime(2024, 5, 10, 17, 0, tzinfo=UTC),
+        as_of=as_of,
+    )
+
+    assert assessment.events == ()
+    assert assessment.status == "INSUFFICIENT_DATA"
+    assert "20240510-AL-004" in {
+        e.provider_record_id for e in assessment.unresolved_open_events
+    }
+    assert any("без задокументированного конца" in note for note in assessment.notes)
 
 
 def test_only_configured_event_types_create_an_event() -> None:
@@ -175,9 +206,20 @@ def test_only_configured_event_types_create_an_event() -> None:
     assert with_sep.status == "EVENT_PRESENT"
     assert {e.message_type for e in with_sep.events} == {"SEP"}
 
+    # GST тоже извлекается из Activity ID — точка начала без
+    # задокументированного конца (round 3 ревью PR #37). В этом же архиве
+    # есть более ранняя, ничем не подтверждённая как завершившаяся
+    # геомагнитная буря (20240502-AL-004/005/006, начало 2024-05-02T15:00Z) —
+    # окно 10 мая при конфигурации GST поэтому получает ``INSUFFICIENT_DATA``,
+    # а не ``NO_EVENT_DETECTED``: это тот же самый механизм открытого конца,
+    # что и у SEP, применённый к другому типу через ту же конфигурацию, не
+    # через условие, зашитое под конкретный тип в домене.
     only_gst = assess(frozenset({"GST"}))
     assert only_gst.events == ()
-    assert only_gst.status == "NO_EVENT_DETECTED"
+    assert only_gst.status == "INSUFFICIENT_DATA"
+    assert {e.provider_record_id for e in only_gst.unresolved_open_events} >= {
+        "20240502-AL-004"
+    }
 
 
 # ---------------------------------------------------------------------------

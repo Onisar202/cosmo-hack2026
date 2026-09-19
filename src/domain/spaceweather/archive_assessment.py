@@ -18,8 +18,12 @@
 ``INSUFFICIENT_DATA``
     Оценить невозможно: окно не покрыто загруженными интервалами, либо
     выходит за фактический горизонт продукта, либо продукт вовсе не умеет
-    машиночитаемо сообщать о событии. Отказ, пробел и «за горизонтом»
-    никогда не превращаются в благоприятную оценку (main-prompt.md §2, §4).
+    машиночитаемо сообщать о событии, либо в прочитанном интервале есть
+    подтверждённое **начало** явления без задокументированного конца
+    (``open_ended`` — round 3 ревью PR #37, см. ``assess_archive_window``),
+    чья истинная продолжительность на момент окна неизвестна. Отказ, пробел
+    и «за горизонтом» никогда не превращаются в благоприятную оценку
+    (main-prompt.md §2, §4).
 
 **Продукт и горизонт — конфигурация, а не условие в домене.** В этом модуле
 нет ни одной ветки вида ``if source_id == "..."``: и перечень событийных
@@ -149,15 +153,43 @@ class CoverageInterval:
     (домен не импортирует ``sources/``). Смысл тот же и он критичен:
     отсутствие записей значит «события не зафиксировано» только внутри
     интервала, который действительно был прочитан.
+
+    ``fetched_at`` — когда именно этот интервал архива был реально прочитан
+    (round 3 ревью PR #37: факт «мы прочитали этот интервал» — это тоже
+    заявление источника со своим временем получения, а не голая пара
+    границ без происхождения). Обязателен, а не опционален: у факта
+    покрытия, как и у любой записи (main-prompt.md §1, §3), должно быть
+    видно, когда он установлен — это то, что делает карту покрытия
+    версионируемой, а не анонимной парой чисел. Используется в
+    объяснениях (``notes``) для прослеживаемости (критерий О4); не
+    участвует в отборе по ``as_of`` — покрытие устанавливается
+    исследовательским конвейером сегодня для периода в прошлом, и это не
+    временная утечка (утечкой было бы использование записи с
+    ``published_at > as_of``, не факта о том, когда МЫ прочитали архив).
     """
 
     start: datetime
     end: datetime
+    fetched_at: datetime
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("start", self.start),
+            ("end", self.end),
+            ("fetched_at", self.fetched_at),
+        ):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"{name} must be timezone-aware UTC (.ai/main-prompt.md §1)")
+        if self.end <= self.start:
+            raise ValueError("end must be after start")
 
 
 @dataclass(frozen=True)
 class ArchiveEvent:
-    """Одно сообщение о событии, пересекающее окно ВКД."""
+    """Одно сообщение о событии, пересекающее окно ВКД, либо (в
+    ``ArchiveWindowAssessment.unresolved_open_events``) начало явления без
+    задокументированного конца, чья продолжительность на момент окна
+    неизвестна (round 3 ревью PR #37)."""
 
     record_id: str
     provider_record_id: str
@@ -183,6 +215,14 @@ class ArchiveWindowAssessment:
     critical_gap: bool
     coverage_fraction: float
     events: tuple[ArchiveEvent, ...]
+    #: Начала явлений без задокументированного конца (``open_ended`` —
+    #: ``src/sources/archive_probe.py``), чей момент строго предшествует
+    #: окну, но чья истинная продолжительность на момент окна неизвестна —
+    #: round 3 ревью PR #37. Непустой список сам по себе не даёт
+    #: ``EVENT_PRESENT`` (мы не утверждаем, что явление ещё продолжалось),
+    #: но и не даёт ``NO_EVENT_DETECTED`` (мы не утверждаем, что оно уже
+    #: закончилось) — только ``INSUFFICIENT_DATA``.
+    unresolved_open_events: tuple[ArchiveEvent, ...]
     record_ids: tuple[str, ...]
     notes: tuple[str, ...]
 
@@ -197,14 +237,29 @@ def _parse(value: Any, field_name: str, record_id: Any) -> datetime:
 
 
 def _merge(intervals: Iterable[CoverageInterval]) -> list[CoverageInterval]:
+    """Склеивает пересекающиеся/смежные интервалы покрытия одного продукта.
+
+    ``fetched_at`` склеенного интервала — более поздний из двух: покрытие
+    объединённого диапазона доказано только с того момента, когда была
+    прочитана ВТОРАЯ (более поздно полученная) из его составляющих частей,
+    не раньше (round 3 ревью PR #37).
+    """
     ordered = sorted(intervals, key=lambda i: i.start)
     merged: list[CoverageInterval] = []
     for interval in ordered:
-        if interval.end <= interval.start:
-            continue
         if merged and interval.start <= merged[-1].end:
             if interval.end > merged[-1].end:
-                merged[-1] = CoverageInterval(start=merged[-1].start, end=interval.end)
+                merged[-1] = CoverageInterval(
+                    start=merged[-1].start,
+                    end=interval.end,
+                    fetched_at=max(merged[-1].fetched_at, interval.fetched_at),
+                )
+            elif interval.fetched_at > merged[-1].fetched_at:
+                merged[-1] = CoverageInterval(
+                    start=merged[-1].start,
+                    end=merged[-1].end,
+                    fetched_at=interval.fetched_at,
+                )
             continue
         merged.append(interval)
     return merged
@@ -247,8 +302,10 @@ def assess_archive_window(
         raise ValueError("window_end must be after window_start")
 
     window_duration = window_end - window_start
+    merged_intervals = _merge(ingested_intervals)
 
     events: list[ArchiveEvent] = []
+    unresolved_open_events: list[ArchiveEvent] = []
     considered_record_ids: list[str] = []
     for record in records:
         record_id = record.get("record_id")
@@ -293,6 +350,29 @@ def assess_archive_window(
                     published_at=published_at,
                 )
             )
+            continue
+        # round 3 ревью PR #37: точечное начало явления без
+        # задокументированного конца (``open_ended`` — archive_probe.py),
+        # предшествующее окну. Отсутствие прямого пересечения здесь НЕ
+        # означает «явление закончилось раньше окна» — мы этого не знаем.
+        # Ограничиваем предположение о неопределённости тем же прочитанным
+        # интервалом архива, в котором зафиксировано начало: дальше этого
+        # интервала у нас нет вообще никакой информации об этом продукте,
+        # и это уже покрыто critical_gap/beyond_horizon отдельно.
+        open_ended = bool(spatial_context.get("open_ended", False))
+        if open_ended and valid_from <= window_end:
+            containing = _find_containing_interval(valid_from, merged_intervals)
+            if containing is not None and containing.end >= window_start:
+                unresolved_open_events.append(
+                    ArchiveEvent(
+                        record_id=str(record_id),
+                        provider_record_id=str(record["provider_record_id"]),
+                        message_type=message_type,
+                        valid_from=valid_from,
+                        valid_to=valid_to,
+                        published_at=published_at,
+                    )
+                )
 
     horizon_end: datetime | None = None
     if policy.forecast_horizon_hours is not None:
@@ -303,11 +383,14 @@ def assess_archive_window(
     coverage_limit = horizon_end if horizon_end is not None else as_of
 
     covered = timedelta(0)
-    for interval in _merge(ingested_intervals):
+    covering_fetched_at: datetime | None = None
+    for interval in merged_intervals:
         start = max(interval.start, window_start)
         end = min(min(interval.end, window_end), coverage_limit)
         if end > start:
             covered += end - start
+            if covering_fetched_at is None or interval.fetched_at > covering_fetched_at:
+                covering_fetched_at = interval.fetched_at
 
     coverage_fraction = covered / window_duration
     critical_gap = covered < window_duration
@@ -320,6 +403,8 @@ def assess_archive_window(
         status = "INSUFFICIENT_DATA"
     elif beyond_horizon or critical_gap:
         status = "INSUFFICIENT_DATA"
+    elif unresolved_open_events:
+        status = "INSUFFICIENT_DATA"
     else:
         status = "NO_EVENT_DETECTED"
 
@@ -327,10 +412,12 @@ def assess_archive_window(
         policy=policy,
         status=status,
         events=events,
+        unresolved_open_events=unresolved_open_events,
         horizon_end=horizon_end,
         beyond_horizon=beyond_horizon,
         critical_gap=critical_gap,
         coverage_fraction=coverage_fraction,
+        covering_fetched_at=covering_fetched_at,
         as_of=as_of,
     )
 
@@ -345,9 +432,25 @@ def assess_archive_window(
         critical_gap=critical_gap,
         coverage_fraction=coverage_fraction,
         events=tuple(events),
+        unresolved_open_events=tuple(unresolved_open_events),
         record_ids=tuple(considered_record_ids),
         notes=notes,
     )
+
+
+def _find_containing_interval(
+    moment: datetime, merged_intervals: Sequence[CoverageInterval]
+) -> CoverageInterval | None:
+    """Интервал из уже склеенного (``_merge``) списка, содержащий ``moment``.
+
+    ``merged_intervals`` не пересекаются и отсортированы по построению
+    (``_merge``), поэтому линейный поиск здесь достаточен: списки интервалов
+    покрытия одного продукта на практике коротки (единицы-десятки окон
+    загрузки), это не путь, чувствительный к производительности."""
+    for interval in merged_intervals:
+        if interval.start <= moment <= interval.end:
+            return interval
+    return None
 
 
 def _build_notes(
@@ -355,10 +458,12 @@ def _build_notes(
     policy: ArchiveProductPolicy,
     status: AssessmentStatus,
     events: Sequence[ArchiveEvent],
+    unresolved_open_events: Sequence[ArchiveEvent],
     horizon_end: datetime | None,
     beyond_horizon: bool,
     critical_gap: bool,
     coverage_fraction: float,
+    covering_fetched_at: datetime | None,
     as_of: datetime,
 ) -> tuple[str, ...]:
     """Объяснения к оценке (критерий О4: от вывода — к записи и правилу)."""
@@ -371,17 +476,36 @@ def _build_notes(
             "космонавта (main-prompt.md §4)."
         )
     elif status == "NO_EVENT_DETECTED":
+        fetched_note = (
+            f" Покрытие установлено загрузкой архива по {covering_fetched_at.isoformat()}."
+            if covering_fetched_at is not None
+            else ""
+        )
         notes.append(
             f"Архив {policy.source_id}: интервал, покрывающий окно, прочитан полностью, "
             "и сообщений о событии в нём нет. Это означает «порог не пересечён в "
             "прочитанном интервале», а не «обстановка подтверждена спокойной»: "
             "событийный архив не даёт непрерывного подтверждения состояния "
-            "(docs/method.md §6)."
+            f"(docs/method.md §6).{fetched_note}"
         )
     else:
         notes.append(
             f"Архив {policy.source_id}: оценить невозможно — это отсутствие данных, "
             "а не благоприятная обстановка (main-prompt.md §2)."
+        )
+
+    if unresolved_open_events:
+        listed = ", ".join(
+            f"{e.provider_record_id} (начало {e.valid_from.isoformat()})"
+            for e in unresolved_open_events
+        )
+        notes.append(
+            f"Архив {policy.source_id}: в прочитанном интервале зафиксировано начало "
+            f"явления без задокументированного конца — {listed}. Источник не публикует "
+            "структурированный момент завершения (round 3 ревью PR #37), поэтому "
+            "продолжалось ли явление на момент этого окна — неизвестно: это «оценить "
+            "невозможно», а не подтверждённое отсутствие и не подтверждённое "
+            "продолжение (main-prompt.md §2)."
         )
 
     if not policy.event_message_types:

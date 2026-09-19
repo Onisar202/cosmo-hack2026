@@ -213,24 +213,37 @@ def _resolve_donki_issue_time(
 
 def _extract_donki_event_window(
     message_body: str,
-) -> tuple[datetime, datetime, datetime] | None:
-    """Извлекает ``(observed_at, valid_from, valid_to)`` из структурированных
-    полей тела уведомления — НЕ из времени публикации (round 1 ревью PR #18:
-    подмена ``observed_at`` временем выпуска смешивает два из четырёх разных
-    времён, main-prompt.md §1).
+) -> tuple[datetime, datetime, datetime, bool] | None:
+    """Извлекает ``(observed_at, valid_from, valid_to, open_ended)`` из
+    структурированных полей тела уведомления — НЕ из времени публикации
+    (round 1 ревью PR #18: подмена ``observed_at`` временем выпуска смешивает
+    два из четырёх разных времён, main-prompt.md §1).
 
     Поддержаны два структурированных, задокументированно стабильных поля
     (не свободная проза, а machine-написанные строки того же вида, что и
     ``## Message Issue Date:``):
 
-    - ``Activity ID: <ISO-момент>-<ТИП>-<NNN>`` — точечное событие
-      (CME/GST/IPS/MPC/RBE/SEP и часть FLR); ``observed_at`` =
-      ``valid_from`` = ``valid_to`` = этот момент.
+    - ``Activity ID: <ISO-момент>-<ТИП>-<NNN>`` — точечное **начало**
+      явления (CME/GST/IPS/MPC/RBE/SEP и часть FLR); ``observed_at`` =
+      ``valid_from`` = ``valid_to`` = этот момент, ``open_ended = True``.
+      DONKI не публикует структурированного момента окончания для этих
+      типов (round 3 ревью PR #37: реальные SEP-уведомления, например
+      ``20240510-AL-004``..``20240511-AL-013`` о продолжающейся активности
+      ``2024-05-10T13:35:00-SEP-001``, документируют только повторные
+      подтверждения превышения порога, никогда — конец). ``valid_to`` здесь
+      честно равен ``valid_from``, а НЕ придуманному интервалу: это точка,
+      с которой явление подтверждённо началось, а не интервал, в течение
+      которого оно точно продолжалось. ``open_ended = True`` — сигнал для
+      ``src/domain/spaceweather/archive_assessment.py``, что окно **после**
+      этой точки не может по одному этому отсутствию точного совпадения
+      получить ``NO_EVENT_DETECTED``: неизвестное окончание — это «оценить
+      невозможно», а не «завершилось прямо в момент начала».
     - ``Report Coverage Begin/End Date:`` (тип ``Report`` — еженедельная
       сводка) — интервал, а не точка; ``valid_from``/``valid_to`` = границы
       покрытия, ``observed_at`` = начало (последний момент, к которому
       привязано содержимое, доступен только как конец окна — берём начало
-      как более консервативную, точно измеренную границу).
+      как более консервативную, точно измеренную границу). Обе границы
+      документированы явно поставщиком, поэтому ``open_ended = False``.
 
     Остальные формулировки (например «Flare M5.0 crossing time: …» без
     ``Activity ID`` — часть уведомлений типа FLR) не покрыты: извлечение
@@ -244,14 +257,14 @@ def _extract_donki_event_window(
     activity_match = _ACTIVITY_ID_RE.search(message_body)
     if activity_match is not None:
         moment = _parse_donki_issue_time(activity_match.group("ts") + "Z", index=-1)
-        return moment, moment, moment
+        return moment, moment, moment, True
 
     begin_match = _REPORT_COVERAGE_BEGIN_RE.search(message_body)
     end_match = _REPORT_COVERAGE_END_RE.search(message_body)
     if begin_match is not None and end_match is not None:
         begin = _parse_donki_issue_time(begin_match.group("value"), index=-1)
         end = _parse_donki_issue_time(end_match.group("value"), index=-1)
-        return begin, begin, end
+        return begin, begin, end, False
 
     return None
 
@@ -303,7 +316,7 @@ def donki_notification_to_record_input(
     window = _extract_donki_event_window(notification.raw_entry.get("messageBody", ""))
     if window is None:
         return None
-    observed_at, valid_from, valid_to = window
+    observed_at, valid_from, valid_to, open_ended = window
 
     source_version = notification.reported_issue_time.strftime("%Y%m%dT%H%M%SZ")
     return RecordInput(
@@ -321,6 +334,12 @@ def donki_notification_to_record_input(
         spatial_context={
             "provider": "NASA CCMC DONKI",
             "message_type": notification.message_type,
+            # round 3 ревью PR #37: True только для точечного начала явления
+            # (Activity ID) без задокументированного конца — см.
+            # _extract_donki_event_window. archive_assessment.py читает этот
+            # флаг, чтобы окно после такой точки не получало
+            # NO_EVENT_DETECTED только из-за отсутствия точного совпадения.
+            "open_ended": open_ended,
             "message_url": notification.url,
         },
         source_version=source_version,
