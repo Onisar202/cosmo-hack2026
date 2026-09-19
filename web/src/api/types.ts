@@ -29,7 +29,7 @@ export interface DataManifestEntry {
 }
 
 export interface OrbitSummary {
-  source: 'celestrak' | 'space-track'
+  source: 'celestrak' | 'space-track' | 'nasa-iss-oem-history'
   norad_id: string
   elements_epoch: string
   elements_age_hours: number

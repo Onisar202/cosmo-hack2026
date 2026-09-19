@@ -78,6 +78,7 @@ _RECORD_KIND_LABELS: dict[str, str] = {
 _ORBIT_SOURCE_LABELS: dict[str, str] = {
     "celestrak": "CelesTrak (текущие элементы)",
     "space-track": "Space-Track GP_HISTORY (исторические элементы)",
+    "nasa-iss-oem-history": "NASA TOPO CCSDS OEM (исторические элементы)",
 }
 
 _MECHANISM_UNITS_NOTE = (

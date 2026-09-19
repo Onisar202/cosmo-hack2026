@@ -10,15 +10,18 @@ exact list and why they are read by path rather than duplicated). No
 network call happens anywhere in this module or anything it imports from
 ``experiments/``.
 
-**Determinism.** Nothing here samples the wall clock or an unseeded random
-source:
+**Determinism.** Nothing that feeds ``result_id``/``as_of``/every record's
+``fetched_at`` samples the wall clock or an unseeded random source:
 
-- ``computed_at``/``as_of``/every record's ``fetched_at`` in a scenario's
-  build are the scenario's own configured ``as_of`` (a fixed value from
-  ``experiments/scenarios.yaml``, never ``datetime.now()``) — it doubles as
-  "the moment this forecast was evaluated", which is exactly what
-  ``as_of`` means for ``historical_forecast``, so no separate ``--now``
-  flag is needed on top of it;
+- ``as_of``/every record's ``fetched_at`` in a scenario's build are either
+  the scenario's own configured ``as_of`` (a fixed value from
+  ``experiments/scenarios.yaml``) or the REAL retrieval provenance of the
+  underlying fixture file (``experiments/fixtures.py``'s
+  ``donki_fetched_at``/``oem_release_fetched_at``/``mmod_fetched_at``,
+  themselves fixed values read from committed ``*.meta.json`` sidecars) —
+  never ``datetime.now()``, and never each other's value substituted in
+  (FN-46 round 7 review, point 2: ``as_of`` is a request cutoff, not a
+  stand-in for "when we fetched this" or "when we ran this");
 - ``result_id`` is ``f"res-experiment-{scenario.name}"``, not
   ``uuid.uuid4()``;
 - every ``record_id`` assigned by ``src.store.records.insert_record``
@@ -26,16 +29,27 @@ source:
   one build via ``experiments.determinism.deterministic_record_ids`` (see
   that module's docstring for why this is necessary and how it is scoped).
 
-Running this command twice against the same code and the same fixture
-files therefore produces byte-identical JSON artifacts (modulo nothing) —
-see ``tests/experiments/test_determinism.py``.
+``result.computed_at`` ("когда расчёт был выполнен и сохранён",
+contracts/result.schema.json) is the one deliberate exception: it is the
+REAL moment this run started (``run_started_at`` below, ``datetime.now()``
+captured exactly once by :func:`main`), because that is genuinely what the
+field means — a scenario's ``as_of`` is not "when we ran this experiment"
+either. Two runs of the same scenario therefore differ in ``computed_at``
+(and in the bytes of any artifact that embeds it) but are otherwise
+byte-identical; ``tests/experiments/test_determinism.py`` checks this by
+passing the SAME explicit ``run_started_at`` to both runs it compares —
+proving every OTHER field is deterministic — rather than by masking
+``computed_at`` back to a fake constant.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import tempfile
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -59,12 +73,82 @@ def _write_json(path: Path, data: Any) -> None:
     path.write_text(text + "\n", encoding="utf-8")
 
 
-def run_scenario(scenario: Scenario, *, out_dir: Path) -> dict[str, Any]:
+def _atomic_rename(src: Path, dst: Path) -> None:
+    """Thin wrapper around ``Path.rename`` so a test can inject a failure at
+    one specific rename step without monkeypatching ``pathlib`` globally."""
+    src.rename(dst)
+
+
+def _replace_scenario_dir(final_dir: Path, built_dir: Path) -> None:
+    """Atomically swaps a fully-built ``built_dir`` into ``final_dir``'s
+    place (FN-46 round 7 review, point 5; round 1 re-review of that fix,
+    point 3).
+
+    Previously ``run_scenario`` wrote straight into ``out_dir /
+    scenario.name``, reusing whatever was already there: re-running a
+    scenario whose outcome flips between a run (``production_result.json``
+    + ``.html``) and a failure (``production_failure.json``) left BOTH
+    sets of files sitting side by side, silently misrepresenting the most
+    recent run. Building into a sibling temp directory first and renaming
+    it into place only after every artifact was written successfully means
+    ``final_dir`` is, at every observable moment, either the complete
+    previous build or the complete new one — never a mix.
+
+    The first fix moved the previous ``final_dir`` aside and deleted it
+    BEFORE renaming ``built_dir`` into place: if that second rename failed
+    or the process died in between, the old good result was already gone
+    and the new one never arrived — a genuine data loss window, not just a
+    brief "empty" gap. The previous directory is now kept under its
+    ``.stale-`` name until the new one is confirmed in place, and restored
+    on any failure of that final rename; it is only deleted after success.
+    """
+    stale_dir: Path | None = None
+    if final_dir.exists():
+        stale_dir = final_dir.parent / f".{final_dir.name}.stale-{uuid.uuid4().hex}"
+        _atomic_rename(final_dir, stale_dir)
+    try:
+        _atomic_rename(built_dir, final_dir)
+    except BaseException:
+        if stale_dir is not None:
+            _atomic_rename(stale_dir, final_dir)
+        raise
+    if stale_dir is not None:
+        shutil.rmtree(stale_dir)
+
+
+def run_scenario(scenario: Scenario, *, out_dir: Path, run_started_at: datetime) -> dict[str, Any]:
     """Runs one scenario end to end and writes its artifacts under
     ``out_dir / scenario.name``. Returns the scenario's ``metrics.json``
-    content (also used to build the cross-scenario ``summary.md`` table)."""
-    scenario_dir = out_dir / scenario.name
+    content (also used to build the cross-scenario ``summary.md`` table).
 
+    ``run_started_at`` is threaded straight through to
+    ``production.build_production_result`` — see that function's docstring
+    and this module's docstring "Determinism" section.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    final_dir = out_dir / scenario.name
+    build_dir = Path(tempfile.mkdtemp(dir=out_dir, prefix=f".{scenario.name}.build-"))
+    try:
+        metrics_dict = _build_scenario_artifacts(
+            scenario, scenario_dir=build_dir, run_started_at=run_started_at
+        )
+        _replace_scenario_dir(final_dir, build_dir)
+    except BaseException:
+        # Cleans up build_dir whether _build_scenario_artifacts failed (it
+        # still exists under its temp name) or _replace_scenario_dir failed
+        # after already renaming it away (this is then a no-op — nothing
+        # left at build_dir's path, ignore_errors handles that).
+        shutil.rmtree(build_dir, ignore_errors=True)
+        raise
+    return metrics_dict
+
+
+def _build_scenario_artifacts(
+    scenario: Scenario, *, scenario_dir: Path, run_started_at: datetime
+) -> dict[str, Any]:
+    """Builds every artifact for one scenario into ``scenario_dir`` (a
+    fresh, empty directory — see :func:`run_scenario`) and returns the
+    scenario's ``metrics.json`` content."""
     # A fresh, temporary store per scenario build: this stand does not need
     # a persistent store between runs (determinism comes from
     # experiments.determinism, not from reusing a database file across
@@ -76,7 +160,9 @@ def run_scenario(scenario: Scenario, *, out_dir: Path) -> dict[str, Any]:
         raw_store = RawOriginalStore(tmp_path / "raw")
         try:
             with deterministic_record_ids(scenario.name):
-                build = production.build_production_result(scenario, conn=conn, raw_store=raw_store)
+                build = production.build_production_result(
+                    scenario, conn=conn, raw_store=raw_store, run_started_at=run_started_at
+                )
         finally:
             conn.close()
 
@@ -118,11 +204,13 @@ def run_scenario(scenario: Scenario, *, out_dir: Path) -> dict[str, Any]:
 
     event_miss = metrics.compute_event_miss(
         expected_event=scenario.expected_event,
+        production_result=build.result,
         evidence_by_window=build.evidence_by_window,
         baseline=baseline_result,
     )
     false_warning = metrics.compute_false_warning(
         expected_event=scenario.expected_event,
+        production_result=build.result,
         evidence_by_window=build.evidence_by_window,
         baseline=baseline_result,
     )
@@ -161,12 +249,18 @@ def _summary_row(scenario: Scenario, m: dict[str, Any]) -> str:
     fw = m["false_warning"]
     wc = m["selected_window_change"]
     cov = m["coverage"]
+
+    def _na(value: bool | None) -> str:
+        return "n/a" if value is None else str(value)
+
     em_text = (
-        f"evidence={em['evidence_missed']} / baseline={em['baseline_missed']}"
+        f"production={_na(em['production_missed'])}, evidence={em['evidence_missed']} / "
+        f"baseline={em['baseline_missed']}"
         if em["applicable"]
         else "n/a"
     )
     fw_text = (
+        f"production={_na(fw['production_false_warning'])}, "
         f"evidence={fw['evidence_false_warning']} / baseline={fw['baseline_false_warning']}"
         if fw["applicable"]
         else "n/a"
@@ -217,19 +311,35 @@ def build_summary(scenarios: list[Scenario], all_metrics: dict[str, dict[str, An
 
     if event_metrics.get("event_miss", {}).get("applicable"):
         em = event_metrics["event_miss"]
+        production_note = (
+            "n/a (production's space_weather mechanism never classifies here, see below)"
+            if em["production_missed"] is None
+            else ("missed" if em["production_missed"] else "correctly flagged")
+        )
         lines.append(
-            f"- **event scenario**: the DONKI evidence probe "
+            f"- **event scenario**: production is {production_note}; the "
+            "informal DONKI evidence probe (NOT a production classification) "
             f"{'missed' if em['evidence_missed'] else 'correctly flagged'} the "
-            f"real AR3664 event, and the naive baseline "
-            f"{'missed' if em['baseline_missed'] else 'correctly flagged'} it "
+            f"real AR3664 event as of this scenario's as_of, and the naive "
+            f"baseline {'missed' if em['baseline_missed'] else 'correctly flagged'} it "
             "too — see `experiments/out/event/metrics.json` for the exact "
             "notification IDs behind these numbers."
         )
     if control_metrics.get("false_warning", {}).get("applicable"):
         fw = control_metrics["false_warning"]
+        production_note = (
+            "is n/a (production's space_weather mechanism never classifies here, see below)"
+            if fw["production_false_warning"] is None
+            else (
+                "raised a false warning"
+                if fw["production_false_warning"]
+                else "did not raise a false warning"
+            )
+        )
         lines.append(
-            f"- **control scenario**: the DONKI evidence probe "
-            f"{'raised' if fw['evidence_false_warning'] else 'did not raise'} a "
+            f"- **control scenario**: production {production_note}; the "
+            "informal DONKI evidence probe (NOT a production "
+            f"classification) {'raised' if fw['evidence_false_warning'] else 'did not raise'} a "
             f"false warning for the documented quiet period, and the naive "
             f"baseline {'raised' if fw['baseline_false_warning'] else 'did not raise'} "
             "one either — see `experiments/out/control/metrics.json`."
@@ -248,7 +358,7 @@ def build_summary(scenarios: list[Scenario], all_metrics: dict[str, dict[str, An
         "fabricates a preferred "
         "window when the space_weather mechanism has a critical data gap "
         "(`critical_gap=true` on every window, see the `windows[*].mechanisms` "
-        "entry with `mechanism=\"space_weather\"` in each `production_result.json`), "
+        'entry with `mechanism="space_weather"` in each `production_result.json`), '
         "while the naive baseline structurally cannot express a window "
         "preference at all (it applies one flat verdict to every window by "
         "construction) — so there is no window-preference divergence to "
@@ -270,7 +380,7 @@ def build_summary(scenarios: list[Scenario], all_metrics: dict[str, dict[str, An
         "evaluated** (event and control scenarios): there is no archived "
         "quantitative proton-flux OBSERVATION source in this repository "
         "today, pending FN-41/FN-42 (not yet merged) — this correctly makes "
-        "`recommendation.status=\"all_windows_excluded\"` for both, per the "
+        '`recommendation.status="all_windows_excluded"` for both, per the '
         "windows-dominance rule's critical-gap clause "
         "(.ai/main-prompt.md §11). That is the intended, honest finding of "
         "this experiment stand, not a bug to work around."
@@ -284,10 +394,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args(argv)
 
+    # Captured exactly once for the whole invocation — every scenario built
+    # by this run shares the same, real "when did we run this" timestamp
+    # (see module docstring "Determinism").
+    run_started_at = datetime.now(timezone.utc)
+
     scenarios = load_scenarios(args.config)
     all_metrics: dict[str, dict[str, Any]] = {}
     for scenario in scenarios:
-        all_metrics[scenario.name] = run_scenario(scenario, out_dir=args.out)
+        all_metrics[scenario.name] = run_scenario(
+            scenario, out_dir=args.out, run_started_at=run_started_at
+        )
 
     summary = build_summary(scenarios, all_metrics)
     args.out.mkdir(parents=True, exist_ok=True)
