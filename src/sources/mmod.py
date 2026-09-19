@@ -41,6 +41,7 @@ NASA MEO «The 2024 meteor shower activity forecast for low Earth orbit»
 
 from __future__ import annotations
 
+import gzip
 import math
 import sqlite3
 from dataclasses import dataclass
@@ -55,17 +56,30 @@ SOURCE_ID = "nasa-meo-leo-forecast-2024"
 SOURCE_URL = "https://ntrs.nasa.gov/api/citations/20230015158/downloads/flux_data.txt"
 
 #: Бандловая копия проверенного первичного файла (README —
-#: ``tests/fixtures/mmod/nasa_meo_leo_forecast_2024/README.md``, SHA-256 там
-#: же). Лежит под ``src/`` (не ``tests/``/``data/``), потому что оба этих
-#: пути исключены из Docker-образа (``.dockerignore``) — этот файл нужен
-#: РАБОТАЮЩЕМУ сервису в ``mode=current`` (FN-39 приёмка п.4), не только
-#: тестам.
+#: ``tests/fixtures/mmod/nasa_meo_leo_forecast_2024/README.md``, SHA-256
+#: РАСПАКОВАННОГО содержимого там же). Лежит под ``src/`` (не
+#: ``tests/``/``data/``), потому что оба этих пути исключены из
+#: Docker-образа (``.dockerignore``) — этот файл нужен РАБОТАЮЩЕМУ сервису
+#: в ``mode=current`` (FN-39 приёмка п.4), не только тестам.
+#:
+#: Хранится gzip-сжатым (``.gz``, ~1.46 МБ → ~0.44 МБ), не как plain text:
+#: round 1-2 ревью PR #31 — построчный текстовый файл на ~8800 строк
+#: раздувал диф PR до 19933/11154 строк (лимит 3000), причём ``-diff`` в
+#: ``.gitattributes`` не помогает — GitHub считает additions/deletions по
+#: собственному content-sniffing (ищет NUL-байт), не по gitattributes
+#: клиента. Настоящий gzip гарантированно бинарен для ЛЮБОГО такого
+#: детектора (сжатые данные почти всегда содержат NUL-байты в первых же
+#: килобайтах) — GitHub показывает файл как ``Bin … bytes`` по-настоящему,
+#: не только в локальном ``git diff``. :func:`fetch` распаковывает на
+#: лету — вся остальная кодовая база (``parse_flux_forecast`` и выше)
+#: продолжает получать те же самые, побайтово те же исходные байты
+#: документа, что и раньше.
 DEFAULT_DATA_PATH = (
     Path(__file__).resolve().parent
     / "data"
     / "mmod"
     / "nasa_meo_leo_forecast_2024"
-    / "flux_data.txt"
+    / "flux_data.txt.gz"
 )
 
 #: Документ выпущен единовременно (титульный лист LEO_Forecast_2024.pdf:
@@ -241,15 +255,18 @@ def build_mmod_background_records(
 
 
 def fetch() -> bytes:
-    """Читает бандловый файл (:data:`DEFAULT_DATA_PATH`) — эта задача не
-    ходит в сеть за NTRS (см. docstring модуля и
-    ``sources.yaml#nasa-meo-leo-forecast-2024``: годовой документ без live-
-    эндпоинта в объёме FN-39, сетевой прокси песочницы всё равно отклоняет
-    ``ntrs.nasa.gov``). Отдельная функция — тем же паттерном, что
+    """Читает и распаковывает бандловый файл (:data:`DEFAULT_DATA_PATH`,
+    gzip — см. docstring модуля) — эта задача не ходит в сеть за NTRS (см.
+    ``sources.yaml#nasa-meo-leo-forecast-2024``: годовой документ без
+    live-эндпоинта в объёме FN-39, сетевой прокси песочницы всё равно
+    отклоняет ``ntrs.nasa.gov``). Возвращает те же самые байты исходного
+    текстового документа, что были проверены (SHA-256) при сохранении в
+    репозиторий — сжатие/распаковка побайтово обратимы (`gzip` без потерь).
+    Отдельная функция — тем же паттерном, что
     ``src.sources.swpc.fetch``/``src.sources.noaa_3day_forecast.fetch`` —
     чтобы тесты могли подменить источник байтов (``monkeypatch.setattr``),
     не трогая файл на диске."""
-    return DEFAULT_DATA_PATH.read_bytes()
+    return gzip.decompress(DEFAULT_DATA_PATH.read_bytes())
 
 
 #: Запас по обе стороны окна для узлов интерполяции (main-prompt.md §11 не

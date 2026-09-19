@@ -34,7 +34,10 @@ from src.store.schema import connect
 
 UTC = timezone.utc
 
-REAL_FILE_BYTES = mmod_module.DEFAULT_DATA_PATH.read_bytes()
+# fetch() распаковывает бандловый gzip-файл (src/sources/mmod.py::DEFAULT_DATA_PATH)
+# — REAL_FILE_BYTES ниже несёт исходные (распакованные) байты документа,
+# те же, что проверялись (SHA-256, контрольные строки) до сжатия.
+REAL_FILE_BYTES = mmod_module.fetch()
 
 # SHA-256 проверена в этой сессии дважды (Jira-вложение и локальная копия) —
 # tests/fixtures/mmod/nasa_meo_leo_forecast_2024/README.md.

@@ -10,12 +10,12 @@
 tests/fixtures/sources/archive/** -text
 
 # NASA MEO почасовая таблица (FN-39, sources.yaml#nasa-meo-leo-forecast-2024,
-# SHA-256 задокументирован в tests/fixtures/mmod/nasa_meo_leo_forecast_2024/
-# README.md) — реальный первичный файл ~8800 строк. -text по той же причине,
-# что и архив выше (контрольная сумма не должна зависеть от core.autocrlf).
-# -diff — файл считается бинарным для `git diff`/PR-ревью (`Bin … bytes`
-# вместо построчного диффа): без этого правила ЛЮБОЕ изменение источника
-# добавляет тысячи "+"-строк в диф PR и делает ревью ненадёжным (round 1
-# ревью PR #31 — «Diff содержит 19933 строк, лимит 3000»); строки самого
-# файла при этом не удалены и не скрыты, читаются прямым чтением файла.
-src/sources/data/mmod/nasa_meo_leo_forecast_2024/flux_data.txt -text -diff
+# SHA-256 распакованного содержимого — tests/fixtures/mmod/
+# nasa_meo_leo_forecast_2024/README.md) — реальный первичный файл, хранится
+# gzip-сжатым (round 2 ревью PR #31: -diff одной текстовой копии НЕ снижает
+# additions/deletions, которые GitHub считает собственным content-sniffing,
+# не по gitattributes клиента — только настоящий бинарный формат снижает).
+# -text по той же причине, что и архив выше (контрольная сумма не должна
+# зависеть от core.autocrlf); -diff — явное намерение, что файл не
+# предназначен для построчного диффа (у gzip и так нет текстового диффа).
+src/sources/data/mmod/nasa_meo_leo_forecast_2024/flux_data.txt.gz -text -diff
