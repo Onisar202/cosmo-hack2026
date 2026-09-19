@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # FN-45: восстановление постоянного тома api-data из бэкапа scripts/backup.sh.
-# ДЕСТРУКТИВНО: полностью заменяет текущее содержимое тома (SQLite +
-# raw originals) содержимым архива — требует явного подтверждения.
+# ДЕСТРУКТИВНО по намерению (заменяет текущие данные архивом) но не по
+# отказу: архив проверяется в отдельном временном томе до того, как рабочий
+# том вообще трогается, а прежние данные снимаются в свой временный том
+# перед заменой — если что-то пойдёт не так (сбой копирования, не запустился
+# healthy api), EXIT-trap возвращает снятый снимок и поднимает сервисы, а не
+# оставляет том частично заполненным и сервисы остановленными
+# (round 1 + round 2 ревью PR #36).
 #
 #   scripts/restore.sh <архив.tar.gz> [--yes]
-#
-# Архив сначала проверяется (валидный tar.gz, содержит store.sqlite3) в
-# отдельном временном томе — том api-data очищается, только если проверка
-# прошла: повреждённый/неполный архив не должен оставить хранилище пустым
-# или частично восстановленным (round 1 ревью PR #36).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,9 +52,34 @@ docker run --rm \
     || die "архив повреждён или не является tar.gz: $archive"
 
 staging_volume="fn45-restore-staging-$$"
+rollback_volume="fn45-restore-rollback-$$"
 docker volume create "$staging_volume" >/dev/null
-cleanup_staging() { docker volume rm -f "$staging_volume" >/dev/null 2>&1 || true; }
-trap cleanup_staging EXIT
+docker volume create "$rollback_volume" >/dev/null
+
+# restore_touched_volume: рабочий том api-data ещё не менялся (пока только
+# staging/rollback тома существуют) — реагировать на сбой откатом нечего.
+# restore_failed: сбрасывается в 0 только после успешного health-check в
+# самом конце — до этого момента ЛЮБОЙ выход из скрипта (set -e на любой
+# команде ниже) считается неудачей. Один trap отвечает и за откат (только
+# если оба флага это требуют), и за очистку временных томов на любом выходе
+# (round 2 ревью PR #36: явное `trap - EXIT` снималось раньше, чем
+# подтверждался health-check, и оставляло частично применённое восстановление
+# без отката).
+restore_touched_volume=0
+restore_failed=1
+cleanup_and_revert() {
+    if [[ "$restore_touched_volume" -eq 1 && "$restore_failed" -eq 1 ]]; then
+        log "восстановление не подтверждено health-check'ом — возвращаю предыдущие данные из снимка (trap)"
+        docker run --rm \
+            -v "${VOLUME_NAME}:/data" \
+            -v "${rollback_volume}:/rollback:ro" \
+            alpine:3.20 \
+            sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null; cp -a /rollback/. /data/' >/dev/null 2>&1 || true
+        compose up -d api web >/dev/null 2>&1 || true
+    fi
+    docker volume rm -f "$staging_volume" "$rollback_volume" >/dev/null 2>&1 || true
+}
+trap cleanup_and_revert EXIT
 
 log "распаковываю архив во временный том (текущие данные пока не тронуты)"
 docker run --rm \
@@ -74,15 +99,38 @@ if [[ -n "$api_container" ]]; then
     compose stop api web
 fi
 
+# Снимок ПОСЛЕ остановки сервисов — консистентный (тот же принцип, что и
+# backup.sh: копирование "на лету" под записью рискует захватить SQLite в
+# промежуточном состоянии), и именно он возвращается trap'ом при сбое ниже.
+log "сохраняю снимок текущих данных тома $VOLUME_NAME (на случай отката)"
+docker run --rm \
+    -v "${VOLUME_NAME}:/data:ro" \
+    -v "${rollback_volume}:/rollback" \
+    alpine:3.20 \
+    sh -c 'cp -a /data/. /rollback/'
+
 log "архив проверен — заменяю содержимое тома $VOLUME_NAME"
+restore_touched_volume=1
+# rm и cp связаны && (не ;): если очистка не завершится успешно, копирование
+# не запустится поверх недочищенного тома, и следующая же команда всё равно
+# провалится через set -e — сработает trap-откат (round 2 ревью PR #36).
 docker run --rm \
     -v "${VOLUME_NAME}:/data" \
     -v "${staging_volume}:/staging:ro" \
     alpine:3.20 \
-    sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null; cp -a /staging/. /data/'
+    sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null && cp -a /staging/. /data/'
+
+docker run --rm -v "${VOLUME_NAME}:/data" alpine:3.20 \
+    test -f /data/store.sqlite3 \
+    || die "после копирования store.sqlite3 не найден в целевом томе — восстановление повреждено."
+log "ok: восстановленный том содержит store.sqlite3"
 
 log "запускаю api и web"
 compose up -d api web
 "$SCRIPT_DIR/wait-healthy.sh"
+
+# Только теперь восстановление подтверждено — trap на выходе script'а не
+# станет откатывать снимок (но всё ещё уберёт staging/rollback тома).
+restore_failed=0
 
 log "восстановление завершено из $archive"

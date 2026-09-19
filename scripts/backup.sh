@@ -51,10 +51,14 @@ docker run --rm \
     tar czf "/backup/$(basename "$archive")" -C /data .
 
 if [[ -n "$api_container" ]]; then
-    trap - EXIT
     log "перезапускаю api"
     compose start api
     "$SCRIPT_DIR/wait-healthy.sh" 60
+    # Trap снимается только теперь: если `compose start`/health-check упадёт
+    # (set -e прервёт скрипт раньше), trap остаётся вооружён и даёт ещё одну
+    # попытку restart — до этой строки его снятие оставило бы api без
+    # повторной попытки (round 2 ревью PR #36).
+    trap - EXIT
 fi
 
 log "готово: $archive ($(du -h "$archive" | cut -f1))"
