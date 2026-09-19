@@ -32,6 +32,7 @@ from src.sources.archive_ingest import (
     ArchiveIngestReport,
     HistoricalArchiveStrategy,
     IngestedInterval,
+    assemble_historical_forecast_input,
     coverage_report_for,
     ingest_donki_notifications,
     ingest_swpc_forecast_discussion,
@@ -451,10 +452,12 @@ def test_a_relevantly_intersecting_late_load_does_not_leak_into_a_pinned_histori
         interval_start=datetime(2024, 5, 16, tzinfo=UTC),
         interval_end=datetime(2024, 6, 1, tzinfo=UTC),
     )
+    computation_id = "test-round4-stitch"
     selected = select_forecast_inputs(db_conn, as_of=as_of, strategy=strategy)
     pinned_before = pin_and_merge_ingested_intervals(
         db_conn,
         [first_report],
+        computation_id=computation_id,
         source_id=DONKI_SOURCE_ID,
         as_of=as_of,
         relevant_message_types=relevant_types,
@@ -511,6 +514,7 @@ def test_a_relevantly_intersecting_late_load_does_not_leak_into_a_pinned_histori
     pinned_after = pin_and_merge_ingested_intervals(
         db_conn,
         [first_report, second_report],
+        computation_id=computation_id,
         source_id=DONKI_SOURCE_ID,
         as_of=as_of,
         relevant_message_types=relevant_types,
@@ -526,6 +530,226 @@ def test_a_relevantly_intersecting_late_load_does_not_leak_into_a_pinned_histori
         as_of=as_of,
     )
     assert after == before
+
+
+def test_pinning_with_no_coverage_yet_freezes_it_against_a_later_load(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    """Round 6 ревью PR #37, finding 1: закрепление обязано произойти и
+    тогда, когда на момент первой оценки для расчёта нет вовсе ни одного
+    интервала покрытия — не только когда покрытие уже частично есть (как в
+    тесте выше). Без этого первая ЖЕ последующая загрузка сама стала бы тем
+    вызовом, который задаёт предел, и уже возвращённая (пустая) оценка
+    оказалась бы не тем, что было зафиксировано для этого расчёта."""
+    as_of = datetime(2024, 6, 5, tzinfo=UTC)
+    window_start = datetime(2024, 5, 31, 12, 0, tzinfo=UTC)
+    window_end = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
+    strategy = _donki_strategy(horizon_hours=6.0)
+    policy = ArchiveProductPolicy.from_config(strategy.product_for(DONKI_SOURCE_ID))
+    relevant_types = strategy.product_for(DONKI_SOURCE_ID).event_message_types
+    computation_id = "test-round6-empty-pin"
+
+    pinned_before = pin_and_merge_ingested_intervals(
+        db_conn,
+        [],
+        computation_id=computation_id,
+        source_id=DONKI_SOURCE_ID,
+        as_of=as_of,
+        relevant_message_types=relevant_types,
+    )
+    assert pinned_before == ()
+    before = assess_archive_window(
+        [],
+        policy=policy,
+        ingested_intervals=_as_coverage_intervals(pinned_before),
+        window_start=window_start,
+        window_end=window_end,
+        as_of=as_of,
+    )
+    assert before.status == "INSUFFICIENT_DATA"
+    assert before.critical_gap is True
+    assert before.coverage_fraction == pytest.approx(0.0)
+
+    # Загрузка ПОСЛЕ первой (пустой) оценки — реально покрывает половину окна.
+    report = ingest_donki_notifications(
+        db_conn,
+        raw_store,
+        (ARCHIVE_DIR / "donki_2024-05-16_2024-05-31.json").read_bytes(),
+        source_url=DONKI_URL,
+        fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+        interval_start=datetime(2024, 5, 16, tzinfo=UTC),
+        interval_end=datetime(2024, 6, 1, tzinfo=UTC),
+    )
+
+    # Контроль: БЕЗ закрепления (обычная склейка) эта загрузка действительно
+    # заполняет половину окна — воспроизводит утечку, которую закрепление
+    # обязано предотвратить.
+    unpinned = merged_ingested_intervals(
+        [report], source_id=DONKI_SOURCE_ID, relevant_message_types=relevant_types
+    )
+    unpinned_after = assess_archive_window(
+        [],
+        policy=policy,
+        ingested_intervals=_as_coverage_intervals(unpinned),
+        window_start=window_start,
+        window_end=window_end,
+        as_of=as_of,
+    )
+    assert unpinned_after.coverage_fraction == pytest.approx(0.5)
+    assert unpinned_after != before
+
+    # С закреплением — тот же computation_id, что и у пустого первого
+    # вызова — предел уже зафиксирован сигнальным значением ДО этой загрузки,
+    # и результат для этого расчёта остаётся прежним: пустым.
+    pinned_after = pin_and_merge_ingested_intervals(
+        db_conn,
+        [report],
+        computation_id=computation_id,
+        source_id=DONKI_SOURCE_ID,
+        as_of=as_of,
+        relevant_message_types=relevant_types,
+    )
+    assert pinned_after == pinned_before == ()
+    after = assess_archive_window(
+        [],
+        policy=policy,
+        ingested_intervals=_as_coverage_intervals(pinned_after),
+        window_start=window_start,
+        window_end=window_end,
+        as_of=as_of,
+    )
+    assert after == before
+
+
+def test_two_independent_computation_ids_do_not_share_a_pinned_cutoff(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    """Round 6 ревью PR #37, finding 3 (⚠️): закрепление ключуется по
+    (``computation_id``, ``source_id``, ``as_of``), а не только по
+    (``source_id``, ``as_of``) — иначе первый расчёт, увидевший эту пару,
+    навсегда решал бы, какое покрытие видят ВСЕ независимые расчёты с тем же
+    ``as_of``, включая те, что могли бы честно увидеть более полный архив.
+
+    Здесь два РАЗНЫХ ``computation_id`` для одной и той же пары
+    (``source_id``, ``as_of``): первый закрепляется по раннему архиву
+    (половина окна), второй — по уже полному архиву (окно целиком). Оба
+    закрепления не мешают друг другу."""
+    as_of = datetime(2024, 6, 5, tzinfo=UTC)
+    window_start = datetime(2024, 5, 31, 12, 0, tzinfo=UTC)
+    window_end = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
+    strategy = _donki_strategy(horizon_hours=6.0)
+    policy = ArchiveProductPolicy.from_config(strategy.product_for(DONKI_SOURCE_ID))
+    relevant_types = strategy.product_for(DONKI_SOURCE_ID).event_message_types
+
+    first_report = ingest_donki_notifications(
+        db_conn,
+        raw_store,
+        (ARCHIVE_DIR / "donki_2024-05-16_2024-05-31.json").read_bytes(),
+        source_url=DONKI_URL,
+        fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+        interval_start=datetime(2024, 5, 16, tzinfo=UTC),
+        interval_end=datetime(2024, 6, 1, tzinfo=UTC),
+    )
+
+    # Расчёт A закрепляется первым, видя только раннюю половину окна.
+    pinned_a = pin_and_merge_ingested_intervals(
+        db_conn,
+        [first_report],
+        computation_id="test-round6-computation-a",
+        source_id=DONKI_SOURCE_ID,
+        as_of=as_of,
+        relevant_message_types=relevant_types,
+    )
+    assessment_a = assess_archive_window(
+        [],
+        policy=policy,
+        ingested_intervals=_as_coverage_intervals(pinned_a),
+        window_start=window_start,
+        window_end=window_end,
+        as_of=as_of,
+    )
+    assert assessment_a.status == "INSUFFICIENT_DATA"
+    assert assessment_a.coverage_fraction == pytest.approx(0.5)
+
+    second_report = ingest_donki_notifications(
+        db_conn,
+        raw_store,
+        (ARCHIVE_DIR / "donki_2024-06-01_2024-06-15.json").read_bytes(),
+        source_url=DONKI_URL,
+        fetched_at=datetime(2026, 6, 1, tzinfo=UTC),
+        interval_start=datetime(2024, 6, 1, tzinfo=UTC),
+        interval_end=datetime(2024, 6, 16, tzinfo=UTC),
+    )
+
+    # Расчёт B — НЕЗАВИСИМЫЙ computation_id, тот же (source_id, as_of),
+    # закрепляется ВПЕРВЫЕ здесь, уже видя архив целиком: не наследует
+    # ограничение расчёта A и не мешает ему задним числом.
+    pinned_b = pin_and_merge_ingested_intervals(
+        db_conn,
+        [first_report, second_report],
+        computation_id="test-round6-computation-b",
+        source_id=DONKI_SOURCE_ID,
+        as_of=as_of,
+        relevant_message_types=relevant_types,
+    )
+    assessment_b = assess_archive_window(
+        [],
+        policy=policy,
+        ingested_intervals=_as_coverage_intervals(pinned_b),
+        window_start=window_start,
+        window_end=window_end,
+        as_of=as_of,
+    )
+    assert assessment_b.status == "NO_EVENT_DETECTED"
+    assert assessment_b.coverage_fraction == 1.0
+
+    # Расчёт A, переспрошенный СНОВА (тот же computation_id) после того, как
+    # B увидел полный архив, — остаётся при своём прежнем, более узком
+    # закреплении: чужой (пусть и более полный) расчёт его не расширяет.
+    pinned_a_again = pin_and_merge_ingested_intervals(
+        db_conn,
+        [first_report, second_report],
+        computation_id="test-round6-computation-a",
+        source_id=DONKI_SOURCE_ID,
+        as_of=as_of,
+        relevant_message_types=relevant_types,
+    )
+    assert pinned_a_again == pinned_a
+
+
+def test_assemble_historical_forecast_input_matches_the_two_calls_it_replaces(
+    db_conn: sqlite3.Connection, raw_store: RawOriginalStore
+) -> None:
+    """Round 6 ревью PR #37, finding 2: ``assemble_historical_forecast_input``
+    — единственная задокументированная точка сборки входа
+    ``historical_forecast`` — обязана давать ровно то же самое, что и ручная
+    сборка из ``select_forecast_inputs`` + ``pin_and_merge_ingested_intervals``
+    по отдельности (эта же ручная сборка проверена в тестах выше), а не
+    какое-то третье поведение."""
+    as_of = datetime(2024, 5, 10, 14, 0, tzinfo=UTC)
+    strategy = _donki_strategy()
+    reports = [_ingest_donki(db_conn, raw_store, "donki_2024-05-01_2024-05-15.json")]
+    computation_id = "test-round6-assemble"
+
+    combined = assemble_historical_forecast_input(
+        db_conn, reports, computation_id=computation_id, as_of=as_of, strategy=strategy
+    )
+
+    expected_records = select_forecast_inputs(db_conn, as_of=as_of, strategy=strategy)
+    expected_intervals = pin_and_merge_ingested_intervals(
+        db_conn,
+        reports,
+        computation_id=computation_id,
+        source_id=DONKI_SOURCE_ID,
+        as_of=as_of,
+        relevant_message_types=strategy.product_for(DONKI_SOURCE_ID).event_message_types,
+    )
+
+    assert set(combined) == {DONKI_SOURCE_ID}
+    donki_input = combined[DONKI_SOURCE_ID]
+    assert donki_input.source_id == DONKI_SOURCE_ID
+    assert list(donki_input.records) == expected_records[DONKI_SOURCE_ID]
+    assert donki_input.ingested_intervals == expected_intervals
 
 
 # ---------------------------------------------------------------------------

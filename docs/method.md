@@ -811,42 +811,66 @@ source_id, relevant_message_types)` — обязательный (без умо�
 отчёта из покрытия целиком — окно внутри него получает `INSUFFICIENT_DATA`
 через обычный `critical_gap`, а не тихо остаётся «полностью прочитанным».
 
-**Покрытие для уже пройденного `as_of` закреплено навсегда** (round 4 ревью
-PR #37). Production orchestration копит отчёты о загрузке по мере того, как
-архив дозагружается — по любому поводу, не обязательно ради конкретного
-`as_of`. Без дополнительной меры карта покрытия для уже вычисленного в
-прошлом `historical_forecast` могла бы задним числом стать полнее и
-превратить `INSUFFICIENT_DATA` в `NO_EVENT_DETECTED` — то есть результат уже
-случившегося строгого прогноза из прошлого незаметно менялся бы от того, что
-произошло (было догружено) СЕГОДНЯ (main-prompt.md §3: «сохранённый
-результат неизменяем»). Поэтому склейка для входа `assess_archive_window`
-идёт не напрямую через `merged_ingested_intervals`, а через
+**Покрытие для уже пройденного `as_of` закреплено навсегда, за конкретным
+расчётом** (round 4/6 ревью PR #37). Production orchestration копит отчёты о
+загрузке по мере того, как архив дозагружается — по любому поводу, не
+обязательно ради конкретного `as_of`. Без дополнительной меры карта покрытия
+для уже вычисленного в прошлом `historical_forecast` могла бы задним числом
+стать полнее и превратить `INSUFFICIENT_DATA` в `NO_EVENT_DETECTED` — то
+есть результат уже случившегося строгого прогноза из прошлого незаметно
+менялся бы от того, что произошло (было догружено) СЕГОДНЯ (main-prompt.md
+§3: «сохранённый результат неизменяем»). Поэтому склейка для входа
+`assess_archive_window` идёт не напрямую через `merged_ingested_intervals`
+(его докстринг явно предупреждает об этом), а через единственную
+задокументированную точку сборки:
 
 ```python
-from src.sources.archive_ingest import pin_and_merge_ingested_intervals
+from src.sources.archive_ingest import assemble_historical_forecast_input
 
-ingested = pin_and_merge_ingested_intervals(
-    conn, reports, source_id=source_id, as_of=as_of,
-    relevant_message_types=policy.event_message_types,
+inputs = assemble_historical_forecast_input(
+    conn, reports, computation_id=computation_id, as_of=as_of, strategy=strategy,
 )
+# {source_id: HistoricalForecastInput(records=..., ingested_intervals=...)}
 ```
 
-Первый вызов для пары (`source_id`, `as_of`) закрепляет предел по
-максимальному `fetched_at` среди уже накопленных на этот момент отчётов
+`computation_id` — обязательный идентификатор КОНКРЕТНОГО расчёта (будущий
+`result_id` production orchestration, либо любой другой идентификатор,
+который вызывающая сторона генерирует заново для каждого независимого
+расчёта). Он существует, чтобы независимые расчёты с одним и тем же `as_of`
+не делили закреплённое состояние между собой (round 6 ревью PR #37,
+finding 3, ⚠️): без него первый же вызов для пары (`source_id`, `as_of`) — в
+том числе случайный или несвязанный с этим конкретным `historical_forecast`
+— необратимо решал бы, какое покрытие увидят ВСЕ последующие независимые
+расчёты с тем же `as_of`, включая те, что могли бы честно увидеть более
+полный архив. Повторный вызов с ТЕМ ЖЕ `computation_id` — идемпотентный
+повтор/ретрай одного и того же расчёта и обязан вернуть тот же результат;
+`tests/sources/test_archive_ingest.py::test_two_independent_computation_ids_do_not_share_a_pinned_cutoff`
+проверяет независимость двух расчётов.
+
+Внутри, для каждого продукта стратегии, `assemble_historical_forecast_input`
+вызывает `src/sources/archive_ingest.py::pin_and_merge_ingested_intervals`
 (`src/store/coverage.py::pin_coverage_cutoff`, таблица
-`archive_coverage_cutoffs`, только `INSERT OR IGNORE`) — навсегда, любой
-последующий вызов с бо́льшим `fetched_at` возвращает то же самое закреплённое
+`archive_coverage_cutoffs`, только `INSERT OR IGNORE`, ключ —
+`(computation_id, source_id, as_of)`). Первый вызов для этого ключа
+закрепляет предел по максимальному `fetched_at` среди уже накопленных на
+этот момент отчётов — **даже если на этот момент отчётов нет вовсе**
+(round 6 ревью PR #37, finding 1: пустое покрытие закрепляется сигнальным
+значением раньше любого реального `fetched_at`, а не остаётся незакреплённым
+до первой содержательной загрузки —
+`tests/sources/test_archive_ingest.py::test_pinning_with_no_coverage_yet_freezes_it_against_a_later_load`).
+Любой последующий вызов с тем же ключом возвращает то же самое закреплённое
 значение. Фильтрация отчётов по этому пределу идёт **до** склейки, а не
 после: склейка берёт `max(fetched_at)` обеих половин соседних интервалов
 (см. выше), и фильтрация уже склеенного результата вычеркнула бы целиком и
-ту часть, что была честно загружена до отсечения. `pin_and_merge_ingested_intervals`
-фильтрует каждый отчёт по его собственному, ещё не тронутому склейкой
-`interval.fetched_at`, и лишь затем склеивает прошедшие фильтр —
+ту часть, что была честно загружена до отсечения —
 `tests/sources/test_archive_ingest.py::test_a_relevantly_intersecting_late_load_does_not_leak_into_a_pinned_historical_result`
-проверяет ровно это на реальных фикстурах, лежащих на стыке двух окон
-загрузки.
+проверяет это на реальных фикстурах, лежащих на стыке двух окон загрузки.
 
 **3. Выборка входа прогноза.**
+
+`assemble_historical_forecast_input` выше — рекомендуемый способ получить и
+записи, и покрытие вместе. Раздельные строительные блоки остаются публичными
+(проверены каждый по отдельности) для случаев, где нужна только одна часть:
 
 ```python
 selected = select_forecast_inputs(conn, as_of=as_of, strategy=strategy)
@@ -869,13 +893,21 @@ selected = select_forecast_inputs(conn, as_of=as_of, strategy=strategy)
 **4. Оценка окна — три состояния.**
 
 ```python
+forecast_input = inputs[source_id]  # из assemble_historical_forecast_input
 assessment = assess_archive_window(
-    selected[source_id],
+    forecast_input.records,
     policy=ArchiveProductPolicy.from_config(strategy.product_for(source_id)),
-    ingested_intervals=[CoverageInterval(start=..., end=..., fetched_at=...)],
+    ingested_intervals=[
+        CoverageInterval(start=i.start, end=i.end, fetched_at=i.fetched_at)
+        for i in forecast_input.ingested_intervals
+    ],
     window_start=..., window_end=..., as_of=...,
 )
 ```
+
+Преобразование `IngestedInterval` (`sources/`) в `CoverageInterval` (`domain/`)
+остаётся ручным на стороне вызывающего — домен не импортирует `sources/`
+(main-prompt.md §8).
 
 `CoverageInterval.fetched_at` — обязательное поле (round 3 ревью PR #37):
 когда этот интервал был реально прочитан. Не участвует в отборе по `as_of`

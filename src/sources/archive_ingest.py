@@ -554,6 +554,18 @@ def merged_ingested_intervals(
     отключило бы всю эту проверку для любого вызова, который забыл его
     передать (main-prompt.md §7 — не молчаливый дефолт для того, что решает
     корректность вывода).
+
+    **Не закреплена по времени загрузки — не использовать напрямую для сборки
+    входа ``historical_forecast``** (round 6 ревью PR #37, finding 2). Эта
+    функция честно склеивает то, что ей передали, СЕЙЧАС — без всякой памяти
+    о том, что было передано при прошлом вызове для того же расчёта. Для
+    строгого прогноза из прошлого нужен :func:`pin_and_merge_ingested_intervals`
+    (предпочтительно через :func:`assemble_historical_forecast_input`), который
+    закрепляет предел ``fetched_at`` за конкретным расчётом и не даёт
+    последующей догрузке архива задним числом изменить уже нарисованную карту
+    покрытия. Прямые вызовы этой функции в тестах ниже намеренно проверяют
+    склейку саму по себе (стык окон загрузки, исключение непронормализованных
+    интервалов) — это не то же самое, что сборка входа расчёта.
     """
     intervals = sorted(
         (
@@ -587,21 +599,57 @@ def merged_ingested_intervals(
     return tuple(merged)
 
 
+#: Заведомо раньше любого реального ``fetched_at`` (реальный конвейер не
+#: читает архив раньше эпохи Unix). Сигнальное значение-кандидат для
+#: :func:`pin_and_merge_ingested_intervals`, когда на момент первой оценки
+#: покрытия для расчёта нет вовсе ни одного отчёта — round 6 ревью PR #37,
+#: finding 1: закрепление обязано произойти и в этом случае, иначе первая ЖЕ
+#: последующая загрузка (с любым, сколь угодно поздним ``fetched_at``) сама
+#: станет тем вызовом, который задаст предел, и уже возвращённая (пустая)
+#: оценка окажется не тем, что было зафиксировано для этого расчёта.
+#: Не ``datetime.min``: ``strftime("%Y")`` на этой платформе не дополняет
+#: год 1 нулями до четырёх цифр (``"1-01-01..."``), и такую строку
+#: ``datetime.fromisoformat`` не разбирает обратно — round-trip через
+#: ``src/store/coverage.py::pin_coverage_cutoff`` (сериализация ``_iso_utc``)
+#: падает. Эпоха Unix форматируется без этой проблемы и всё равно заведомо
+#: раньше любого реального ``fetched_at``.
+_NEVER_FETCHED = datetime(1970, 1, 1, tzinfo=UTC)
+
+
 def pin_and_merge_ingested_intervals(
     conn: sqlite3.Connection,
     reports: Iterable[ArchiveIngestReport],
     *,
+    computation_id: str,
     source_id: str,
     as_of: datetime,
     relevant_message_types: frozenset[str],
 ) -> tuple[IngestedInterval, ...]:
     """Склеивает покрытие для строгого ``historical_forecast``, закрепляя его
-    навсегда для пары (``source_id``, ``as_of``) — round 4 ревью PR #37.
+    навсегда для конкретного расчёта (``computation_id``) — round 4/6 ревью
+    PR #37. Единственный безопасный способ получить ``ingested_intervals``
+    для :func:`src.domain.spaceweather.archive_assessment.assess_archive_window`
+    — предпочтительно через :func:`assemble_historical_forecast_input` ниже,
+    который вызывает эту функцию с одним и тем же ``computation_id`` для всех
+    продуктов расчёта сразу. Прямой вызов :func:`merged_ingested_intervals`
+    для этой цели **не** даёт этой гарантии (см. предупреждение в его
+    докстринге).
 
-    Порядок операций важен и специально в этом порядке:
+    ``computation_id`` обязателен (без умолчания): это идентификатор
+    КОНКРЕТНОГО расчёта, а не пары (``source_id``, ``as_of``) — без него
+    закрепление делили бы между собой любые вызовы с тем же ``as_of``, в том
+    числе случайные и не связанные друг с другом (round 6 ревью, finding 3).
+    Повторный вызов с тем же ``computation_id`` — идемпотентный повтор ТОГО
+    ЖЕ расчёта и обязан вернуть тот же результат; с другим — независимое
+    закрепление.
+
+    Порядок операций внутри важен и специально в этом порядке:
 
     1. закрепить (или прочитать уже закреплённый) предел ``fetched_at`` через
-       :func:`src.store.coverage.pin_coverage_cutoff`;
+       :func:`src.store.coverage.pin_coverage_cutoff` — даже если отчётов для
+       этого продукта пока нет вовсе (тогда кандидат — :data:`_NEVER_FETCHED`,
+       раньше любого реального значения, так что закрепление состоится и
+       навсегда исключит любую последующую загрузку из этого расчёта);
     2. отфильтровать по этому пределу **не склеенные** отчёты о загрузке —
        у каждого свой собственный, ещё не тронутый ``interval.fetched_at``;
     3. только затем склеить прошедшие фильтр отчёты :func:`merged_ingested_intervals`.
@@ -615,17 +663,17 @@ def pin_and_merge_ingested_intervals(
     обязана остаться доверенной. Фильтрация до склейки такой потери не
     допускает: она решает за каждый отчёт отдельно, по его собственному
     времени загрузки.
-
-    Пустой вход не закрепляет предел (закреплять пока нечего) и возвращает
-    пустой кортеж — так же, как :func:`merged_ingested_intervals` на пустых
-    ``reports``.
     """
     same_source = tuple(report for report in reports if report.source_id == source_id)
-    if not same_source:
-        return ()
-    candidate = max(report.interval.fetched_at for report in same_source)
+    candidate = max(
+        (report.interval.fetched_at for report in same_source), default=_NEVER_FETCHED
+    )
     cutoff = pin_coverage_cutoff(
-        conn, source_id=source_id, as_of=as_of, candidate_fetched_at=candidate
+        conn,
+        computation_id=computation_id,
+        source_id=source_id,
+        as_of=as_of,
+        candidate_fetched_at=candidate,
     )
     within_cutoff = tuple(
         report for report in same_source if report.interval.fetched_at <= cutoff
@@ -650,6 +698,13 @@ def select_forecast_inputs(
     здесь добавлен ровно один слой — перебор продуктов, выбранных
     конфигурацией. Отключённый в реестре продукт не выбирается вовсе.
 
+    Только записи — без карты покрытия. Для полного, безопасного входа
+    ``historical_forecast`` (записи **и** закреплённая карта покрытия вместе)
+    предпочитайте :func:`assemble_historical_forecast_input`: раздельный
+    вызов этой функции и ручная сборка покрытия рядом — там, где легко
+    забыть закрепление или перепутать ``relevant_message_types`` между
+    продуктами (round 6 ревью PR #37, finding 2).
+
     Симметричная функция для апостериорной проверки прогноза — **другой
     модуль**: ``src/store/verification.py::select_verification_records``
     (main-prompt.md §1: проверка и вход прогноза не могут быть одной
@@ -662,12 +717,76 @@ def select_forecast_inputs(
     }
 
 
+@dataclass(frozen=True)
+class HistoricalForecastInput:
+    """Полный вход строгого ``historical_forecast`` для одного продукта:
+    записи, пригодные к ``as_of``, и закреплённая (см.
+    :func:`pin_and_merge_ingested_intervals`) карта покрытия, из которой они
+    извлечены — вместе, одним объектом, а не двумя раздельными вызовами,
+    которые легко развести по разным ``computation_id``/``relevant_message_types``
+    и незаметно сломать закрепление (round 6 ревью PR #37, finding 2).
+    """
+
+    source_id: str
+    records: tuple[dict[str, Any], ...]
+    ingested_intervals: tuple[IngestedInterval, ...]
+
+
+def assemble_historical_forecast_input(
+    conn: sqlite3.Connection,
+    reports: Iterable[ArchiveIngestReport],
+    *,
+    computation_id: str,
+    as_of: datetime,
+    strategy: HistoricalArchiveStrategy,
+) -> dict[str, HistoricalForecastInput]:
+    """Единственная задокументированная точка сборки входа
+    ``historical_forecast`` для всех продуктов стратегии сразу — round 6
+    ревью PR #37 (finding 2). Для каждого включённого продукта вызывает
+    :func:`select_forecast_inputs` (один раз на всю стратегию) и
+    :func:`pin_and_merge_ingested_intervals` (с ``event_message_types`` ИМЕННО
+    этого продукта — вызывающей стороне не нужно помнить, что оба вызова
+    обязаны использовать одну и ту же политику релевантных типов) с одним и
+    тем же ``computation_id``.
+
+    ``computation_id`` — обязательный идентификатор КОНКРЕТНОГО расчёта
+    (будущий ``result_id`` production orchestration, либо любой другой
+    идентификатор, который вызывающая сторона генерирует заново для каждого
+    независимого расчёта — main-prompt.md §3, «Пересчёт создаёт новый
+    result_id»). Повторный вызов с тем же ``computation_id`` — идемпотентный
+    повтор/ретрай того же расчёта и обязан вернуть тот же результат.
+
+    Результат — по ``source_id``: готовый :class:`HistoricalForecastInput`.
+    Преобразование ``IngestedInterval`` (``sources/``) в ``CoverageInterval``
+    (``domain/``) остаётся на стороне вызывающего (домен не импортирует
+    ``sources/``, main-prompt.md §8) — см. docs/method.md §9.1, пример.
+    """
+    selected = select_forecast_inputs(conn, as_of=as_of, strategy=strategy)
+    return {
+        product.source_id: HistoricalForecastInput(
+            source_id=product.source_id,
+            records=tuple(selected[product.source_id]),
+            ingested_intervals=pin_and_merge_ingested_intervals(
+                conn,
+                reports,
+                computation_id=computation_id,
+                source_id=product.source_id,
+                as_of=as_of,
+                relevant_message_types=product.event_message_types,
+            ),
+        )
+        for product in strategy.enabled_products
+    }
+
+
 __all__ = [
     "ArchiveConfigError",
     "ArchiveIngestReport",
     "ArchiveProductConfig",
     "HistoricalArchiveStrategy",
+    "HistoricalForecastInput",
     "IngestedInterval",
+    "assemble_historical_forecast_input",
     "coverage_report_for",
     "ingest_donki_notifications",
     "ingest_swpc_forecast_discussion",
