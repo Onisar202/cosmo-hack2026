@@ -48,8 +48,7 @@ def config() -> donki.DonkiSourceConfig:
         max_retries=1,
         backoff_base_seconds=0.0,
         enabled=True,
-        qualifying_message_types=("SEP", "GST"),
-        event_persistence_lookback_hours=24.0,
+        request_lookback_hours=24.0,
     )
 
 
@@ -107,10 +106,16 @@ def test_successful_fetch_stores_records_and_reports_event_time_coverage(
     assert outcome.outcome == "stored"
     assert outcome.stored_record_ids
     # Покрытие заявляется по ВРЕМЕНИ СОБЫТИЯ и с запасом закрывает
-    # запрошенный интервал (запрос идёт по времени ВЫПУСКА, на сутки шире).
-    assert outcome.covered_start is not None and outcome.covered_end is not None
-    assert outcome.covered_start <= INTERVAL_START
-    assert outcome.covered_end >= INTERVAL_END
+    # запрошенный интервал (запрос идёт по времени ВЫПУСКА, на сутки шире;
+    # читаемый интервал события расширен назад на request_lookback_hours).
+    assert outcome.report is not None
+    interval = outcome.report.interval
+    assert interval.start <= INTERVAL_START
+    assert interval.end >= INTERVAL_END
+    assert interval.fetched_at == FETCHED_AT
+    # Отчёт — тот самый provider-agnostic контракт FN-42, который потребляет
+    # оркестрация: шлюз не строит собственной карты покрытия рядом с ним.
+    assert outcome.report.source_id == donki.SOURCE_ID
     assert registry.get(donki.SOURCE_ID).last_success_at == FETCHED_AT
 
 
@@ -179,7 +184,7 @@ def test_fetch_failures_never_become_confirmed_coverage_and_never_leak_the_key(
     outcome = _store(db_conn, raw_store, registry, config, api_key="super-secret")
 
     assert outcome.outcome == expected_outcome
-    assert outcome.covered_start is None and outcome.covered_end is None
+    assert outcome.report is None  # покрытия нет вовсе — не «событий не было»
     assert outcome.stored_record_ids == ()
     assert outcome.message is not None and "super-secret" not in outcome.message
     status = registry.get(donki.SOURCE_ID)
@@ -202,7 +207,7 @@ def test_malformed_response_is_an_error_not_an_empty_archive(
     outcome = _store(db_conn, raw_store, registry, config)
 
     assert outcome.outcome == "error_format"
-    assert outcome.covered_start is None
+    assert outcome.report is None
 
 
 def test_disabled_source_does_not_touch_the_network(
@@ -224,7 +229,7 @@ def test_disabled_source_does_not_touch_the_network(
     outcome = _store(db_conn, raw_store, registry, disabled)
 
     assert outcome.outcome == "skipped_disabled"
-    assert outcome.covered_start is None
+    assert outcome.report is None
 
 
 def test_repeated_fetch_of_the_same_window_does_not_duplicate_records(
@@ -250,7 +255,7 @@ def test_repeated_fetch_of_the_same_window_does_not_duplicate_records(
     assert stored_rows == len(set(first.stored_record_ids))
 
 
-def test_ambiguous_publication_time_is_counted_only_for_qualifying_types(
+def test_ambiguous_publication_time_is_reported_per_message_type(
     monkeypatch: pytest.MonkeyPatch,
     db_conn: sqlite3.Connection,
     raw_store: RawOriginalStore,
@@ -258,9 +263,11 @@ def test_ambiguous_publication_time_is_counted_only_for_qualifying_types(
     config: donki.DonkiSourceConfig,
 ) -> None:
     """Реальный случай расхождения двух полей времени выпуска
-    (``20240516-7D-001``, docs/method.md §6): у уведомления
-    неквалифицирующего типа он не мешает судить о протонных событиях, у
-    квалифицирующего — мешает и обязан быть посчитан."""
+    (``20240516-7D-001``, docs/method.md §6): запись сохраняется, но навсегда
+    непригодна для строгого replay, и её ТИП виден вызывающей стороне —
+    иначе строгая ветка не смогла бы отличить «непригодна запись о протонном
+    событии» от «непригоден еженедельный отчёт» (FN-41,
+    ``ArchiveIngestReport.has_unprovable_publication_of``)."""
     conflicting_report = {
         "messageType": "Report",
         "messageID": "20240516-7D-001",
@@ -285,11 +292,16 @@ def test_ambiguous_publication_time_is_counted_only_for_qualifying_types(
 
     monkeypatch.setattr(donki, "fetch", _fetch_returning([conflicting_report]))
     only_report = _store(db_conn, raw_store, registry, config)
-    assert only_report.ambiguous_publication_count == 0
+    assert only_report.report is not None
+    assert only_report.report.stored_not_replay_eligible == ("20240516-7D-001",)
+    # Для механизма, которому важны только SEP, этот сбой не портит интервал.
+    assert not only_report.report.has_unprovable_publication_of(frozenset({"SEP"}))
 
     monkeypatch.setattr(donki, "fetch", _fetch_returning([conflicting_report, conflicting_sep]))
     with_sep = _store(db_conn, raw_store, registry, config)
-    assert with_sep.ambiguous_publication_count == 1
+    assert with_sep.report is not None
+    assert set(with_sep.report.stored_not_replay_eligible_message_types) == {"Report", "SEP"}
+    assert with_sep.report.has_unprovable_publication_of(frozenset({"SEP"}))
 
 
 def test_request_url_used_for_records_carries_no_key_and_the_declared_range(
@@ -314,11 +326,33 @@ def test_api_key_defaults_to_the_public_demo_key(monkeypatch: pytest.MonkeyPatch
 
 def test_registered_config_is_readable_from_sources_yaml() -> None:
     """Реестр источников — единственный источник истины о порогах и
-    адресах (main-prompt.md §7): значения, на которых работает оценка,
+    адресах (main-prompt.md §7): значения, на которых работает шлюз,
     действительно читаются из файла, а не зашиты в модуле."""
     loaded = donki.load_source_config()
 
     assert loaded.source_id == donki.SOURCE_ID
     assert loaded.url.startswith("https://api.nasa.gov/DONKI/notifications")
-    assert set(loaded.qualifying_message_types) == {"SEP", "GST"}
-    assert loaded.event_persistence_lookback_hours > 0
+    assert loaded.request_lookback_hours > 0
+    assert loaded.connect_timeout_seconds > 0 and loaded.read_timeout_seconds > 0
+
+
+def test_interpretation_thresholds_live_in_the_shared_archive_registry_not_here() -> None:
+    """Ключевое архитектурное требование постановки FN-41: источник
+    космопогоды подключается через ИНТЕРФЕЙС, а спор «DONKI против NOAA» и
+    спор о горизонте в коде не фиксируются.
+
+    Поэтому событийные типы и фактический горизонт читает общий, не знающий
+    про DONKI адаптер (``src/sources/archive_ingest.py``), а не этот
+    коннектор: у :class:`donki.DonkiSourceConfig` таких полей нет вовсе, и
+    двух расходящихся копий реестра существовать не может (main-prompt.md §7).
+    """
+    from src.sources import archive_ingest
+
+    assert not hasattr(donki.load_source_config(), "event_message_types")
+    assert not hasattr(donki.load_source_config(), "forecast_horizon_hours")
+
+    product = archive_ingest.load_archive_product(donki.SOURCE_ID)
+    assert product.event_message_types  # перечень объявлен в реестре
+    # Горизонт объявлен ЯВНО (в том числе явным null = «не установлен») —
+    # значение по умолчанию в коде запрещено (приёмка FN-42 п.5).
+    assert product.forecast_horizon_hours is None or product.forecast_horizon_hours > 0

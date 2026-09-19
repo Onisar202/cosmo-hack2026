@@ -48,6 +48,18 @@ EVENT_FORECAST_REQUEST: dict[str, Any] = {
     "search_window_hours": 8,
     "as_of": "2024-05-11T00:00:00Z",
 }
+#: Тот же выраженный период разбором. EVENT_PRESENT достижим именно здесь:
+#: DONKI выпускает уведомление в момент НАЧАЛА явления, поэтому событие
+#: 2024-05-10T13:35Z попадает ВНУТРЬ окна 12:00–16:00 только когда выборка не
+#: отсечена по публикации. В строгом прогнозе то же событие даёт честное
+#: INSUFFICIENT_DATA с названной причиной (см. тест ниже) — «объявлено, конец
+#: не задокументирован», а не «спокойно».
+EVENT_ANALYSIS_REQUEST: dict[str, Any] = {
+    "mode": "historical_analysis",
+    "start_at": "2024-05-10T12:00:00Z",
+    "duration_hours": 4,
+    "search_window_hours": 8,
+}
 QUIET_ANALYSIS_REQUEST: dict[str, Any] = {
     "mode": "historical_analysis",
     "start_at": "2024-06-20T09:00:00Z",
@@ -111,7 +123,7 @@ def test_both_historical_modes_complete_the_whole_user_path(stage3_app: FastAPI)
             assert stored["mode"] == payload["mode"]
             assert stored["as_of"] == payload.get("as_of")
             assert stored["coverage"]["requested_period_supported"] is True
-            assert stored["orbit"]["source"] == "nasa-iss-oem"
+            assert stored["orbit"]["source"] == "nasa-iss-oem-history"
             assert stored["data_manifest"]  # прослеживаемость до записей
             assert len(stored["windows"]) >= 2
 
@@ -159,8 +171,9 @@ def test_a_pronounced_event_and_a_quiet_control_period_differ_end_to_end(
     пара для экспериментов (main-prompt.md §11): один и тот же режим на двух
     датах даёт разные состояния и разную рекомендацию."""
     with TestClient(stage3_app) as client:
-        event = _run(client, EVENT_FORECAST_REQUEST)
+        event = _run(client, EVENT_ANALYSIS_REQUEST)
         quiet = _run(client, QUIET_ANALYSIS_REQUEST)
+        event_forecast = _run(client, EVENT_FORECAST_REQUEST)
 
     event_sw = _space_weather(event["windows"][0])
     quiet_sw = _space_weather(quiet["windows"][0])
@@ -176,6 +189,19 @@ def test_a_pronounced_event_and_a_quiet_control_period_differ_end_to_end(
     assert quiet_sw["event_state"] == "NO_EVENT_DETECTED"
     assert quiet_sw["status"] == "ok"
     assert quiet_sw["critical_gap"] is False
+
+    # Тот же выраженный период строгим прогнозом: событие объявлено до
+    # отсечения, но его окончание источником не публикуется — «оценить
+    # невозможно» с названной причиной, и ни при каких условиях не
+    # «спокойно» (main-prompt.md §2, §4).
+    event_forecast_sw = _space_weather(event_forecast["windows"][0])
+    assert event_forecast_sw["event_state"] == "INSUFFICIENT_DATA"
+    assert event_forecast_sw["critical_gap"] is True
+    assert any(
+        w["code"] == "space-weather-announced-event-not-closed"
+        and w["severity"] == "critical"
+        for w in event_forecast["warnings"]
+    )
 
     # Окно с подтверждённым событием выводится из автоматического сравнения
     # (правило предпочтения окон, п.1) — но остаётся видимым в результате.
@@ -208,7 +234,7 @@ def test_historical_results_never_carry_modern_elements_or_a_second_result_shape
         historical = _run(client, EVENT_FORECAST_REQUEST)
 
     assert current["orbit"]["source"] == "celestrak"
-    assert historical["orbit"]["source"] == "nasa-iss-oem"
+    assert historical["orbit"]["source"] == "nasa-iss-oem-history"
     assert all(
         entry["source_id"] != "celestrak-gp" for entry in historical["data_manifest"]
     )

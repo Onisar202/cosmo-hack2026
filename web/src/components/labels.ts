@@ -26,6 +26,7 @@ import type {
   MechanismStatus,
   RecommendationStatus,
   RecordKind,
+  SourceAgreement,
   SpaceWeatherEventState,
   WarningSeverity,
 } from '../api/types'
@@ -80,6 +81,25 @@ export const EVENT_STATE_LABELS: Record<SpaceWeatherEventState, LabelSpec> = {
     label: 'архивная событийная линия не применялась',
     tone: 'default',
     icon: BlockIcon,
+  },
+}
+
+/**
+ * FN-41: согласие источников ВНУТРИ механизма. Подписи намеренно не путают
+ * его с расхождением механизмов между собой и не превращают «сравнивать
+ * нечего» в «источники согласны» (main-prompt.md §2).
+ */
+export const SOURCE_AGREEMENT_LABELS: Record<SourceAgreement, LabelSpec> = {
+  CONSISTENT: { label: 'источники согласны', tone: 'success', icon: CheckCircleIcon },
+  CONFLICT: {
+    label: 'конфликт источников — нужна проверка человеком',
+    tone: 'error',
+    icon: ReportProblemIcon,
+  },
+  INSUFFICIENT_DATA: {
+    label: 'согласие источников установить нельзя',
+    tone: 'warning',
+    icon: HelpIcon,
   },
 }
 

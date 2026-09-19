@@ -1,0 +1,92 @@
+# Scenario definitions for the FN-43 (T5) experiment stand.
+#
+# Dates/params live here, not in Python (acceptance criterion 7 —
+# "не должны быть захардкоженными ответами"): experiments/config.py only
+# parses and validates this file; experiments/production.py and
+# experiments/baseline.py read the actual archived records the calculation
+# needs, they do not read the ground-truth fields below at all.
+#
+# Every timestamp is timezone-aware UTC (Z suffix), per .ai/main-prompt.md §1.
+# `duration_hours` is in [1, 8] and `window_b_start - window_a_start` is in
+# [0, 24] (contracts/request.schema.json: duration_hours, search_window_hours).
+#
+# `expected_event` is ONLY a ground-truth label for experiments/metrics.py —
+# it is never read by experiments/production.py or experiments/baseline.py,
+# which must derive their answer solely from the archived records (otherwise
+# the "calculation" would be leaking its own answer, main-prompt.md §9).
+
+scenarios:
+  - name: event
+    description: >
+      AR3664 active region, 2024-05-10..11 (docs/method.md §3,
+      tests/fixtures/sources/archive/README.md). FN-46 round 7 review:
+      as_of must be <= window_a_start (a strict forecast cannot see
+      information published during/after the window it is forecasting) —
+      previously as_of sat after BOTH window starts, so evidence published
+      during window B was wrongly admitted as "forecast". Every real
+      SEP/GST notification for this event is a POINT-IN-TIME detection
+      (Activity ID) published only AFTER its own event moment (tens of
+      minutes to hours of latency — verified against the real archive), so
+      with as_of honestly preceding both windows, no SEP/GST notification
+      about THIS event can be visible yet: the evidence probe correctly
+      reports evidence_missed=true for this run, which is itself the honest
+      finding (DONKI's point-detection latency cannot support a genuine
+      forward forecast) — not a bug to game around. as_of is set just after
+      the two real magnetopause-crossing forecast notices for this same
+      active region, 20240510-AL-011/AL-012 (published 2024-05-10T17:33:04Z
+      / 2024-05-10T17:39:02Z, predicting a crossing at 2024-05-10T18:01Z —
+      genuinely issued BEFORE the event they describe), which DO fall
+      inside window A and so remain visible as archival, non-SEP/GST
+      context. Orbit: still covered by the 2024-05-08 OEM release (useable
+      2024-05-08T12:00Z..2024-05-23T12:00Z), published 2024-05-08T20:28:59Z,
+      well before as_of.
+    mode: historical_forecast
+    as_of: "2024-05-10T17:40:00Z"
+    duration_hours: 6
+    window_a_start: "2024-05-10T17:40:00Z"
+    window_b_start: "2024-05-11T00:00:00Z"
+    expected_event: true
+
+  - name: control
+    description: >
+      Documented quiet period 2024-06-16..27 (docs/method.md §3,
+      main-prompt.md §11): no DONKI SEP/GST notifications in this range at
+      all (verified against the real fixture archive — only routine
+      CME/FLR/Report notifications occur). Windows are still 2024-06-20..21,
+      unambiguously clear of both the SWPC Forecast Discussion archive gap
+      (2024-05-15..2024-06-16) and the 2024-06-28 Kp 7.67 storm that
+      excludes the tail of the documented quiet period. FN-46 round 7
+      review: as_of must be <= window_a_start (previously as_of sat AFTER
+      both windows ended, mislabeling a retrospective analysis as
+      historical_forecast) — as_of is now set to window_a_start itself,
+      2024-06-20T00:00Z, the exact as_of the orbit archive README already
+      documents as selecting the 2024-06-18 OEM release
+      (tests/fixtures/orbit/history/README.md "Пример выбора выпуска по
+      as_of"). Orbit: covered by that 2024-06-18 OEM release (useable
+      2024-06-17T12:00Z..2024-07-02T12:00Z), published 2024-06-18T20:01:19Z,
+      well before as_of.
+    mode: historical_forecast
+    as_of: "2024-06-20T00:00:00Z"
+    duration_hours: 6
+    window_a_start: "2024-06-20T06:00:00Z"
+    window_b_start: "2024-06-21T06:00:00Z"
+    expected_event: false
+
+  - name: missing_data
+    description: >
+      Pre-selected, proven archival gap: both windows fall strictly between
+      the 2024-05-12 OEM release's useable interval end (2024-05-25T12:00Z)
+      and the 2024-06-14 OEM release's useable interval start
+      (2024-06-14T12:00Z) — verified against
+      tests/fixtures/orbit/history/README.md. No OEM release covers this
+      interval regardless of as_of, so
+      src.sources.orbit.select_oem_elements_for_request genuinely raises
+      HistoricalElementsUnsupportedError. Not knowable/not the point of this
+      scenario whether a space-weather event happened here — the point is
+      the orbit archival gap.
+    mode: historical_forecast
+    as_of: "2024-05-28T00:00:00Z"
+    duration_hours: 6
+    window_a_start: "2024-05-28T00:00:00Z"
+    window_b_start: "2024-05-28T18:00:00Z"
+    expected_event: null

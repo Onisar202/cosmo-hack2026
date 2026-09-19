@@ -43,7 +43,13 @@ FN-28 (S1-10) собирает текущие API/UI/SQLite в единое ра
 подробности там же и в `docs/method.md` §7.5). FN-36 (S2-06, этап 2)
 реализует слой выгрузки (`src/export/`): машиночитаемый JSON и читаемый
 HTML строятся только из одного уже сохранённого результата — см. раздел
-«Выгрузка» ниже.
+«Выгрузка» ниже. FN-43 (S3-05, этап 3) добавляет стенд экспериментов Т5
+(`experiments/`) — сравнение production-метода (те же доменные/source-модули,
+что и `mode=current`, применённые к `mode=historical_forecast` напрямую, без
+`src/api/service.py`) с простым базовым методом на выраженном событии
+(10–11 мая 2024), контрольном спокойном периоде (16–27 июня 2024) и заранее
+доказанном архивном пробеле орбиты — см. раздел «Стенд экспериментов Т5
+(FN-43)» ниже и `docs/method.md` §9.
 
 ## Стек
 
@@ -735,7 +741,7 @@ shapes для S1-07»; тонкие роутеры — `src/api/routes.py`, вс
 на каждый пересчёт) и обе выгрузки — те же самые, что у `mode=current`;
 параллельной сборки отчёта не появилось.
 
-- **Орбита — только NASA TOPO OEM.** `result.orbit.source = "nasa-iss-oem"`,
+- **Орбита — только NASA TOPO OEM.** `result.orbit.source = "nasa-iss-oem-history"`,
   `coordinate_system = EME2000`, `elements_epoch` = `CREATION_DATE` выпуска,
   `elements_age_hours` — его давность относительно `as_of` (строгий режим)
   или начала интересующего окна (разбор), не относительно реального
@@ -745,27 +751,76 @@ shapes для S1-07»; тонкие роутеры — `src/api/routes.py`, вс
   конфигурации интерполируется по узлам выпуска
   (`hermite-cubic-per-axis-v1`), непокрытые узлы честно остаются
   непокрытыми (экстраполяция запрещена) и попадают в `limitations`.
-- **Космопогода — архивная СОБЫТИЙНАЯ линия** (`src/sources/donki.py` +
-  чистый `src/domain/spaceweather/historical_events.py`): у неё нет ни
-  измеренной величины, ни вероятности — только `event_state` ∈
-  `EVENT_PRESENT` / `NO_EVENT_DETECTED` / `INSUFFICIENT_DATA` (новое
-  обязательное поле контракта, FN-41) и ссылки на конкретные уведомления.
-  `NO_EVENT_DETECTED` заявляется только при ПОДТВЕРЖДЁННОМ покрытии архива
-  на нужный интервал (тогда `status = ok`, `max_level = background`,
-  нулевые `exceedance_hours_by_level` — вывод из того, что DONKI выпускает
-  уведомление SEP при каждом пересечении порога 10 pfu, то есть порога S1
-  шкалы NOAA); молчание источника, отказ получения и неразрешимое время
-  публикации дают `INSUFFICIENT_DATA` с `critical_gap = true`, а не
-  «событий не было». `EVENT_PRESENT` даёт `status = qualitative_only`:
-  событие подтверждено, но уровень и длительность по этой линии не
-  восстанавливаются — окно выводится из автоматического сравнения и несёт
-  критическое предупреждение со ссылками на записи. Связанные уведомления
-  одной активности схлопываются в один вклад (main-prompt.md §4).
-- **Строгий режим и горизонт.** Для окна целиком после отсечения
-  событийная линия честно даёт `beyond_horizon` + `INSUFFICIENT_DATA`: DONKI
-  публикует уведомление в момент НАЧАЛА события и прогнозным продуктом не
-  является, поэтому «спокойно» по ней о будущем окне сказать нельзя в
-  принципе (main-prompt.md §4). Это видно и в `coverage.archive_gaps`.
+- **Космопогода — архивные линии через ОДИН provider-agnostic интерфейс.**
+  Разделение обязанностей после слияния FN-42 в `main`:
+  `src/sources/archive_probe.py` разбирает и нормализует ответ (FN-23);
+  `src/sources/archive_ingest.py` пишет записи в хранилище, ведёт карту
+  доказанно прочитанных интервалов и делает строгую выборку по `as_of`,
+  закрепляя вход снимком (`src/store/forecast_snapshot.py`, FN-42);
+  `src/domain/spaceweather/archive_assessment.py` интерпретирует (FN-42);
+  `src/sources/donki.py` — ТОЛЬКО сетевой шлюз поверх них (HTTP, таймауты,
+  429, ключ API и его маскирование, статус источника). Собственного
+  парсера, собственной записи в хранилище и собственной интерпретации у
+  шлюза нет — двух конкурирующих коннекторов к DONKI в репозитории не
+  существует (main-prompt.md §7: реестр `sources.yaml` — единственный
+  источник истины). Перечень участвующих линий —
+  `src/api/service.py::HISTORICAL_ARCHIVE_SOURCE_IDS`; событийные типы и
+  фактический горизонт КАЖДОЙ линии берутся из её записи реестра
+  (`event_message_types`, `forecast_horizon_hours`), поэтому спор «DONKI
+  против числового прогноза NOAA» и спор о горизонте (6 ч против 24 ч) в
+  коде не зафиксированы и закрываются правкой `sources.yaml`.
+
+  У этих линий нет ни измеренной величины, ни вероятности — только
+  `event_state` ∈ `EVENT_PRESENT` / `NO_EVENT_DETECTED` /
+  `INSUFFICIENT_DATA` (обязательное поле контракта, FN-41) и ссылки на
+  конкретные записи. `NO_EVENT_DETECTED` заявляется только при
+  ПОДТВЕРЖДЁННОМ покрытии архива на нужный интервал (тогда `status = ok`,
+  `max_level = background`, нулевые `exceedance_hours_by_level` — вывод из
+  того, что DONKI выпускает уведомление SEP при каждом пересечении порога
+  10 pfu, то есть порога S1 шкалы NOAA); молчание источника, отказ
+  получения и неразрешимое время публикации дают `INSUFFICIENT_DATA` с
+  `critical_gap = true`, а не «событий не было». `EVENT_PRESENT` даёт
+  `status = qualitative_only`: событие подтверждено, но уровень и
+  длительность по этой линии не восстанавливаются — окно выводится из
+  автоматического сравнения и несёт критическое предупреждение со ссылками
+  на записи.
+- **Согласие источников внутри механизма (`source_agreement`, FN-41).**
+  `CONSISTENT` / `CONFLICT` / `INSUFFICIENT_DATA` плюс
+  `source_assessments` — оценка КАЖДОЙ линии как есть, рядом, без молчаливого
+  выбора одной из них. Это конфликт ИСТОЧНИКОВ внутри одного механизма, а не
+  расхождение МЕХАНИЗМОВ между собой: последнее по-прежнему разбирает
+  правило предпочтения окон (`src/domain/windows`), никакого нового
+  ранжирования критичности не добавлено. `CONFLICT` выводит окно из
+  автоматического сравнения (`critical_gap = true` — это же требует и схема)
+  и порождает критическое предупреждение `space-weather-source-conflict`:
+  «нужна проверка человеком» выражается уже существующим словарём контракта,
+  отдельного статуса `CHECK_REQUIRED` в `recommendation.status` не заводилось
+  (это вышло бы за перечень целевых файлов задачи). Свежесть/устаревание
+  отслеживаются отдельно, в `source_status`. Для `mode=current`
+  `source_agreement` всегда `INSUFFICIENT_DATA` с явным пояснением: наблюдение
+  GOES (уровень) и суточная вероятность NOAA 3-Day несопоставимы без
+  подобранного порога «с какой вероятности событие считается объявленным»,
+  а подбирать пороги main-prompt.md §4 запрещает.
+- **Строгий режим и горизонт.** Фактический горизонт каждой линии объявлен в
+  `sources.yaml` (`forecast_horizon_hours`; у событийного архива он честно
+  `null` — «не установлен»), поэтому часть окна после отсечения получает
+  `beyond_horizon` + `INSUFFICIENT_DATA`: «не покрыто», а не «спокойно»
+  (main-prompt.md §4). Это видно и в `coverage.archive_gaps`.
+- **Уже объявленное, но не закрытое событие.** DONKI публикует уведомление в
+  момент НАЧАЛА явления и НЕ публикует момента окончания (`open_ended`).
+  Поэтому окно, начинающееся после такого уведомления, получает
+  `INSUFFICIENT_DATA` с НАЗВАННОЙ причиной и критическим предупреждением
+  `space-weather-announced-event-not-closed` — «продолжалось ли явление,
+  неизвестно», а не «спокойно» и не придуманная длительность события. Чтобы
+  такое явление вообще попало в прочитанный интервал, шлюз расширяет
+  запрашиваемый период назад на `archive_request_lookback_hours` из реестра
+  (свойство ПОЛУЧЕНИЯ, не горизонт прогноза). Следствие: в строгом
+  `historical_forecast` состояние `EVENT_PRESENT` недостижимо по построению
+  (событие внутри окна было бы объявлено уже после `as_of`), и это честное
+  свойство источника, а не пробел реализации; `EVENT_PRESENT` достижим в
+  `historical_analysis` — см. тесты
+  `tests/api/test_requests.py::test_historical_analysis_reaches_event_present_on_the_may_2024_event`
+  и `::test_historical_forecast_after_an_announced_event_is_never_reported_as_quiet`.
 - **Отказ вместо выдумки.** Когда пригодного исторического выпуска нет,
   задача завершается ИМЕНОВАННЫМ кодом
   (`historical_orbit_archive_gap`, `historical_orbit_source_error`,
@@ -774,10 +829,11 @@ shapes для S1-07»; тонкие роутеры — `src/api/routes.py`, вс
   орбитой.
 - **Что осознанно осталось за рамками FN-41** (вопросы прямо оставлены
   открытыми постановкой задачи): какая архивная линия космопогоды
-  основная — DONKI или NOAA SWPC Forecast Discussion (DONKI выбран как
-  единственная с полным покрытием периода: у линии NOAA подтверждённый
-  пробел 15.05–16.06.2024 — это решение реализации, не итоговый
-  архитектурный ответ); горизонт собственного прогноза (6 ч против 24 ч);
+  основная — DONKI или NOAA SWPC Forecast Discussion (обе зарегистрированы и
+  обе проходят через один интерфейс; фактические записи сейчас есть только у
+  DONKI — у линии NOAA подтверждённый пробел 15.05–16.06.2024 и нет шлюза
+  загрузки, поэтому она честно даёт `INSUFFICIENT_DATA` и это видно в
+  `source_assessments`); горизонт собственного прогноза (6 ч против 24 ч);
   любая дополнительная ранжировка критичности сверх правила доминирования.
   Технически не сделаны: фоновая предзагрузка всего обязательного периода
   (DONKI грузится по требованию на окна конкретного расчёта, журнала уже
@@ -882,6 +938,77 @@ main-prompt.md §9 п.7, backend-prompt.md §2): каждая фоновая з�
   HTML и структурно идентичный JSON — `result_id` и данные не меняются
   (`tests/export/`, `tests/api/test_export.py`).
 
+## Стенд экспериментов Т5 (`experiments/`, FN-43)
+
+Минимальный, честный стенд сравнения production-метода с наивным базовым
+методом на трёх сценариях (выраженное событие / контрольный период /
+доказанный архивный пробел) — критерий Т5. Полностью офлайн: читает только
+уже закоммиченные фикстуры (`tests/fixtures/sources/archive/`,
+`tests/fixtures/orbit/history/`) и уже забандленный документ NASA MEO
+(`src/sources/data/mmod/...`), не ходит в сеть.
+
+- **`experiments/production.py`** строит `CalculationResult`
+  (`contracts/result.schema.json`) для `mode="historical_forecast"`
+  напрямую из уже слитых доменных/source-модулей этого репозитория
+  (`src/sources/orbit_history.py`/`orbit.py`, `src/sources/mmod.py`,
+  `src/domain/mmod/background.py`, `src/domain/windows`) — теми же
+  модулями, что и `mode="current"` в `src/api/service.py`, но НЕ вызывая
+  этот модуль (его `mode != "current"` путь сейчас поднимает
+  `historical_mode_not_implemented`: FN-41/FN-42 — отдельные, ещё не
+  слитые задачи production-оркестрации и строгого архивного провайдера
+  космопогоды). `mechanisms[*space_weather]` в этом стенде честно всегда
+  `status="missing_data"` — в репозитории нет архивного количественного
+  наблюдения потока протонов (только живой `noaa-swpc-proton-flux`,
+  никогда не `replay_eligible`), а придумывать DONKI→шкала-S классификацию
+  значило бы подменить отсутствующую интеграцию фиктивным успехом
+  (main-prompt.md §2) — это прямо демонстрирует критерий О2 «без
+  необоснованных заявлений» и даёт честный `recommendation.status =
+  "all_windows_excluded"` по правилу критического пробела
+  (main-prompt.md §11, п.1). MMOD (`mmod`), напротив, реально `status="ok"`
+  — годовой документ NASA MEO 2024 покрывает весь обязательный период.
+- **`experiments/donki_evidence.py`** — архивная evidence-проба DONKI (**не
+  шкала S NOAA**, только факт публикации предупреждения архива,
+  пересекающегося с окном, известного к `as_of` через уже протестированный
+  `select_as_of`) — используется исключительно для сравнения с базовым
+  методом и метрик, никогда не создаёт `mechanismAssessment.status="ok"`.
+- **`experiments/baseline.py`** — наивный базовый метод (main-prompt.md
+  §11: последнее известное наблюдение переносится на весь горизонт без
+  расчёта пересечений), структурно независимый от `production.py`/
+  `donki_evidence.py` (проверено `tests/experiments/test_baseline_independence.py`
+  через `ast`-анализ импортов).
+- **`experiments/metrics.py`** — `event_miss`, `false_warning`,
+  `selected_window_change`, `coverage`; `lead_time`/`stability` честно не
+  вычисляются — DONKI-уведомления точечные, не непрерывный количественный
+  ряд (см. `lead_time_stability_note` в каждом `metrics.json`).
+
+### Запуск
+
+```bash
+uv run python -m experiments.run --config experiments/scenarios.yaml --out experiments/out
+```
+
+Детерминировано (`result_id`/`computed_at`/`record_id` — не `uuid4()`/
+`datetime.now()`, см. `experiments/run.py`/`experiments/determinism.py`):
+повторный прогон даёт побайтово идентичные JSON-артефакты. Для каждого
+сценария (`experiments/out/<scenario>/`):
+
+- `baseline_result.json` — свой вердикт базового метода по каждому окну,
+  с трассировкой к использованному уведомлению DONKI;
+- `production_result.json` (когда орбита пригодна) — провалидирован по
+  `contracts/result.schema.json`, плюс `production_result_export.json`/
+  `production_result.html` — тот же результат через реальные
+  `src/export/json_export.py`/`html_export.py` (приёмка О4/критерий Т8);
+- `production_failure.json` (только `missing_data`) — структурная,
+  машиночитаемая причина отказа отбора орбиты (`HistoricalElementsUnsupportedError`)
+  и почему это корректный исход, а не баг;
+- `metrics.json` — метрики сценария.
+
+Сводная таблица и честные выводы — `experiments/out/summary.md`, собирается
+программно из уже посчитанных метрик (не независимое утверждение поверх
+них). `experiments/out/` — воспроизводимый вывод прогона (`.gitignore`), в
+репозиторий не коммитится; конкретные цифры реального прогона, на которых
+основаны выводы `docs/method.md` §9, зафиксированы дословно там же.
+
 ## Структура проекта
 
 Полное описание слоёв и границ между ними — `.ai/main-prompt.md`, §8.
@@ -903,17 +1030,28 @@ sources.yaml    # Реестр источников (main-prompt.md §7): space_
                 # nasa-donki-notifications, noaa-swpc-forecast-discussion-archive,
                 # noaa-swpc-3day-forecast[-archive]),
                 # sources (celestrak-gp, space-track-gp-history, MMOD)
+docker/
+└── nginx.conf.template  # Реверс-прокси web -> api, envsubst по env (FN-45)
+scripts/        # Preflight/deploy/upgrade/rollback/backup/restore/smoke (FN-45,
+                # раздел «Развёртывание» → «Production-профиль»)
+experiments/    # Стенд Т5 (FN-43): production.py/baseline.py/donki_evidence.py/metrics.py/
+                # run.py/config.py/fixtures.py/determinism.py, scenarios.yaml, out/ (артефакты)
 docs/
 ├── mechanisms.md  # Обоснование MMOD (FN-25)
 └── method.md      # Пригодность архивов космопогоды для строгого replay (FN-23);
-                   # §7 — NOAA 3-Day Forecast S1+ (FN-31)
+                   # §7 — NOAA 3-Day Forecast S1+ (FN-31); §9 — стенд Т5 (FN-43)
 tests/
-├── api/        # test_requests.py, test_isolation.py (S1-07), test_export.py (FN-36)
+├── api/        # test_requests.py, test_isolation.py (S1-07), test_export.py (FN-36),
+│               # test_cors.py (FN-45)
+├── config/     # test_settings.py — CORS_ALLOWED_ORIGINS parsing (FN-45)
 ├── sources/    # test_swpc.py, test_archive_publication.py, test_noaa_3day_forecast.py +
 │               # fixtures/sources/{swpc,archive}/ (сохранённые реальные ответы),
 │               # fixtures/sources/noaa_3day_forecast/synthetic/ (явно синтетические, FN-31)
 ├── domain/spaceweather/  # test_external_forecast.py (FN-31)
 ├── export/     # test_json_export.py, test_html_export.py, test_boundaries.py (FN-36)
+├── experiments/  # test_leak.py, test_config_driven.py, test_determinism.py,
+│               # test_artifact_shape.py, test_missing_data.py,
+│               # test_baseline_independence.py, test_metrics.py (FN-43)
 ├── orbit/      # test_propagation.py
 ├── fixtures/orbit/  # TLE-фикстуры и независимый эталон SGP4 verification
 ├── store/      # test_versions.py, test_as_of.py
@@ -923,13 +1061,15 @@ tests/
 Слой `web/` (React + TypeScript + Vite) — зона ответственности 4, описан в
 `web/README.md`; вне объёма этой (backend) задачи.
 
-## Развёртывание (FN-28, S1-10)
+## Развёртывание (FN-28/S1-10, доведено до production-профиля FN-45)
 
 Одна команда поднимает уже существующие слои — API (`src/api/`), UI
 (`web/`) и постоянное хранилище SQLite — как единый стек: `Dockerfile`
 (цели `api`, `web` — см. комментарии в файле) и `compose.yaml` не добавляют
 новой логики, только упаковывают то, что описано в разделах выше
-(.ai/main-prompt.md §8: контейнеры — упаковка, не слой сервиса).
+(.ai/main-prompt.md §8: контейнеры — упаковка, не слой сервиса). Раздел
+«Production-профиль (FN-45)» ниже — то же самое плюс площадка/reverse
+proxy/CORS переменными окружения и команды эксплуатации.
 
 ### Запуск
 
@@ -1089,12 +1229,154 @@ CelesTrak и NOAA SWPC. `tests/integration/test_stage1.py` прошёл 5/5,
 Публичное развёртывание по-прежнему не проверено: согласованная площадка и
 публичный URL не предоставлены, localhost за доступ жюри не выдаётся.
 
+### Production-профиль (FN-45)
+
+Тот же `Dockerfile`/`compose.yaml`, что и в разделе выше (S1-10), доведён до
+состояния «проверяемый production deployment profile»: после выбора
+площадки публичный URL поднимается настройкой окружения, без правки
+исходников и без пересборки образа ради каждого нового домена/порта.
+Персистентность (`api-data`) и оба healthcheck из раздела выше не менялись
+и остаются частью этого же профиля.
+
+#### Площадка/reverse proxy/CORS — переменными окружения, без пересборки
+
+Ниже — интерполяция `docker compose` из `.env` (`cp .env.example .env`,
+compose подхватывает `.env` рядом с `compose.yaml` автоматически), не
+переменные окружения контейнера напрямую. Без `.env` все значения по
+умолчанию воспроизводят локальный стек из раздела выше — ни одна из них не
+обязательна для `docker compose up`.
+
+| Переменная | По умолчанию | Что делает |
+| --- | --- | --- |
+| `API_PORT` | `8000` | порт API на хосте |
+| `WEB_PORT` | `8080` | порт UI (nginx) на хосте |
+| `CORS_ALLOWED_ORIGINS` | пусто | origin через запятую; пусто — `CORSMiddleware` не подключается вовсе (UI и API на одном origin через nginx-прокси, `src/config.py:Settings.cors_origins`, `src/api/app.py`). Нужна, только если UI обращается к API напрямую с другого домена |
+| `API_UPSTREAM` | `api:8000` | куда nginx проксирует `/api`/`/health` (`docker/nginx.conf.template`) |
+| `NGINX_SERVER_NAME` | `_` | `server_name` nginx — сюда подставляется публичный домен площадки |
+
+`API_UPSTREAM`/`NGINX_SERVER_NAME` рендерятся в `/etc/nginx/conf.d/default.conf`
+встроенным `docker-entrypoint` образа `nginx:1.27-alpine` (`envsubst` по
+шаблону `docker/nginx.conf.template`) при каждом старте контейнера `web` —
+домен/upstream площадки меняется рестартом контейнера, не пересборкой
+образа. Секреты (учётные данные Space-Track и т. п., когда появятся вместе
+с коннектором `space-track-gp-history`) — туда же, в `.env`/окружение
+хоста, никогда не в `compose.yaml` и не в образ (main-prompt.md §7).
+
+#### Preflight и команды эксплуатации
+
+```bash
+scripts/preflight.sh   # проверка чистого окружения ДО up: docker/compose,
+                        # .env игнорируется git, docker compose config
+                        # валиден, порты хоста свободны — понятная ошибка
+                        # вместо непрозрачного отказа контейнера
+scripts/deploy.sh       # preflight + build + up -d + ожидание healthy
+scripts/upgrade.sh [ref] # git fetch + checkout + build + up -d + smoke;
+                          # печатает коммит ДО обновления для отката
+scripts/rollback.sh <ref> # откат на известный git-ref + build + up -d + smoke
+scripts/backup.sh [каталог]        # tar.gz тома api-data (SQLite + raw originals)
+scripts/restore.sh <архив> [--yes] # ДЕСТРУКТИВНО заменяет том содержимым архива
+scripts/smoke.sh        # чеклист ниже, curl+jq, без uv/pytest
+```
+
+`upgrade.sh`/`rollback.sh` не трогают именованный том `api-data` (пересборка
+образов на него не влияет — том живёт отдельно от контейнеров) и
+останавливаются на первой ошибке `set -euo pipefail`, а не продолжают
+частично применённое изменение.
+
+#### Smoke-чеклист (`scripts/smoke.sh`)
+
+Дополняет (не заменяет) `tests/integration/test_stage1.py` выше тем же
+путём, но зависимостями только для хоста площадки (`curl`, `jq` — не
+`uv`/Python) и добавляет проверку JSON/HTML export:
+
+1. `GET /health` — `status: ok`;
+2. `POST /api/calculations` (`mode=current`) — создание расчёта;
+3. опрос `GET /api/calculations/{task_id}` до терминального статуса;
+4. `GET /api/results/{result_id}` — сохранённый результат;
+5. `GET /api/results/{result_id}/export.json` — `result_id` совпадает;
+6. `GET /api/results/{result_id}/export.html` — содержит тот же `result_id`;
+7. `docker compose restart api` (если стек локальный) — результат
+   побайтово тот же после перезапуска.
+
+Отказ реального источника (CelesTrak/NOAA SWPC недоступны из сети площадки)
+— это `SMOKE PARTIAL` с честной причиной, а не `SMOKE PASSED`/тихий
+пропуск: тот же принцип «отказ источника не выдаётся за благоприятную
+оценку» (main-prompt.md §2), применённый к самой проверке эксплуатации, а
+не только к расчёту. Любой другой код ошибки задания — жёсткий `SMOKE
+FAILED` (дефект развёртывания/сервиса, не сети).
+
+```bash
+SMOKE_BASE_URL=https://vkd-risk.example.org scripts/smoke.sh   # публичный URL
+SMOKE_COMPOSE_CMD= scripts/smoke.sh                              # без шага restart
+```
+
+#### Минимальные ресурсы и исходящий доступ
+
+- `api`: практически весь расчёт (SGP4 на интервал до 32 часов) — миллисекунды
+  CPU; основная нагрузка — сетевые обращения к источникам
+  (main-prompt.md §6). Ориентир для площадки: ~0.5 vCPU, 512 МБ RAM, том
+  под `/app/data` растёт с числом сохранённых расчётов и оригиналов
+  источников (единицы–десятки МБ на расчёт).
+- `web` (nginx + статика): ~0.1 vCPU, 128 МБ RAM.
+- Исходящий доступ (HTTPS/443) нужен контейнеру `api` к хостам включённых
+  источников `sources.yaml` — на этом этапе: `celestrak.org`,
+  `services.swpc.noaa.gov`, `www.ngdc.noaa.gov`, `api.nasa.gov` (DONKI),
+  `nasa-public-data.s3.amazonaws.com`, `ntrs.nasa.gov`. `www.space-track.org`
+  добавится вместе с коннектором `space-track-gp-history` (требует
+  учётных данных, на этом этапе не подключён). Входящий доступ — только
+  порты `API_PORT`/`WEB_PORT` (или то, что перед ними поставит площадка —
+  публичный reverse proxy/балансировщик с TLS, который эта задача не
+  предполагает и не покупает, см. «Доступ жюри» ниже).
+
+#### Что не проверено в этом PR (честно, main-prompt.md §1)
+
+`docker compose build`/`up` и оба healthcheck **не выполнены живьём** в
+сессии, готовившей этот PR: исходящий доступ к `registry-1.docker.io`/
+`production.cloudfront.docker.com` для базовых образов (`python:3.11-slim`,
+`node:22-slim`, `nginx:1.27-alpine`) был запрещён политикой egress
+песочницы (`403 Forbidden`, не устранимая обходом — не повторялась).
+Вместо этого в этой же сессии проверено статически:
+
+- `docker compose config` — валидна интерполяция всех переменных выше на
+  чистом окружении (без `.env`, только значения по умолчанию);
+- рендеринг `docker/nginx.conf.template` через `envsubst` (тот же механизм,
+  что и встроенный nginx `docker-entrypoint`) — совпадает с прежним
+  статическим конфигом при пустом окружении и корректно подставляет
+  `API_UPSTREAM`/`NGINX_SERVER_NAME` при заданных;
+- полный `uv run ruff check . && uv run mypy src && uv run pytest` —
+  зелёный, включая новые тесты `tests/config/test_settings.py`,
+  `tests/api/test_cors.py`.
+
+Перед приёмкой критерия 1 (`docker compose config/build/up и оба
+healthcheck проходят на чистом окружении`) нужен реальный прогон
+`scripts/deploy.sh && scripts/smoke.sh` на хосте с доступом к Docker Hub —
+как это уже было сделано для FN-37 (см. «Известное ограничение окружения
+сборки» выше, тот же прогон применим и здесь: конфигурация healthcheck и
+именованного тома не менялась, изменились только шаблонизация nginx и
+переменные окружения compose).
+
 ### Доступ жюри
 
 Согласованной площадки и секретов для внешнего (публичного) развёртывания
-на этом этапе нет — команда не покупала хостинг ради одной задачи каркаса.
-Внешний deploy этой задачей осознанно **не выполняется**: этот README не
-выдаёт `http://localhost:8080` за URL, доступный жюри, — это адрес
-локального стека, поднятого по инструкции выше на машине того, кто его
-запустил. Публичный доступный URL — предмет отдельной задачи, когда
-согласованная площадка и секреты появятся.
+на этом этапе всё ещё нет — эта задача **готовит профиль**, а не покупает
+хостинг и не выполняет публичный acceptance (зависимость FN-41/FN-42,
+задача этой же итерации). Три разных утверждения, которые эта задача не
+путает:
+
+- **local verified** — то, что реально запущено и проверено: `uv run
+  pytest`/`ruff`/`mypy` зелёные (включая эту задачу), `docker compose
+  config` валиден, `tests/integration/test_stage1.py` и
+  `web/tests/stage1.spec.ts` проходили на контрольном прогоне FN-37
+  (раздел выше) на прежней (докerfile/nginx.conf) версии профиля.
+- **deployment-ready** — то, что добавляет эта задача: production-профиль
+  (переменные окружения площадки/CORS/reverse proxy, `scripts/`
+  deploy/upgrade/rollback/backup/restore/smoke, preflight с понятной
+  ошибкой) существует и готов к использованию, но живой `docker compose
+  build/up` на этом профиле не прогонялся в этой сессии (см. раздел выше)
+  — это открытый пункт для ревью/приёмки, не «сделано».
+- **publicly deployed** — **не выполнено**. `http://localhost:8080` не
+  выдаётся за URL, доступный жюри: это адрес локального стека на машине
+  того, кто его запустил. Публичный URL и независимая проверка — после
+  появления согласованной площадки (FN-41/FN-42); этой задачей остаётся
+  **только** provision/env/DNS/TLS/smoke по инструкции выше — без правки
+  бизнес-кода.

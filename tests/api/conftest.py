@@ -226,7 +226,7 @@ def wait_for_job(
     while time.monotonic() < deadline:
         response = client.get(f"/api/calculations/{task_id}")
         assert response.status_code == 200
-        body = response.json()
+        body: dict[str, Any] = response.json()
         if body["status"] in ("done", "failed"):
             return body
         time.sleep(0.01)

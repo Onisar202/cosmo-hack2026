@@ -108,16 +108,16 @@ def test_repeated_export_is_deterministic_and_does_not_change_stored_data(
 
 
 HISTORICAL_CASES: dict[str, dict[str, Any]] = {
-    # Выраженное событие периода (10–11 мая 2024, AR3664) строгим режимом —
-    # EVENT_PRESENT; контрольный спокойный период (16–27 июня) разбором —
+    # Выраженное событие периода (10 мая 2024, AR3664) разбором —
+    # EVENT_PRESENT (протонное событие 13:35Z попадает внутрь окна
+    # 12:00–16:00); контрольный спокойный период (16–27 июня) разбором —
     # NO_EVENT_DETECTED; тот же спокойный период строгим режимом —
     # INSUFFICIENT_DATA («не покрыто» за отсечением).
     "EVENT_PRESENT": {
-        "mode": "historical_forecast",
-        "start_at": "2024-05-11T00:00:00Z",
+        "mode": "historical_analysis",
+        "start_at": "2024-05-10T12:00:00Z",
         "duration_hours": 4,
         "search_window_hours": 8,
-        "as_of": "2024-05-11T00:00:00Z",
     },
     "NO_EVENT_DETECTED": {
         "mode": "historical_analysis",

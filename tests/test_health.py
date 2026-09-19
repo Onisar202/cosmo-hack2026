@@ -25,7 +25,9 @@ def test_health_time_is_utc_aware() -> None:
 
     reported_at = datetime.fromisoformat(response.json()["time"])
     assert reported_at.tzinfo is not None
-    assert reported_at.utcoffset().total_seconds() == 0
+    offset = reported_at.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0
 
 
 def test_settings_requires_app_env(monkeypatch: pytest.MonkeyPatch) -> None:

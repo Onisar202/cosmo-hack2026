@@ -51,7 +51,7 @@ HTTP-ответ. Вся логика — здесь.
 Орбита исторических режимов — NASA TOPO CCSDS OEM
 (``src/sources/orbit_history.py``, ``sources.yaml#nasa-iss-oem-history``),
 никогда не CelesTrak: ``result.orbit.source`` для них —
-``"nasa-iss-oem"``, и подставить туда современные элементы нельзя по
+``"nasa-iss-oem-history"``, и подставить туда современные элементы нельзя по
 построению (``src/sources/orbit.py::fetch_elements_for_request`` вообще не
 пускает исторический режим на путь CelesTrak, .ai/main-prompt.md §1, §11).
 Когда пригодного выпуска нет, задача честно отказывает ИМЕНОВАННЫМ кодом
@@ -87,16 +87,16 @@ from src.domain.orbit.propagate import (
     propagate,
     time_grid,
 )
+from src.domain.spaceweather.archive_assessment import (
+    ArchiveProductPolicy,
+    ArchiveWindowAssessment,
+    CoverageInterval,
+    assess_archive_window,
+)
 from src.domain.spaceweather.external_forecast import (
     ExternalForecastDay,
     assess_external_forecast,
     external_forecast_days_from_records,
-)
-from src.domain.spaceweather.historical_events import (
-    ArchivedNotification,
-    HistoricalEventAssessment,
-    archived_notifications_from_records,
-    assess_archived_events,
 )
 from src.domain.spaceweather.observed_classifier import (
     ConflictingObservationsError,
@@ -105,10 +105,10 @@ from src.domain.spaceweather.observed_classifier import (
     observed_proton_samples_from_records,
 )
 from src.domain.windows import WindowCandidate, excluded_windows, recommend
+from src.sources import archive_ingest, archive_probe, orbit, orbit_history
 from src.sources import donki as donki_source
 from src.sources import mmod as mmod_source
 from src.sources import noaa_3day_forecast as noaa_3day_source
-from src.sources import orbit, orbit_history
 from src.sources import swpc as swpc_source
 from src.sources.http import SourceHttpError, SourceQuotaLimitedError
 from src.sources.status import (
@@ -529,6 +529,26 @@ def _space_weather_status(
     return "missing_data"
 
 
+#: Почему у ``mode=current`` согласие источников не устанавливается (FN-41).
+#:
+#: Линий Механизма 1 здесь тоже две — НАБЛЮДЕНИЕ GOES (pfu, шкала S) и внешний
+#: СУТОЧНЫЙ прогноз NOAA 3-Day (вероятность, %), — но их высказывания
+#: несопоставимы без правила «с какой вероятности считать событие
+#: объявленным». Такое правило было бы подобранным порогом (main-prompt.md §4
+#: «пороги берутся из шкал и источников, а не подбираются») и постановкой
+#: FN-41 прямо оставлено открытым вместе с вопросом достаточности линий.
+#: Поэтому здесь честное ``INSUFFICIENT_DATA``: «сравнить нечем», а не
+#: «источники согласны».
+_CURRENT_SOURCE_AGREEMENT_NOTE = (
+    "Согласие источников внутри механизма для mode=current не устанавливается "
+    "(source_agreement = INSUFFICIENT_DATA): наблюдение GOES даёт уровень по шкале S, "
+    "внешний прогноз NOAA 3-Day — суточную вероятность, и сопоставить их можно было "
+    "бы только подобранным порогом «с какой вероятности событие считается "
+    "объявленным». Такой порог не взят ни из одной шкалы и здесь не вводится "
+    "(main-prompt.md §4). Обе линии по-прежнему видны раздельно в notes/record_ids."
+)
+
+
 def _space_weather_mechanism(
     assessment: ObservedFluxAssessment,
     *,
@@ -549,6 +569,7 @@ def _space_weather_mechanism(
     notes = list(assessment.notes)
     if extra_notes:
         notes.extend(extra_notes)
+    notes.append(_CURRENT_SOURCE_AGREEMENT_NOTE)
     record_ids = list(assessment.record_ids)
     if extra_record_ids:
         record_ids.extend(rid for rid in extra_record_ids if rid not in record_ids)
@@ -561,6 +582,8 @@ def _space_weather_mechanism(
         # применялась», и её нельзя прочитать как «событий не было»
         # (contracts/result.schema.json, spaceWeatherEventState).
         "event_state": "NOT_APPLICABLE",
+        "source_agreement": "INSUFFICIENT_DATA",
+        "source_assessments": [],
         "max_level": assessment.max_level if status == "ok" else None,
         "exceedance_hours_by_level": (
             dict(assessment.exceedance_hours_by_level) if status == "ok" else None
@@ -586,10 +609,13 @@ def _space_weather_error_mechanism(
     notes = [message]
     if extra_notes:
         notes.extend(extra_notes)
+    notes.append(_CURRENT_SOURCE_AGREEMENT_NOTE)
     return {
         "mechanism": "space_weather",
         "status": "source_error",
         "event_state": "NOT_APPLICABLE",  # см. _space_weather_mechanism
+        "source_agreement": "INSUFFICIENT_DATA",
+        "source_assessments": [],
         "max_level": None,
         "exceedance_hours_by_level": None,
         "coverage_fraction": 0.0,
@@ -724,6 +750,10 @@ def _mmod_mechanism_assessment(
             # определена (contracts/result.schema.json требует здесь ровно
             # NOT_APPLICABLE, а не отсутствие поля).
             "event_state": "NOT_APPLICABLE",
+            # У MMOD одна линия данных (NASA MEO 2024 LEO forecast) — согласие
+            # источников установить не из чего, и это не «источники согласны».
+            "source_agreement": "INSUFFICIENT_DATA",
+            "source_assessments": [],
             "max_level": None,
             "exceedance_hours_by_level": None,
             "coverage_fraction": 0.0,
@@ -739,6 +769,8 @@ def _mmod_mechanism_assessment(
         "mechanism": "mmod",
         "status": assessment.status,
         "event_state": "NOT_APPLICABLE",  # см. выше
+        "source_agreement": "INSUFFICIENT_DATA",  # см. выше: одна линия данных
+        "source_assessments": [],
         "max_level": assessment.max_level,
         "exceedance_hours_by_level": assessment.exceedance_hours_by_level,
         "coverage_fraction": assessment.coverage_fraction,
@@ -1676,7 +1708,7 @@ def _historical_orbit_dict(
 ) -> dict[str, Any]:
     """``result.orbit`` для исторического режима.
 
-    ``source = "nasa-iss-oem"`` — не ``celestrak`` и не ``space-track``:
+    ``source = "nasa-iss-oem-history"`` — не ``celestrak`` и не ``space-track``:
     подставить современные элементы в исторический результат невозможно по
     построению (см. модульный docstring). ``elements_epoch`` — та же
     величина, что и ``orbital_elements_meta.epoch`` записи
@@ -1689,7 +1721,7 @@ def _historical_orbit_dict(
     release = stage.selection.release
     age_hours = abs((reference_moment - release.parsed.creation_date).total_seconds()) / 3600.0
     return {
-        "source": "nasa-iss-oem",
+        "source": "nasa-iss-oem-history",
         "norad_id": release.parsed.norad_id,
         "elements_epoch": iso_utc(release.parsed.creation_date),
         "elements_age_hours": age_hours,
@@ -1699,212 +1731,53 @@ def _historical_orbit_dict(
     }
 
 
-def _donki_records_for_forecast(
-    conn: sqlite3.Connection, *, as_of: datetime
-) -> list[dict[str, Any]]:
-    """Вход СТРОГОГО ``historical_forecast``: только ``published_at <= as_of``
-    и ``replay_eligible`` (``select_as_of``, .ai/main-prompt.md §1).
+#: Архивные продукты космопогоды, участвующие в исторических режимах.
+#:
+#: Это **перечень линий**, а не выбор победившего источника: спор «достаточно
+#: ли DONKI без числового прогноза NOAA» постановкой FN-41 прямо оставлен
+#: открытым, и ни одна ветка кода ниже его не решает. Обе линии проходят
+#: через один и тот же provider-agnostic интерфейс
+#: (``src/sources/archive_ingest.py`` + ``archive_assessment.py``), а их
+#: пороги, событийные типы и фактический горизонт живут в ``sources.yaml``
+#: (main-prompt.md §7). Добавить или убрать линию — правка этого списка и
+#: реестра, без изменения расчётных функций.
+HISTORICAL_ARCHIVE_SOURCE_IDS: tuple[str, ...] = (
+    archive_probe.DONKI_SOURCE_ID,
+    archive_probe.SWPC_ARCHIVE_SOURCE_ID,
+)
 
-    Отдельная функция от :func:`_donki_records_for_analysis` намеренно:
-    правило пригодности не должно быть ветвью одной функции с флагом — флаг
-    рано или поздно окажется не в том значении (§1). Уведомление с
-    неразрешимым временем публикации сюда не попадает вовсе
-    (``replay_eligible = false`` по правилу хранилища) — и это не «события
-    не было», см. ``ambiguous_publication_count`` ниже по вызову.
+SourceAgreement = Literal["CONSISTENT", "CONFLICT", "INSUFFICIENT_DATA"]
+
+#: Состояния, по которым линии вообще можно сравнивать между собой.
+#: ``INSUFFICIENT_DATA`` у одной из линий — не «несогласие», а отсутствие
+#: мнения: сравнивать нечего.
+_DETERMINATE_EVENT_STATES = frozenset({"EVENT_PRESENT", "NO_EVENT_DETECTED"})
+
+
+@dataclass(frozen=True)
+class _ArchiveStage:
+    """Одна попытка получения архивной космопогоды в рамках одного расчёта.
+
+    Общий шлюз для обеих исторических веток: он только ПОЛУЧАЕТ и сохраняет.
+    Ничего о пригодности записей он не решает — это делают разные функции
+    каждой ветки (:func:`_forecast_archive_lines` против
+    :func:`_analysis_archive_lines`), как требует main-prompt.md §1
+    («последующие наблюдения — отдельная ветка кода»).
     """
-    return select_as_of(conn, as_of, source_id=donki_source.SOURCE_ID, record_kind="warning")
+
+    strategy: archive_ingest.HistoricalArchiveStrategy | None
+    reports: tuple[archive_ingest.ArchiveIngestReport, ...]
+    outcome: donki_source.DonkiFetchOutcome | None
+    attempt_id: str
+    status: SourceStatus
+    error: str | None
+
+    @property
+    def fetch_ok(self) -> bool:
+        return self.outcome is not None and self.outcome.outcome == "stored"
 
 
-def _donki_records_for_analysis(
-    conn: sqlite3.Connection, *, interval_start: datetime, interval_end: datetime
-) -> list[dict[str, Any]]:
-    """Вход ``historical_analysis``: весь архивный диапазон по ВРЕМЕНИ
-    СОБЫТИЯ, без отсечения по публикации — ретроспективная реконструкция.
-
-    Записи, опубликованные позже интересующего момента, здесь допустимы и
-    ожидаемы, но обязаны быть помечены как реконструкция
-    (:func:`_analysis_reconstruction_notes`) — они не являются входом
-    строгого прогноза (.ai/main-prompt.md §1).
-    """
-    return select_observed_range(
-        conn,
-        source_id=donki_source.SOURCE_ID,
-        record_kind="warning",
-        start_at=interval_start,
-        end_at=interval_end,
-    )
-
-
-def _analysis_reconstruction_notes(
-    notifications: Sequence[ArchivedNotification], *, window_start: datetime
-) -> list[str]:
-    """Явная пометка «ретроспективная реконструкция» для линии космопогоды
-    в ``historical_analysis`` — тот же принцип, что ``is_reconstruction`` у
-    орбиты (``OemSelection``), распространённый на архивную событийную
-    линию, как того требует FN-41.
-    """
-    later = [
-        notification
-        for notification in notifications
-        if notification.published_at is not None and notification.published_at > window_start
-    ]
-    notes = [
-        "Ретроспективная реконструкция: эта линия НЕ отсечена по времени "
-        "публикации — в неё входят уведомления, выпущенные позже начала окна "
-        "(режим historical_analysis, .ai/main-prompt.md §1). Как вход строгого "
-        "прогноза из прошлого она непригодна; строгий режим "
-        "(historical_forecast) отбирает записи отдельной функцией."
-    ]
-    if later:
-        notes.append(
-            f"{len(later)} из {len(notifications)} использованных уведомлений выпущены "
-            f"позже начала окна ({iso_utc(window_start)}) — на момент начала ВКД они "
-            "ещё не были доступны."
-        )
-    return notes
-
-
-def _historical_space_weather_mechanism(
-    assessment: HistoricalEventAssessment, *, status: str, extra_notes: list[str] | None = None
-) -> dict[str, Any]:
-    """``mechanismAssessment`` космопогоды для исторического окна.
-
-    Соответствие состояния линии и ``status`` (contracts/result.schema.json):
-
-    - ``NO_EVENT_DETECTED`` → ``ok`` с ``max_level = "background"`` и
-      нулевой длительностью превышения **каждого** порога. Это не
-      «пропуск, заменённый нулём» (что запрещает main-prompt.md §2), а
-      вывод из подтверждённого покрытия: DONKI выпускает уведомление SEP
-      при каждом пересечении порога 10 pfu (>10 МэВ) — того же порога
-      S1 шкалы NOAA, — поэтому подтверждённое отсутствие таких уведомлений
-      на полностью покрытом интервале означает, что порог S1 в нём не
-      пересекался. Именно этим ``NO_EVENT_DETECTED`` отличается от
-      ``INSUFFICIENT_DATA``, где покрытие не подтверждено и вывод сделать
-      нельзя;
-    - ``EVENT_PRESENT`` → ``qualitative_only``: событие подтверждено, но
-      уровень и длительность превышения по этой линии не восстанавливаются
-      (уведомление фиксирует пересечение порога, не профиль потока).
-      ``max_level``/``exceedance_hours_by_level`` — ``null``, окно выводится
-      из автоматического сравнения (``critical_gap``), но «не оценено»
-      здесь явно не равно «спокойно»: ``event_state`` доходит до API, UI и
-      обеих выгрузок;
-    - ``INSUFFICIENT_DATA`` → ``missing_data``/``stale_data``/
-      ``source_error``/``beyond_horizon`` — конкретную причину выбирает
-      ветка режима (только она знает исход получения и отношение окна к
-      ``as_of``), как и для наблюдения GOES (см. ``_space_weather_status``).
-    """
-    notes = list(assessment.notes)
-    if extra_notes:
-        notes.extend(extra_notes)
-    quantified = status == "ok"
-    return {
-        "mechanism": "space_weather",
-        "status": status,
-        "event_state": assessment.state,
-        "max_level": "background" if quantified else None,
-        "exceedance_hours_by_level": (
-            {"S1": 0.0, "S2": 0.0, "S3": 0.0} if quantified else None
-        ),
-        "coverage_fraction": assessment.coverage_fraction,
-        "critical_gap": assessment.critical_gap,
-        "notes": notes,
-        "record_ids": list(assessment.record_ids),
-    }
-
-
-def _historical_space_weather_config_error_mechanism(message: str) -> dict[str, Any]:
-    """``mechanismAssessment`` космопогоды, когда оценка не может быть
-    построена вообще: конфигурация источника (``sources.yaml``) недоступна
-    для этой попытки расчёта, а значит неизвестны ни квалифицирующие типы
-    уведомлений, ни обратный запас.
-
-    Тот же принцип, что у :func:`_space_weather_error_mechanism` для
-    наблюдения GOES (round 1 ревью PR #29): честный отказ обработки вместо
-    расчёта на запасных, зашитых в код числах (main-prompt.md §7 «пороги —
-    в конфиге, не в коде»; §2 «отказ не подменяется правдоподобной
-    оценкой»). ``event_state = INSUFFICIENT_DATA``, потому что состояние
-    архивной линии действительно не определено — но по причине, не имеющей
-    отношения к самому архиву, и причина названа в ``notes``.
-    """
-    return {
-        "mechanism": "space_weather",
-        "status": "source_error",
-        "event_state": "INSUFFICIENT_DATA",
-        "max_level": None,
-        "exceedance_hours_by_level": None,
-        "coverage_fraction": 0.0,
-        "critical_gap": True,
-        "notes": [message],
-        "record_ids": [],
-    }
-
-
-def _historical_event_warning(
-    assessment: HistoricalEventAssessment,
-    *,
-    window_id: str,
-    attempt_id: str,
-) -> dict[str, Any] | None:
-    """Предупреждение по архивной событийной линии — доказуемое: либо
-    ``record_ids`` конкретных уведомлений (``EVENT_PRESENT``), либо
-    ``fetch_attempt_id`` залогированной попытки получения
-    (``INSUFFICIENT_DATA``), contracts/result.schema.json «Каждое
-    предупреждение доказуемо». ``NO_EVENT_DETECTED`` предупреждения не
-    порождает — предупреждать не о чем."""
-    if assessment.state == "EVENT_PRESENT":
-        return {
-            "code": "space-weather-archived-event-present",
-            "severity": "critical",
-            "mechanism": "space_weather",
-            "message": (
-                f"Окно {window_id}: в архиве есть уведомление(я) о квалифицирующем "
-                f"событии космической погоды ({assessment.event_count} событие(й) по "
-                f"{len(assessment.record_ids)} записи(ям)) в интервале "
-                f"[{iso_utc(assessment.required_start)}, {iso_utc(assessment.window_end)}]. "
-                "Уровень и длительность превышения порогов по этой линии не "
-                "восстанавливаются — окно не сравнивается автоматически, но это "
-                "подтверждённое воздействие, а не недостаток данных."
-            ),
-            "record_ids": list(assessment.record_ids),
-            "fetch_attempt_id": attempt_id,
-            "window_id": window_id,
-        }
-    if assessment.state == "INSUFFICIENT_DATA":
-        return {
-            "code": "space-weather-archive-coverage-unconfirmed",
-            "severity": "advisory",
-            "mechanism": "space_weather",
-            "message": (
-                f"Окно {window_id}: покрытие архивной событийной линии на интервал "
-                f"[{iso_utc(assessment.required_start)}, {iso_utc(assessment.window_end)}] "
-                "подтвердить не удалось — оценить наличие события невозможно. Это "
-                "критический пробел, а не вывод «событий не было» (main-prompt.md §2)."
-            ),
-            "record_ids": list(assessment.record_ids),
-            "fetch_attempt_id": attempt_id,
-            "window_id": window_id,
-        }
-    return None
-
-
-def _donki_manifest_entries(
-    record_ids: Iterable[str], records_by_id: Mapping[str, dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Манифест архивной линии — только ФАКТИЧЕСКИ использованные записи
-    (main-prompt.md §3), той же формой, что и остальные записи манифеста."""
-    return [
-        {
-            "record_id": record_id,
-            "source_id": donki_source.SOURCE_ID,
-            "source_version": records_by_id[record_id]["source_version"],
-            "record_kind": "warning",
-        }
-        for record_id in sorted(set(record_ids))
-        if record_id in records_by_id
-    ]
-
-
-def _historical_donki_stage(
+def _historical_archive_stage(
     conn: sqlite3.Connection,
     raw_store: RawOriginalStore,
     registry: SourceStatusRegistry,
@@ -1913,45 +1786,68 @@ def _historical_donki_stage(
     interval_end: datetime,
     now: datetime,
     log_ctx: dict[str, Any],
-) -> tuple[
-    donki_source.DonkiFetchOutcome | None,
-    donki_source.DonkiSourceConfig | None,
-    str,
-    str | None,
-]:
-    """Общий сетевой шлюз архивной линии: один запрос на расчёт, покрывающий
-    оба окна вместе с обратным запасом.
+) -> _ArchiveStage:
+    """Сетевой шлюз архивной космопогоды: один запрос на расчёт, покрывающий
+    оба окна.
 
-    ``interval_start``/``interval_end`` — границы САМИХ окон; запрашиваемый
-    период расширяется назад на ``event_persistence_lookback_hours`` из
-    ``sources.yaml``, потому что ровно этот интервал оценке и понадобится
-    (уже объявленное событие может продолжаться в окне — см.
-    ``src/domain/spaceweather/historical_events.py``). Если бы запас
-    применялся только в расчёте, но не в запросе, покрытие на нужный
-    интервал никогда не подтверждалось бы, и каждое окно получало бы
-    INSUFFICIENT_DATA по чисто технической причине.
+    Запрашиваемый период расширяется назад самим коннектором
+    (``sources.yaml`` → ``archive_request_lookback_hours``), потому что
+    событийный продукт публикует уведомление в момент НАЧАЛА явления и не
+    публикует его конца: уже объявленное, но не закрытое явление обязано
+    попасть в прочитанный интервал, иначе ``archive_assessment`` не сможет
+    отличить «явление могло продолжаться» от «уведомлений нет». Значение
+    живёт в реестре, а не здесь (main-prompt.md §7).
 
-    Ничего не решает о пригодности записей (это делают
-    :func:`_donki_records_for_forecast`/:func:`_donki_records_for_analysis`
-    в своих ветках) — только получает и сохраняет, честно возвращая исход.
-    ``None`` в первом элементе — непредвиденный отказ шлюза: ни одной записи
-    не получено и покрытия нет (never «событий не было», main-prompt.md §2).
+    ``None`` в ``strategy`` — конфигурация архивных продуктов недоступна:
+    неизвестны ни событийные типы, ни горизонт, и считать на запасных
+    константах нельзя. ``None`` в ``outcome`` — непредвиденный отказ шлюза:
+    ни одной записи не получено и покрытия нет (никогда «событий не было»,
+    main-prompt.md §2).
     """
     attempt_id = _fetch_attempt_id(donki_source.SOURCE_ID, now=now)
-    # Конфигурация читается ОТДЕЛЬНЫМ шагом от получения: её отсутствие и
-    # отказ сети — разные ситуации с разными последствиями. Без конфигурации
-    # неизвестны ни таймауты, ни пороги оценки (квалифицирующие типы,
-    # обратный запас) — считать на запасных константах нельзя
-    # (main-prompt.md §7, round 1 ревью PR #29 по тому же поводу для swpc);
-    # при живом отказе сети конфигурация, наоборот, известна и должна
-    # дойти до ветки режима, чтобы оценка объяснила пробел теми же
-    # порогами, что и при успехе.
-    config: donki_source.DonkiSourceConfig | None = None
+
+    strategy: archive_ingest.HistoricalArchiveStrategy | None = None
+    try:
+        strategy = archive_ingest.HistoricalArchiveStrategy.from_sources_yaml(
+            HISTORICAL_ARCHIVE_SOURCE_IDS
+        )
+    except Exception as exc:  # noqa: BLE001 — реестр источников недоступен или
+        # не описывает продукт так, как требует адаптер: честный отказ
+        # обработки вместо расчёта на угаданных порогах (main-prompt.md §7).
+        message = (
+            str(exc)
+            if isinstance(exc, archive_ingest.ArchiveConfigError)
+            else sanitize_unexpected_error(exc)
+        )
+        registry.record_error(
+            donki_source.SOURCE_ID, at=now, message=message, quota_limited=False
+        )
+        _log(
+            "archive_strategy_unavailable",
+            error=message,
+            source_id=donki_source.SOURCE_ID,
+            fetch_attempt_id=attempt_id,
+            **log_ctx,
+        )
+        return _ArchiveStage(
+            strategy=None,
+            reports=(),
+            outcome=None,
+            attempt_id=attempt_id,
+            status=_attempt_error_status(
+                donki_source.SOURCE_ID,
+                at=now,
+                message=message,
+                quota_limited=False,
+                frozen=registry.get(donki_source.SOURCE_ID).frozen,
+            ),
+            error=message,
+        )
+
     try:
         config = donki_source.load_source_config()
-    except Exception as exc:  # noqa: BLE001 — см. _swpc_config_enabled/
-        # _window_observed_mechanism: отсутствие конфигурации — честный отказ
-        # обработки, а не расчёт на угаданных числах.
+    except Exception as exc:  # noqa: BLE001 — сетевая конфигурация коннектора
+        # недоступна: таймауты и повторы для этой попытки неизвестны.
         message = sanitize_unexpected_error(exc)
         registry.record_error(
             donki_source.SOURCE_ID, at=now, message=message, quota_limited=False
@@ -1963,7 +1859,20 @@ def _historical_donki_stage(
             fetch_attempt_id=attempt_id,
             **log_ctx,
         )
-        return None, None, attempt_id, message
+        return _ArchiveStage(
+            strategy=strategy,
+            reports=(),
+            outcome=None,
+            attempt_id=attempt_id,
+            status=_attempt_error_status(
+                donki_source.SOURCE_ID,
+                at=now,
+                message=message,
+                quota_limited=False,
+                frozen=registry.get(donki_source.SOURCE_ID).frozen,
+            ),
+            error=message,
+        )
 
     try:
         outcome = donki_source.fetch_and_store_window(
@@ -1971,9 +1880,7 @@ def _historical_donki_stage(
             raw_store,
             config=config,
             registry=registry,
-            interval_start=(
-                interval_start - timedelta(hours=config.event_persistence_lookback_hours)
-            ),
+            interval_start=interval_start,
             interval_end=interval_end,
             fetched_at=now,
         )
@@ -1991,38 +1898,52 @@ def _historical_donki_stage(
             fetch_attempt_id=attempt_id,
             **log_ctx,
         )
-        return None, config, attempt_id, message
+        return _ArchiveStage(
+            strategy=strategy,
+            reports=(),
+            outcome=None,
+            attempt_id=attempt_id,
+            status=_attempt_error_status(
+                donki_source.SOURCE_ID,
+                at=now,
+                message=message,
+                quota_limited=False,
+                frozen=registry.get(donki_source.SOURCE_ID).frozen,
+            ),
+            error=message,
+        )
 
+    report = outcome.report
     _log(
         "donki_fetch",
         outcome=outcome.outcome,
         source_id=donki_source.SOURCE_ID,
         fetch_attempt_id=attempt_id,
         stored=len(outcome.stored_record_ids),
-        skipped_without_event_time=outcome.skipped_without_event_time,
+        skipped_without_event_time=(
+            len(report.skipped_without_event_time) if report is not None else 0
+        ),
         **log_ctx,
     )
-    return outcome, config, attempt_id, outcome.message
+    return _ArchiveStage(
+        strategy=strategy,
+        reports=(report,) if report is not None else (),
+        outcome=outcome,
+        attempt_id=attempt_id,
+        status=_archive_attempt_status(outcome, registry=registry, now=now),
+        error=outcome.message if outcome.outcome != "stored" else None,
+    )
 
 
-def _donki_attempt_status(
-    outcome: donki_source.DonkiFetchOutcome | None,
+def _archive_attempt_status(
+    outcome: donki_source.DonkiFetchOutcome,
     *,
     registry: SourceStatusRegistry,
     now: datetime,
-    unexpected_error: str | None,
 ) -> SourceStatus:
     """Статус источника, каким его увидела ИМЕННО эта попытка — тот же
     принцип, что и :func:`_swpc_attempt_status` (round 2 ревью PR #19)."""
     frozen = registry.get(donki_source.SOURCE_ID).frozen
-    if outcome is None:
-        return _attempt_error_status(
-            donki_source.SOURCE_ID,
-            at=now,
-            message=unexpected_error or "unexpected error",
-            quota_limited=False,
-            frozen=frozen,
-        )
     if outcome.outcome == "stored":
         return _attempt_success_status(donki_source.SOURCE_ID, at=now, frozen=frozen)
     if outcome.outcome.startswith("error_"):
@@ -2036,6 +1957,564 @@ def _donki_attempt_status(
     return registry.get(donki_source.SOURCE_ID)
 
 
+@dataclass(frozen=True)
+class _ArchiveLines:
+    """Вход оценки окна: по каждому архивному продукту — уже отобранные
+    записи и доказанно прочитанные интервалы.
+
+    Собирается ДВУМЯ РАЗНЫМИ функциями (:func:`_forecast_archive_lines` и
+    :func:`_analysis_archive_lines`) — правило пригодности записи не
+    является параметром одной общей (main-prompt.md §1).
+    """
+
+    policies: tuple[ArchiveProductPolicy, ...]
+    records_by_source: dict[str, list[dict[str, Any]]]
+    intervals_by_source: dict[str, tuple[CoverageInterval, ...]]
+    records_by_id: dict[str, dict[str, Any]]
+    #: Пояснения уровня линии (не окна): пропущенные записи без доказуемой
+    #: публикации, отключённые в реестре продукты и т.п.
+    #:
+    #: Сюда НЕ попадают идентификаторы конкретного прогона (``result_id``,
+    #: ``snapshot_id``): два прогона одного и того же расчёта обязаны
+    #: совпадать по каждому полю результата, кроме самого ``result_id`` и
+    #: ``computed_at`` — именно это проверяет обязательный тест на утечку
+    #: (main-prompt.md §1, §9 п.1). Идентификатор снимка прослеживается
+    #: через структурированный лог (``forecast_input_sealed``), как и
+    #: ``fetch_attempt_id``.
+    notes: tuple[str, ...]
+    #: ``source_id -> snapshot_id`` закреплённого входа — для лога и для
+    #: восстановления входа по сохранённому расчёту.
+    snapshot_ids: dict[str, str]
+
+
+def _coverage_intervals(
+    intervals: Iterable[archive_ingest.IngestedInterval],
+) -> tuple[CoverageInterval, ...]:
+    """Перевод ``sources``-интервала в доменный двойник.
+
+    Домен не импортирует ``sources/`` (main-prompt.md §8), поэтому
+    преобразование делает оркестрация — ровно как предписывает
+    docs/method.md §9.1.
+    """
+    return tuple(
+        CoverageInterval(start=i.start, end=i.end, fetched_at=i.fetched_at) for i in intervals
+    )
+
+
+def _forecast_archive_lines(
+    conn: sqlite3.Connection,
+    stage: _ArchiveStage,
+    *,
+    result_id: str,
+    as_of: datetime,
+) -> _ArchiveLines:
+    """Вход СТРОГОГО ``historical_forecast``.
+
+    Единственная точка сборки — ``archive_ingest.assemble_historical_forecast_input``
+    (FN-42): она выбирает записи правилом ``select_as_of``
+    (``published_at <= as_of`` И ``replay_eligible``) и ЗАКРЕПЛЯЕТ их вместе
+    с картой прочитанных интервалов одним снимком за этим ``result_id``.
+    Закрепление и есть причина, по которой повторный прогон того же расчёта
+    воспроизводим, а появившаяся позже запись не может задним числом попасть
+    во вход (main-prompt.md §1, §3).
+
+    Ни одного собственного правила отсечения здесь нет — иначе оно оказалось
+    бы продублированным рядом с ``select_as_of``.
+    """
+    assert stage.strategy is not None
+    assembled = archive_ingest.assemble_historical_forecast_input(
+        conn,
+        stage.reports,
+        computation_id=result_id,
+        as_of=as_of,
+        strategy=stage.strategy,
+    )
+    policies: list[ArchiveProductPolicy] = []
+    records_by_source: dict[str, list[dict[str, Any]]] = {}
+    intervals_by_source: dict[str, tuple[CoverageInterval, ...]] = {}
+    records_by_id: dict[str, dict[str, Any]] = {}
+    snapshot_ids: dict[str, str] = {}
+    notes: list[str] = []
+    for product in stage.strategy.enabled_products:
+        line = assembled[product.source_id]
+        policies.append(ArchiveProductPolicy.from_config(product))
+        records_by_source[product.source_id] = list(line.records)
+        intervals_by_source[product.source_id] = _coverage_intervals(line.ingested_intervals)
+        snapshot_ids[product.source_id] = line.snapshot_id
+        for record in line.records:
+            records_by_id[str(record["record_id"])] = record
+        notes.append(
+            f"Вход строгого прогноза по линии {product.source_id}: {len(line.records)} "
+            f"запись(ей) с published_at <= {iso_utc(as_of)} и replay_eligible=true, "
+            "закреплённые неизменяемым снимком за этим расчётом "
+            "(src/store/forecast_snapshot.py). Появившаяся позже запись в него не "
+            "попадает задним числом; пересчёт создаёт новый result_id и новый снимок, "
+            "прежний не изменяется (main-prompt.md §1, §3)."
+        )
+        unprovable = [
+            report
+            for report in stage.reports
+            if report.source_id == product.source_id
+            and report.has_unprovable_publication_of(product.event_message_types)
+        ]
+        if unprovable:
+            notes.append(
+                f"Линия {product.source_id}: в прочитанном ответе есть уведомление "
+                "релевантного типа, сохранённое без доказуемого времени публикации — "
+                "в строгую выборку оно не попадает по построению, поэтому его "
+                "отсутствие там НЕ означает «события не было»; интервал исключён из "
+                "доказанного покрытия (main-prompt.md §1)."
+            )
+    for product in stage.strategy.products:
+        if product.enabled:
+            continue
+        notes.append(
+            f"Линия {product.source_id} отключена в sources.yaml (enabled: false) — она не "
+            "загружается и не участвует в выборке; следствие для оценки — «данных нет», "
+            "а не «спокойно» (main-prompt.md §5, критерий Т6)."
+        )
+    return _ArchiveLines(
+        policies=tuple(policies),
+        records_by_source=records_by_source,
+        intervals_by_source=intervals_by_source,
+        records_by_id=records_by_id,
+        notes=tuple(notes),
+        snapshot_ids=snapshot_ids,
+    )
+
+
+def _analysis_archive_lines(
+    conn: sqlite3.Connection,
+    stage: _ArchiveStage,
+    *,
+    interval_start: datetime,
+    interval_end: datetime,
+) -> _ArchiveLines:
+    """Вход ``historical_analysis``: весь архивный диапазон по ВРЕМЕНИ
+    СОБЫТИЯ, без отсечения по публикации — ретроспективная реконструкция.
+
+    Отдельная функция от :func:`_forecast_archive_lines`, и ни одного общего
+    с ней решения о пригодности записи (main-prompt.md §1). Записи,
+    выпущенные позже интересующего момента, здесь допустимы и ожидаемы, но
+    обязаны быть помечены как реконструкция
+    (:func:`_analysis_reconstruction_notes`).
+
+    Записи без известного ``published_at`` в оценку не передаются
+    (``archive_assessment`` требует доказуемой публикации у каждой записи) —
+    но их число названо в ``notes``, а не скрыто: это «мы это видели, но
+    происхождение во времени не доказуемо», а не «этого не было».
+    """
+    assert stage.strategy is not None
+    policies: list[ArchiveProductPolicy] = []
+    records_by_source: dict[str, list[dict[str, Any]]] = {}
+    intervals_by_source: dict[str, tuple[CoverageInterval, ...]] = {}
+    records_by_id: dict[str, dict[str, Any]] = {}
+    notes: list[str] = []
+    for product in stage.strategy.enabled_products:
+        policies.append(ArchiveProductPolicy.from_config(product))
+        selected = select_observed_range(
+            conn,
+            source_id=product.source_id,
+            # Вид записи — свойство продукта из реестра (sources.yaml →
+            # record_kind), а не константа этой функции: адаптер обслуживает
+            # любой архивный продукт одинаково (main-prompt.md §7, §8).
+            record_kind=product.record_kind,
+            start_at=interval_start,
+            # select_observed_range — полуоткрытый интервал [start, end): без
+            # этого микросекундного запаса событие, совпавшее ровно с концом
+            # последнего окна, не попало бы в выборку.
+            end_at=interval_end + timedelta(microseconds=1),
+        )
+        usable = [record for record in selected if record.get("published_at")]
+        if len(usable) != len(selected):
+            notes.append(
+                f"Линия {product.source_id}: {len(selected) - len(usable)} запись(ей) "
+                "архивного диапазона сохранены без доказуемого времени публикации и "
+                "поэтому не переданы в оценку — это «происхождение во времени не "
+                "доказуемо», а не «события не было» (main-prompt.md §1)."
+            )
+        records_by_source[product.source_id] = usable
+        intervals_by_source[product.source_id] = _coverage_intervals(
+            archive_ingest.merged_ingested_intervals(
+                stage.reports,
+                source_id=product.source_id,
+                relevant_message_types=product.event_message_types,
+            )
+        )
+        for record in usable:
+            records_by_id[str(record["record_id"])] = record
+    for product in stage.strategy.products:
+        if product.enabled:
+            continue
+        notes.append(
+            f"Линия {product.source_id} отключена в sources.yaml (enabled: false) — "
+            "«данных нет», а не «спокойно» (main-prompt.md §5, критерий Т6)."
+        )
+    return _ArchiveLines(
+        policies=tuple(policies),
+        records_by_source=records_by_source,
+        intervals_by_source=intervals_by_source,
+        records_by_id=records_by_id,
+        notes=tuple(notes),
+        # Разбор ничего не закрепляет: он по определению ретроспективен и
+        # пересобирается заново при каждом расчёте.
+        snapshot_ids={},
+    )
+
+
+def _assess_archive_lines(
+    lines: _ArchiveLines,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    as_of: datetime,
+) -> list[ArchiveWindowAssessment]:
+    """Оценка окна ПО КАЖДОЙ линии отдельно — ни одна не выбирается молча.
+
+    Второй Jira-комментарий FN-41: «сохранить обе оценки источников и их
+    доказательства, не выбирать один источник молча». Поэтому здесь нет
+    сведения к одному числу: возвращается список оценок, по одной на
+    включённый продукт, а их сопоставление — :func:`_source_agreement`.
+    """
+    return [
+        assess_archive_window(
+            lines.records_by_source.get(policy.source_id, ()),
+            policy=policy,
+            ingested_intervals=lines.intervals_by_source.get(policy.source_id, ()),
+            window_start=window_start,
+            window_end=window_end,
+            as_of=as_of,
+        )
+        for policy in lines.policies
+    ]
+
+
+def _source_agreement(assessments: Sequence[ArchiveWindowAssessment]) -> SourceAgreement:
+    """Согласие ИСТОЧНИКОВ ВНУТРИ одного механизма (второй Jira-комментарий
+    FN-41), в отличие от конфликта МЕЖДУ механизмами, который уже выражает
+    правило доминирования окон (``src/domain/windows/dominance.py``).
+
+    - ``CONSISTENT`` — не менее двух линий высказались определённо
+      (``EVENT_PRESENT``/``NO_EVENT_DETECTED``) и совпали;
+    - ``CONFLICT`` — не менее двух линий высказались определённо и разошлись;
+    - ``INSUFFICIENT_DATA`` — определённых высказываний меньше двух, то есть
+      сравнивать нечего. Это ТРЕТЬЕ состояние, а не «согласны»: одна линия
+      сама с собой не согласуется (main-prompt.md §2).
+
+    Свежесть/устаревание сюда не входят намеренно — они отслеживаются
+    отдельно (``source_status``, ``staleness_seconds``).
+    """
+    determinate = {a.status for a in assessments if a.status in _DETERMINATE_EVENT_STATES}
+    determinate_count = sum(1 for a in assessments if a.status in _DETERMINATE_EVENT_STATES)
+    if determinate_count < 2:
+        return "INSUFFICIENT_DATA"
+    return "CONSISTENT" if len(determinate) == 1 else "CONFLICT"
+
+
+def _combined_event_state(assessments: Sequence[ArchiveWindowAssessment]) -> str:
+    """Состояние механизма по всем линиям вместе — консервативно в сторону
+    тревоги, но никогда в сторону благополучия.
+
+    Подтверждённое событие хотя бы по одной линии остаётся
+    ``EVENT_PRESENT``; доказанное отсутствие хотя бы по одной линии, при
+    отсутствии подтверждённых событий, даёт ``NO_EVENT_DETECTED`` (линия,
+    которая структурно не умеет доказать отсутствие — например продукт со
+    свободным текстом и пустым ``event_message_types`` — не отменяет
+    доказательства, полученного другой линией, но и не подтверждает его:
+    это видно в ``source_agreement = INSUFFICIENT_DATA``). Иначе —
+    ``INSUFFICIENT_DATA``.
+    """
+    states = [a.status for a in assessments]
+    if "EVENT_PRESENT" in states:
+        return "EVENT_PRESENT"
+    if "NO_EVENT_DETECTED" in states:
+        return "NO_EVENT_DETECTED"
+    return "INSUFFICIENT_DATA"
+
+
+def _source_assessment_dicts(
+    assessments: Sequence[ArchiveWindowAssessment],
+) -> list[dict[str, Any]]:
+    """``mechanisms[*].source_assessments`` — оценка каждой линии как она
+    есть, включая ту, что осталась без мнения. Ни одна не стирается при
+    сведении к общему состоянию (второй Jira-комментарий FN-41)."""
+    return [
+        {
+            "source_id": assessment.source_id,
+            "event_state": assessment.status,
+            "coverage_fraction": min(1.0, max(0.0, assessment.coverage_fraction)),
+            "beyond_horizon": assessment.beyond_horizon,
+            "record_ids": list(assessment.record_ids),
+            "notes": list(assessment.notes),
+        }
+        for assessment in assessments
+    ]
+
+
+def _historical_space_weather_mechanism(
+    assessments: Sequence[ArchiveWindowAssessment],
+    *,
+    status: str,
+    agreement: SourceAgreement,
+    event_state: str,
+    extra_notes: Sequence[str] = (),
+) -> dict[str, Any]:
+    """``mechanismAssessment`` космопогоды для исторического окна.
+
+    Соответствие состояния линии и ``status`` (contracts/result.schema.json):
+
+    - ``NO_EVENT_DETECTED`` → ``ok`` с ``max_level = "background"`` и нулевой
+      длительностью превышения **каждого** порога. Это не «пропуск,
+      заменённый нулём» (что запрещает main-prompt.md §2), а вывод из
+      подтверждённого покрытия: событийный продукт выпускает уведомление при
+      каждом пересечении порога (для DONKI SEP это ровно 10 pfu >10 МэВ, то
+      есть порог S1 шкалы NOAA), поэтому подтверждённое отсутствие таких
+      уведомлений на полностью прочитанном интервале означает, что порог S1 в
+      нём не пересекался. Именно этим ``NO_EVENT_DETECTED`` отличается от
+      ``INSUFFICIENT_DATA``, где покрытие не подтверждено;
+    - ``EVENT_PRESENT`` → ``qualitative_only``: событие подтверждено, но
+      уровень и длительность превышения по этой линии не восстанавливаются
+      (уведомление фиксирует пересечение порога, не профиль потока);
+    - ``INSUFFICIENT_DATA`` → ``missing_data``/``stale_data``/
+      ``source_error``/``beyond_horizon`` — конкретную причину выбирает
+      ветка режима (только она знает исход получения и отношение окна к
+      ``as_of``), как и для наблюдения GOES (см. ``_space_weather_status``).
+
+    ``source_agreement = CONFLICT`` дополнительно выводит окно из
+    автоматического сравнения (``critical_gap = true``): расхождение линий
+    внутри механизма — повод для проверки человеком, а не повод молча выбрать
+    одну из них. Никакого нового ранжирования при этом не вводится — работает
+    уже существующее правило доминирования (main-prompt.md §11, п.1).
+    """
+    quantified = status == "ok"
+    conflict = agreement == "CONFLICT"
+    notes: list[str] = []
+    for assessment in assessments:
+        notes.extend(assessment.notes)
+    notes.append(_AGREEMENT_NOTES[agreement])
+    notes.extend(extra_notes)
+    return {
+        "mechanism": "space_weather",
+        "status": status,
+        "event_state": event_state,
+        "source_agreement": agreement,
+        "source_assessments": _source_assessment_dicts(assessments),
+        "max_level": "background" if quantified else None,
+        "exceedance_hours_by_level": ({"S1": 0.0, "S2": 0.0, "S3": 0.0} if quantified else None),
+        "coverage_fraction": _combined_coverage_fraction(assessments),
+        "critical_gap": (not quantified) or conflict,
+        "notes": notes,
+        "record_ids": sorted({rid for a in assessments for rid in a.record_ids}),
+    }
+
+
+_AGREEMENT_NOTES: dict[SourceAgreement, str] = {
+    "CONSISTENT": (
+        "Согласие источников внутри механизма: не менее двух архивных линий "
+        "высказались определённо и совпали (source_agreement = CONSISTENT). Это "
+        "согласие ИСТОЧНИКОВ одного механизма, не согласие механизмов между собой — "
+        "последнее выражает правило предпочтения окон."
+    ),
+    "CONFLICT": (
+        "КОНФЛИКТ ИСТОЧНИКОВ внутри механизма (source_agreement = CONFLICT): линии "
+        "разошлись в том, было ли событие. Оценки обеих линий сохранены рядом "
+        "(source_assessments) — ни одна не выбрана молча; окно выведено из "
+        "автоматического сравнения и требует проверки человеком. Это не то же самое, "
+        "что расхождение между механизмами (космопогода против MMOD), которое "
+        "разбирается правилом предпочтения окон."
+    ),
+    "INSUFFICIENT_DATA": (
+        "Согласие источников установить нельзя (source_agreement = INSUFFICIENT_DATA): "
+        "определённое высказывание есть меньше чем у двух линий. Это третье состояние, "
+        "а не «источники согласны» (main-prompt.md §2)."
+    ),
+}
+
+
+def _combined_coverage_fraction(assessments: Sequence[ArchiveWindowAssessment]) -> float:
+    """Полнота данных механизма — лучшая из линий.
+
+    Механизм считается покрытым настолько, насколько его покрыла та линия,
+    которая покрыла его лучше всех: линия без загруженных интервалов не
+    ухудшает доказанного покрытия другой линии, но и не добавляет своего.
+    """
+    if not assessments:
+        return 0.0
+    return min(1.0, max(0.0, max(a.coverage_fraction for a in assessments)))
+
+
+def _historical_space_weather_config_error_mechanism(message: str) -> dict[str, Any]:
+    """``mechanismAssessment`` космопогоды, когда оценка не может быть
+    построена вообще: конфигурация архивных продуктов (``sources.yaml``)
+    недоступна для этой попытки расчёта, а значит неизвестны ни событийные
+    типы, ни фактический горизонт.
+
+    Тот же принцип, что у :func:`_space_weather_error_mechanism` для
+    наблюдения GOES (round 1 ревью PR #29): честный отказ обработки вместо
+    расчёта на запасных, зашитых в код числах (main-prompt.md §7 «пороги — в
+    конфиге, не в коде»; §2 «отказ не подменяется правдоподобной оценкой»).
+    """
+    return {
+        "mechanism": "space_weather",
+        "status": "source_error",
+        "event_state": "INSUFFICIENT_DATA",
+        "source_agreement": "INSUFFICIENT_DATA",
+        "source_assessments": [],
+        "max_level": None,
+        "exceedance_hours_by_level": None,
+        "coverage_fraction": 0.0,
+        "critical_gap": True,
+        "notes": [message, _AGREEMENT_NOTES["INSUFFICIENT_DATA"]],
+        "record_ids": [],
+    }
+
+
+def _analysis_reconstruction_notes(
+    records: Iterable[Mapping[str, Any]], *, window_start: datetime
+) -> list[str]:
+    """Явная пометка «ретроспективная реконструкция» для линии космопогоды в
+    ``historical_analysis`` — тот же принцип, что ``is_reconstruction`` у
+    орбиты (``OemSelection``), распространённый на архивную событийную линию,
+    как того требует FN-41.
+    """
+    records = list(records)
+    later = 0
+    for record in records:
+        published_raw = record.get("published_at")
+        if published_raw is None:
+            continue
+        published_at = datetime.fromisoformat(str(published_raw).replace("Z", "+00:00"))
+        if published_at > window_start:
+            later += 1
+    notes = [
+        "Ретроспективная реконструкция: эта линия НЕ отсечена по времени публикации "
+        "— в неё входят записи, выпущенные позже начала окна (режим "
+        "historical_analysis, .ai/main-prompt.md §1). Как вход строгого прогноза из "
+        "прошлого она непригодна; строгий режим (historical_forecast) отбирает записи "
+        "отдельной функцией."
+    ]
+    if later:
+        notes.append(
+            f"{later} из {len(records)} использованных записей выпущены позже начала "
+            f"окна ({iso_utc(window_start)}) — на момент начала ВКД они ещё не были "
+            "доступны."
+        )
+    return notes
+
+
+def _historical_event_warning(
+    mechanism: Mapping[str, Any],
+    assessments: Sequence[ArchiveWindowAssessment],
+    *,
+    window_id: str,
+    attempt_id: str,
+) -> dict[str, Any] | None:
+    """Предупреждение по архивной событийной линии — доказуемое: либо
+    ``record_ids`` конкретных записей (``EVENT_PRESENT``), либо
+    ``fetch_attempt_id`` залогированной попытки получения
+    (``INSUFFICIENT_DATA``), contracts/result.schema.json «Каждое
+    предупреждение доказуемо». ``NO_EVENT_DETECTED`` без конфликта источников
+    предупреждения не порождает — предупреждать не о чем."""
+    record_ids = list(mechanism["record_ids"])
+    if mechanism["source_agreement"] == "CONFLICT":
+        return {
+            "code": "space-weather-source-conflict",
+            "severity": "critical",
+            "mechanism": "space_weather",
+            "message": (
+                f"Окно {window_id}: архивные линии космической погоды разошлись в том, "
+                "было ли событие (source_agreement = CONFLICT). Оценки обеих линий "
+                "сохранены в mechanisms[*].source_assessments; ни одна не выбрана "
+                "молча. Окно выведено из автоматического сравнения и требует проверки "
+                "человеком."
+            ),
+            "record_ids": record_ids,
+            "fetch_attempt_id": attempt_id,
+            "window_id": window_id,
+        }
+    if mechanism["event_state"] == "EVENT_PRESENT":
+        return {
+            "code": "space-weather-archived-event-present",
+            "severity": "critical",
+            "mechanism": "space_weather",
+            "message": (
+                f"Окно {window_id}: в архиве есть уведомление(я) о событии космической "
+                f"погоды ({len(record_ids)} запись(ей)), пересекающие это окно. Уровень "
+                "и длительность превышения порогов по этой линии не восстанавливаются "
+                "— окно не сравнивается автоматически, но это подтверждённое "
+                "воздействие, а не недостаток данных."
+            ),
+            "record_ids": record_ids,
+            "fetch_attempt_id": attempt_id,
+            "window_id": window_id,
+        }
+    if mechanism["event_state"] == "INSUFFICIENT_DATA":
+        unresolved = [
+            event
+            for assessment in assessments
+            for event in assessment.unresolved_open_events
+        ]
+        if unresolved:
+            # Это НЕ «пробел архива»: явление объявлено до окна, и источник
+            # просто не публикует момента его окончания. Оба вывода —
+            # «продолжалось» и «закончилось» — были бы придуманы, поэтому
+            # честный ответ INSUFFICIENT_DATA; но причина у него совсем
+            # другая, и её нельзя показывать тем же текстом, что настоящий
+            # пробел получения (main-prompt.md §2, критерий О4).
+            listed = ", ".join(
+                f"{event.provider_record_id} ({event.message_type}, начало "
+                f"{iso_utc(event.valid_from)})"
+                for event in unresolved
+            )
+            return {
+                "code": "space-weather-announced-event-not-closed",
+                "severity": "critical",
+                "mechanism": "space_weather",
+                "message": (
+                    f"Окно {window_id}: до его начала объявлено событие космической "
+                    f"погоды без задокументированного окончания — {listed}. Источник не "
+                    "публикует структурированного момента завершения, поэтому "
+                    "продолжалось ли явление в этом окне, неизвестно: это «оценить "
+                    "невозможно», а НЕ подтверждённое отсутствие и НЕ пробел "
+                    "получения. Окно выведено из автоматического сравнения."
+                ),
+                "record_ids": sorted({event.record_id for event in unresolved}),
+                "fetch_attempt_id": attempt_id,
+                "window_id": window_id,
+            }
+        return {
+            "code": "space-weather-archive-coverage-unconfirmed",
+            "severity": "advisory",
+            "mechanism": "space_weather",
+            "message": (
+                f"Окно {window_id}: покрытие архивных линий космической погоды на это "
+                "окно подтвердить не удалось — оценить наличие события невозможно. Это "
+                "критический пробел, а не вывод «событий не было» (main-prompt.md §2)."
+            ),
+            "record_ids": record_ids,
+            "fetch_attempt_id": attempt_id,
+            "window_id": window_id,
+        }
+    return None
+
+
+def _archive_manifest_entries(
+    record_ids: Iterable[str], records_by_id: Mapping[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Манифест архивных линий — только ФАКТИЧЕСКИ использованные записи
+    (main-prompt.md §3), той же формой, что и остальные записи манифеста."""
+    return [
+        {
+            "record_id": record_id,
+            "source_id": records_by_id[record_id]["source_id"],
+            "source_version": records_by_id[record_id]["source_version"],
+            "record_kind": records_by_id[record_id]["record_kind"],
+        }
+        for record_id in sorted(set(record_ids))
+        if record_id in records_by_id
+    ]
+
+
 _HISTORICAL_LIMITATIONS_COMMON = [
     "Исторические орбитальные элементы — датированный выпуск NASA TOPO CCSDS "
     "OEM (sources.yaml#nasa-iss-oem-history): готовые векторы состояния и "
@@ -2043,17 +2522,17 @@ _HISTORICAL_LIMITATIONS_COMMON = [
     "SGP4 по GP/TLE. Современные элементы CelesTrak в исторический результат "
     "не подставляются ни при каких обстоятельствах (main-prompt.md §1, §11); "
     "published_at выпуска — S3 LastModified объекта, не CREATION_DATE.",
-    "Механизм 1 в исторических режимах оценивается АРХИВНОЙ СОБЫТИЙНОЙ линией "
-    "(уведомления NASA CCMC DONKI): она даёт три различимых состояния "
-    "(event_state: EVENT_PRESENT / NO_EVENT_DETECTED / INSUFFICIENT_DATA), но "
-    "не измеренное значение потока — наблюдение GOES "
-    "(noaa-swpc-proton-flux) архива за 2024 год не хранит вовсе, а архив "
-    "NOAA 3-Day покрывает период не полностью. Какая из архивных линий "
-    "(DONKI или NOAA SWPC Forecast Discussion) является основной, FN-41 "
-    "намеренно НЕ решает: DONKI выбран как единственная линия с полным "
-    "покрытием обязательного периода (у линии NOAA — подтверждённый пробел "
-    "15.05–16.06.2024), это решение реализации этой задачи, а не итоговый "
-    "архитектурный ответ.",
+    "Механизм 1 в исторических режимах оценивается АРХИВНЫМИ линиями через "
+    "provider-agnostic интерфейс (src/sources/archive_ingest.py + "
+    "src/domain/spaceweather/archive_assessment.py): три различимых состояния "
+    "(event_state: EVENT_PRESENT / NO_EVENT_DETECTED / INSUFFICIENT_DATA) плюс "
+    "согласие источников внутри механизма (source_agreement), но не измеренное "
+    "значение потока — наблюдение GOES (noaa-swpc-proton-flux) архива за 2024 год "
+    "не хранит вовсе. Какой продукт является достаточной линией строгого прогноза "
+    "из прошлого (DONKI против числового прогноза NOAA) и каким должен быть "
+    "обязательный горизонт — вопросы конфигурации sources.yaml "
+    "(event_message_types, forecast_horizon_hours), а не кода: FN-41 их намеренно "
+    "не решает, и ни одна расчётная функция от ответа на них не зависит.",
 ]
 
 
@@ -2106,7 +2585,7 @@ def _build_historical_analysis_result(
         log_ctx=log_ctx,
     )
 
-    donki_outcome, donki_config, donki_attempt_id, donki_error = _historical_donki_stage(
+    archive_stage = _historical_archive_stage(
         conn,
         raw_store,
         registry,
@@ -2115,50 +2594,33 @@ def _build_historical_analysis_result(
         now=now,
         log_ctx=log_ctx,
     )
-    donki_status = _donki_attempt_status(
-        donki_outcome, registry=registry, now=now, unexpected_error=donki_error
-    )
-    fetch_ok = donki_outcome is not None and donki_outcome.outcome == "stored"
-    if not fetch_ok:
+    if not archive_stage.fetch_ok:
         warnings.append(
             {
                 "code": "space-weather-archive-fetch-failed",
                 "severity": "advisory",
                 "mechanism": "space_weather",
                 "message": (
-                    "Получение архивной событийной линии (DONKI) не удалось: "
-                    f"{donki_error or (donki_outcome.message if donki_outcome else 'нет ответа')}. "
-                    "Ранее сохранённые записи (если есть) всё равно используются, но "
-                    "подтвердить покрытие этой попыткой нельзя — окна получают "
-                    "INSUFFICIENT_DATA, а не «событий не было» (main-prompt.md §2)."
+                    "Получение архивной линии космической погоды не удалось: "
+                    f"{archive_stage.error or 'нет ответа'}. Ранее сохранённые записи "
+                    "(если есть) всё равно используются, но подтвердить покрытие этой "
+                    "попыткой нельзя — окна получают INSUFFICIENT_DATA, а не «событий "
+                    "не было» (main-prompt.md §2)."
                 ),
                 "record_ids": [],
-                "fetch_attempt_id": donki_attempt_id,
+                "fetch_attempt_id": archive_stage.attempt_id,
                 "window_id": None,
             }
         )
 
-    coverage_intervals: list[tuple[datetime, datetime]] = []
-    if donki_outcome is not None and donki_outcome.covered_start is not None:
-        assert donki_outcome.covered_end is not None
-        coverage_intervals.append((donki_outcome.covered_start, donki_outcome.covered_end))
-
-    records: list[dict[str, Any]] = []
-    notifications: list[ArchivedNotification] = []
-    if donki_config is not None:
-        records = _donki_records_for_analysis(
+    lines: _ArchiveLines | None = None
+    if archive_stage.strategy is not None:
+        lines = _analysis_archive_lines(
             conn,
-            interval_start=(
-                request.start_at
-                - timedelta(hours=donki_config.event_persistence_lookback_hours)
-            ),
-            # select_observed_range — полуоткрытый интервал [start, end): без
-            # этого микросекундного запаса событие, совпавшее ровно с концом
-            # последнего окна, не попало бы в выборку.
-            interval_end=request.calc_end_at + timedelta(microseconds=1),
+            archive_stage,
+            interval_start=request.start_at,
+            interval_end=request.calc_end_at,
         )
-        notifications = archived_notifications_from_records(records)
-    records_by_id = {str(record["record_id"]): record for record in records}
 
     windows: list[dict[str, Any]] = []
     used_record_ids: set[str] = set()
@@ -2167,48 +2629,55 @@ def _build_historical_analysis_result(
         ("win-b", request.search_end_at),
     ):
         end_at = start_at + timedelta(hours=request.duration_hours)
-        if donki_config is None:
+        if lines is None:
             # Пороги оценки неизвестны — честный отказ обработки, а не
             # расчёт на зашитых в код запасных числах (main-prompt.md §7).
             mechanism = _historical_space_weather_config_error_mechanism(
-                "Оценка архивной событийной линии не построена: конфигурация "
-                "источника (sources.yaml → nasa-donki-notifications) недоступна "
-                f"для этой попытки расчёта ({donki_error})."
+                "Оценка архивных линий космической погоды не построена: реестр "
+                "источников (sources.yaml) недоступен или не описывает архивный "
+                f"продукт для этой попытки расчёта ({archive_stage.error})."
             )
         else:
-            assessment = assess_archived_events(
-                notifications,
-                window_start=start_at,
-                window_end=end_at,
-                coverage_intervals=coverage_intervals,
-                qualifying_message_types=donki_config.qualifying_message_types,
-                persistence_lookback_hours=(
-                    donki_config.event_persistence_lookback_hours
-                ),
-                # Разбор видит записи с неизвестным временем публикации как есть
-                # (они попадают в выборку по времени события) — отдельной поправки
-                # «нечем подтвердить отсутствие» здесь не нужно, в отличие от
-                # строгой ветки, где такие записи невидимы по построению.
-                ambiguous_publication_count=0,
+            # Разбор привязан к моменту расчёта, а не к отсечению: он и есть
+            # ретроспектива. Записи выбраны по ВРЕМЕНИ СОБЫТИЯ, поэтому
+            # published_at <= now выполняется по построению — утечки здесь нет
+            # по определению режима, но она явно помечена реконструкцией ниже.
+            assessments = _assess_archive_lines(
+                lines, window_start=start_at, window_end=end_at, as_of=now
             )
-            if assessment.state == "INSUFFICIENT_DATA" and not fetch_ok:
-                status = "source_error"
-            elif assessment.state == "INSUFFICIENT_DATA":
-                status = "missing_data"
-            elif assessment.state == "EVENT_PRESENT":
+            agreement = _source_agreement(assessments)
+            event_state = _combined_event_state(assessments)
+            if event_state == "EVENT_PRESENT":
                 status = "qualitative_only"
-            else:
+            elif event_state == "NO_EVENT_DETECTED":
                 status = "ok"
+            elif not archive_stage.fetch_ok:
+                status = "source_error"
+            else:
+                status = "missing_data"
 
             mechanism = _historical_space_weather_mechanism(
-                assessment,
+                assessments,
                 status=status,
-                extra_notes=_analysis_reconstruction_notes(
-                    notifications, window_start=start_at
-                ),
+                agreement=agreement,
+                event_state=event_state,
+                extra_notes=[
+                    *lines.notes,
+                    *_analysis_reconstruction_notes(
+                        [
+                            record
+                            for records in lines.records_by_source.values()
+                            for record in records
+                        ],
+                        window_start=start_at,
+                    ),
+                ],
             )
             warning = _historical_event_warning(
-                assessment, window_id=window_id, attempt_id=donki_attempt_id
+                mechanism,
+                assessments,
+                window_id=window_id,
+                attempt_id=archive_stage.attempt_id,
             )
             if warning is not None:
                 warnings.append(warning)
@@ -2247,23 +2716,16 @@ def _build_historical_analysis_result(
         windows=windows,
         recommendation=recommendation,
         warnings=warnings,
-        donki_manifest=_donki_manifest_entries(used_record_ids, records_by_id),
-        donki_status=donki_status,
+        donki_manifest=_archive_manifest_entries(
+            used_record_ids, lines.records_by_id if lines is not None else {}
+        ),
+        donki_status=archive_stage.status,
         conn=conn,
         now_for_mmod_manifest=now,
         archive_gaps=_historical_archive_gaps(
-            fetch_ok=fetch_ok,
+            fetch_ok=archive_stage.fetch_ok,
             windows=windows,
-            gap_start=(
-                request.start_at
-                - timedelta(
-                    hours=(
-                        donki_config.event_persistence_lookback_hours
-                        if donki_config is not None
-                        else 0.0
-                    )
-                )
-            ),
+            gap_start=request.start_at,
             gap_end=request.calc_end_at,
             as_of=None,
         ),
@@ -2332,7 +2794,7 @@ def _build_historical_forecast_result(
         log_ctx=log_ctx,
     )
 
-    donki_outcome, donki_config, donki_attempt_id, donki_error = _historical_donki_stage(
+    archive_stage = _historical_archive_stage(
         conn,
         raw_store,
         registry,
@@ -2341,49 +2803,43 @@ def _build_historical_forecast_result(
         now=now,
         log_ctx=log_ctx,
     )
-    donki_status = _donki_attempt_status(
-        donki_outcome, registry=registry, now=now, unexpected_error=donki_error
-    )
-    fetch_ok = donki_outcome is not None and donki_outcome.outcome == "stored"
-    if not fetch_ok:
+    if not archive_stage.fetch_ok:
         warnings.append(
             {
                 "code": "space-weather-archive-fetch-failed",
                 "severity": "advisory",
                 "mechanism": "space_weather",
                 "message": (
-                    "Получение архивной событийной линии (DONKI) не удалось: "
-                    f"{donki_error or (donki_outcome.message if donki_outcome else 'нет ответа')}. "
-                    "Отказ получения не превращается в вывод «событий не было» "
-                    "(main-prompt.md §2)."
+                    "Получение архивной линии космической погоды не удалось: "
+                    f"{archive_stage.error or 'нет ответа'}. Отказ получения не "
+                    "превращается в вывод «событий не было» (main-prompt.md §2)."
                 ),
                 "record_ids": [],
-                "fetch_attempt_id": donki_attempt_id,
+                "fetch_attempt_id": archive_stage.attempt_id,
                 "window_id": None,
             }
         )
 
-    # Подтверждённое покрытие СТРОГОЙ ветки обрезается моментом отсечения:
-    # то, что архив опубликовал позже as_of, не может подтверждать полноту
-    # знания на as_of (.ai/main-prompt.md §1).
-    coverage_intervals: list[tuple[datetime, datetime]] = []
-    if donki_outcome is not None and donki_outcome.covered_start is not None:
-        assert donki_outcome.covered_end is not None
-        eligible_end = min(donki_outcome.covered_end, as_of)
-        if eligible_end > donki_outcome.covered_start:
-            coverage_intervals.append((donki_outcome.covered_start, eligible_end))
-
-    records = _donki_records_for_forecast(conn, as_of=as_of) if donki_config is not None else []
-    records_by_id = {str(record["record_id"]): record for record in records}
-    notifications = archived_notifications_from_records(records)
-
-    # Уведомления, чьё время публикации неразрешимо (два независимых поля
-    # расходятся): в строгую выборку они не попадают по построению
-    # (replay_eligible=false), поэтому их отсутствие там нельзя читать как
-    # «события не было» — считаем их отдельно и отдаём в оценку.
-    ambiguous_count = (
-        donki_outcome.ambiguous_publication_count if donki_outcome is not None else 0
-    )
+    # Вход строгой ветки собирается ЕДИНСТВЕННОЙ функцией: она применяет
+    # select_as_of (published_at <= as_of И replay_eligible) и закрепляет
+    # записи вместе с картой прочитанных интервалов одним снимком за этим
+    # result_id (src/store/forecast_snapshot.py). Отдельного правила
+    # отсечения здесь нет и быть не должно (main-prompt.md §1).
+    lines: _ArchiveLines | None = None
+    if archive_stage.strategy is not None:
+        lines = _forecast_archive_lines(
+            conn, archive_stage, result_id=result_id, as_of=as_of
+        )
+        # Прослеживаемость входа — через структурированный лог, тем же
+        # способом, что и fetch_attempt_id: по result_id восстанавливается
+        # снимок, по снимку — точный набор записей и интервалов покрытия.
+        _log(
+            "forecast_input_sealed",
+            as_of=iso_utc(as_of),
+            snapshot_ids=dict(lines.snapshot_ids),
+            records=sum(len(r) for r in lines.records_by_source.values()),
+            **log_ctx,
+        )
 
     windows: list[dict[str, Any]] = []
     used_record_ids: set[str] = set()
@@ -2392,45 +2848,50 @@ def _build_historical_forecast_result(
         ("win-b", request.search_end_at),
     ):
         end_at = start_at + timedelta(hours=request.duration_hours)
-        if donki_config is None:
+        if lines is None:
             # См. ту же ветку в _build_historical_analysis_result: без
             # конфигурации пороги оценки неизвестны (main-prompt.md §7).
             mechanism = _historical_space_weather_config_error_mechanism(
-                "Оценка архивной событийной линии не построена: конфигурация "
-                "источника (sources.yaml → nasa-donki-notifications) недоступна "
-                f"для этой попытки расчёта ({donki_error})."
+                "Оценка архивных линий космической погоды не построена: реестр "
+                "источников (sources.yaml) недоступен или не описывает архивный "
+                f"продукт для этой попытки расчёта ({archive_stage.error})."
             )
         else:
-            assessment = assess_archived_events(
-                notifications,
-                window_start=start_at,
-                window_end=end_at,
-                coverage_intervals=coverage_intervals,
-                qualifying_message_types=donki_config.qualifying_message_types,
-                persistence_lookback_hours=(
-                    donki_config.event_persistence_lookback_hours
-                ),
-                ambiguous_publication_count=ambiguous_count,
+            assessments = _assess_archive_lines(
+                lines, window_start=start_at, window_end=end_at, as_of=as_of
             )
-            if assessment.state == "EVENT_PRESENT":
+            agreement = _source_agreement(assessments)
+            event_state = _combined_event_state(assessments)
+            if event_state == "EVENT_PRESENT":
                 status = "qualitative_only"
-            elif assessment.state == "NO_EVENT_DETECTED":
+            elif event_state == "NO_EVENT_DETECTED":
                 status = "ok"
-            elif not fetch_ok:
+            elif not archive_stage.fetch_ok:
                 status = "source_error"
-            elif end_at > as_of:
-                # Главный честный случай строгого режима: событийная линия
-                # DONKI выпускает уведомление в момент НАЧАЛА события и не
-                # является прогнозным продуктом с горизонтом — за отсечением
-                # она не покрывает окно вовсе. «Не покрыто», а не «спокойно»
-                # (main-prompt.md §4).
+            elif any(assessment.beyond_horizon for assessment in assessments):
+                # Главный честный случай строгого режима: фактический горизонт
+                # продукта объявлен в sources.yaml (для событийного архива он
+                # не установлен — null), поэтому часть окна после отсечения
+                # архивом не покрыта вовсе. «Не покрыто», а не «спокойно»
+                # (main-prompt.md §4). Ни 6, ни 24 часов здесь нет: значение
+                # приходит из реестра, и ответ эксперта закрывается его
+                # правкой, без изменения этой ветки.
                 status = "beyond_horizon"
             else:
                 status = "missing_data"
 
-            mechanism = _historical_space_weather_mechanism(assessment, status=status)
+            mechanism = _historical_space_weather_mechanism(
+                assessments,
+                status=status,
+                agreement=agreement,
+                event_state=event_state,
+                extra_notes=lines.notes,
+            )
             warning = _historical_event_warning(
-                assessment, window_id=window_id, attempt_id=donki_attempt_id
+                mechanism,
+                assessments,
+                window_id=window_id,
+                attempt_id=archive_stage.attempt_id,
             )
             if warning is not None:
                 warnings.append(warning)
@@ -2469,12 +2930,14 @@ def _build_historical_forecast_result(
         windows=windows,
         recommendation=recommendation,
         warnings=warnings,
-        donki_manifest=_donki_manifest_entries(used_record_ids, records_by_id),
-        donki_status=donki_status,
+        donki_manifest=_archive_manifest_entries(
+            used_record_ids, lines.records_by_id if lines is not None else {}
+        ),
+        donki_status=archive_stage.status,
         conn=conn,
         now_for_mmod_manifest=as_of,
         archive_gaps=_historical_archive_gaps(
-            fetch_ok=fetch_ok,
+            fetch_ok=archive_stage.fetch_ok,
             windows=windows,
             gap_start=as_of,
             gap_end=request.calc_end_at,
@@ -2483,13 +2946,15 @@ def _build_historical_forecast_result(
         extra_limitations=[
             "Режим historical_forecast: во вход расчёта попадают только записи с "
             f"published_at <= {iso_utc(as_of)} и replay_eligible=true — по всем "
-            "линиям (орбита NASA OEM по S3 LastModified, архивная событийная линия "
-            "DONKI, NASA MEO). Архивная событийная линия при этом публикует "
-            "уведомление в момент НАЧАЛА события и не является прогнозным "
-            "продуктом: для окна целиком после отсечения она честно даёт "
-            "beyond_horizon («не покрыто»), а вывод «событий не будет» по ней "
-            "невозможен в принципе (main-prompt.md §4). Горизонт собственного "
-            "прогноза (6 ч против 24 ч) FN-41 намеренно не решает.",
+            "линиям (орбита NASA OEM по S3 LastModified, архивные линии космической "
+            "погоды через select_as_of, NASA MEO). Вход закреплён неизменяемым "
+            "снимком за этим result_id: позже появившаяся запись не может попасть в "
+            "него задним числом, а пересчёт создаёт новый result_id и новый снимок. "
+            "Фактический горизонт каждого архивного продукта объявлен в sources.yaml "
+            "(forecast_horizon_hours); за его пределами окно честно получает "
+            "beyond_horizon («не покрыто», не «спокойно», main-prompt.md §4). "
+            "Обязательный горизонт (6 ч против 24 ч) и достаточность отдельной линии "
+            "FN-41 намеренно не решает — это значения реестра, не код.",
         ],
     )
 
@@ -2516,21 +2981,21 @@ def _historical_archive_gaps(
         return []
     if not fetch_ok:
         note = (
-            "Получение архивной событийной линии не удалось — покрытие на этот "
+            "Получение архивной линии космической погоды не удалось — покрытие на этот "
             f"интервал не подтверждено (окна: {', '.join(unconfirmed)}). "
             "Отказ источника не превращается в вывод «событий не было»."
         )
     elif as_of is not None:
         note = (
-            f"За моментом отсечения ({iso_utc(as_of)}) архивная событийная линия "
-            "DONKI пригодных записей не даёт: она публикует уведомление в момент "
-            "начала события, поэтому будущее относительно отсечения окно "
-            f"(окна: {', '.join(unconfirmed)}) — «не покрыто», а не «спокойно» "
-            "(main-prompt.md §4)."
+            f"За моментом отсечения ({iso_utc(as_of)}) архивные линии космической "
+            "погоды пригодных записей не дают: фактический горизонт продукта объявлен "
+            "в sources.yaml (для событийного архива он не установлен), поэтому будущее "
+            f"относительно отсечения окно (окна: {', '.join(unconfirmed)}) — «не "
+            "покрыто», а не «спокойно» (main-prompt.md §4)."
         )
     else:
         note = (
-            "Покрытие архивной событийной линии на этот интервал подтвердить не "
+            "Покрытие архивных линий космической погоды на этот интервал подтвердить не "
             f"удалось (окна: {', '.join(unconfirmed)}) — оценить наличие события "
             "невозможно."
         )

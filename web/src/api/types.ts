@@ -29,10 +29,10 @@ export interface DataManifestEntry {
 }
 
 export interface OrbitSummary {
-  // nasa-iss-oem (FN-41) — исторические эфемериды NASA TOPO CCSDS OEM:
+  // nasa-iss-oem-history (FN-41) — исторические эфемериды NASA TOPO CCSDS OEM:
   // единственный источник орбиты в historical_* режимах; current-элементы
   // CelesTrak туда не подставляются (contracts/result.schema.json).
-  source: 'celestrak' | 'space-track' | 'nasa-iss-oem'
+  source: 'celestrak' | 'space-track' | 'nasa-iss-oem-history'
   norad_id: string
   elements_epoch: string
   elements_age_hours: number
@@ -63,6 +63,25 @@ export type MechanismStatus =
 export type SpaceWeatherEventState =
   'EVENT_PRESENT' | 'NO_EVENT_DETECTED' | 'INSUFFICIENT_DATA' | 'NOT_APPLICABLE'
 
+/**
+ * FN-41: согласие ИСТОЧНИКОВ внутри одного механизма — не то же самое, что
+ * расхождение МЕХАНИЗМОВ между собой (последнее разбирает правило
+ * предпочтения окон). INSUFFICIENT_DATA — третье состояние «сравнивать
+ * нечего», а не «источники согласны» (contracts/result.schema.json,
+ * sourceAgreement).
+ */
+export type SourceAgreement = 'CONSISTENT' | 'CONFLICT' | 'INSUFFICIENT_DATA'
+
+/** Оценка ОДНОЙ линии данных внутри механизма, сохранённая как есть. */
+export interface SourceLineAssessment {
+  source_id: string
+  event_state: SpaceWeatherEventState
+  coverage_fraction: number
+  beyond_horizon: boolean
+  record_ids: string[]
+  notes: string[]
+}
+
 export interface SpaceWeatherExceedance {
   S1: number
   S2: number
@@ -85,6 +104,10 @@ export interface MechanismAssessment {
    * а не подставляет значение по умолчанию.
    */
   event_state?: SpaceWeatherEventState
+  /** FN-41, та же оговорка о старых сохранённых результатах, что и выше. */
+  source_agreement?: SourceAgreement
+  /** FN-41: оценка каждой линии механизма отдельно, ни одна не стирается. */
+  source_assessments?: SourceLineAssessment[]
   max_level: string | null
   exceedance_hours_by_level: SpaceWeatherExceedance | MmodExceedance | null
   coverage_fraction: number

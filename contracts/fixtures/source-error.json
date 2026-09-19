@@ -15,7 +15,7 @@
     { "record_id": "rec-mmod-stream-0002", "source_id": "meteor-stream-static-ref", "source_version": "2024.1", "record_kind": "observation" }
   ],
   "orbit": {
-    "source": "nasa-iss-oem",
+    "source": "nasa-iss-oem-history",
     "norad_id": "25544",
     "elements_epoch": "2024-06-14T22:00:00Z",
     "elements_age_hours": 9.0,
@@ -34,6 +34,19 @@
           "mechanism": "space_weather",
           "status": "source_error",
           "event_state": "INSUFFICIENT_DATA",
+          "source_agreement": "INSUFFICIENT_DATA",
+          "source_assessments": [
+            {
+              "source_id": "nasa-donki-notifications",
+              "event_state": "INSUFFICIENT_DATA",
+              "coverage_fraction": 0.0,
+              "beyond_horizon": false,
+              "record_ids": [],
+              "notes": [
+                "Архив nasa-donki-notifications: интервал окна не прочитан (квота 429) — оценить невозможно, это отсутствие данных, а не благоприятная обстановка."
+              ]
+            }
+          ],
           "max_level": null,
           "exceedance_hours_by_level": null,
           "coverage_fraction": 0.0,
@@ -47,6 +60,8 @@
           "mechanism": "mmod",
           "status": "ok",
           "event_state": "NOT_APPLICABLE",
+          "source_agreement": "INSUFFICIENT_DATA",
+          "source_assessments": [],
           "max_level": "background",
           "exceedance_hours_by_level": { "elevated": 0, "pronounced": 0 },
           "coverage_fraction": 1.0,
@@ -71,6 +86,19 @@
           "mechanism": "space_weather",
           "status": "source_error",
           "event_state": "INSUFFICIENT_DATA",
+          "source_agreement": "INSUFFICIENT_DATA",
+          "source_assessments": [
+            {
+              "source_id": "nasa-donki-notifications",
+              "event_state": "INSUFFICIENT_DATA",
+              "coverage_fraction": 0.0,
+              "beyond_horizon": false,
+              "record_ids": [],
+              "notes": [
+                "Архив nasa-donki-notifications: интервал окна не прочитан (квота 429) — оценить невозможно, это отсутствие данных, а не благоприятная обстановка."
+              ]
+            }
+          ],
           "max_level": null,
           "exceedance_hours_by_level": null,
           "coverage_fraction": 0.0,
@@ -84,6 +112,8 @@
           "mechanism": "mmod",
           "status": "ok",
           "event_state": "NOT_APPLICABLE",
+          "source_agreement": "INSUFFICIENT_DATA",
+          "source_assessments": [],
           "max_level": "elevated",
           "exceedance_hours_by_level": { "elevated": 1.5, "pronounced": 0 },
           "coverage_fraction": 1.0,

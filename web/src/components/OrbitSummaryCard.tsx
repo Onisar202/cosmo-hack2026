@@ -11,7 +11,7 @@ import { TimeValue } from './TimeValue'
 const SOURCE_LABELS: Record<OrbitSummary['source'], string> = {
   celestrak: 'CelesTrak (текущие элементы)',
   'space-track': 'Space-Track GP_HISTORY (исторические элементы)',
-  'nasa-iss-oem': 'NASA TOPO CCSDS OEM (исторические эфемериды, интерполяция)',
+  'nasa-iss-oem-history': 'NASA TOPO CCSDS OEM (исторические эфемериды, интерполяция)',
 }
 
 /**

@@ -199,7 +199,7 @@ def test_historical_modes_return_a_real_stored_result_not_not_implemented(
     assert body["algorithm_version"] == ALGORITHM_VERSION
 
     orbit = body["orbit"]
-    assert orbit["source"] == "nasa-iss-oem"  # не celestrak и не space-track
+    assert orbit["source"] == "nasa-iss-oem-history"  # не celestrak и не space-track
     assert orbit["norad_id"] == "25544"
     assert orbit["coordinate_system"] == "EME2000"
     assert orbit["elements_age_hours"] >= 0
@@ -251,16 +251,76 @@ def test_historical_modes_never_touch_the_modern_celestrak_source(
 
     assert job["status"] == "done", job
     body = app_client.get(f"/api/results/{job['result_id']}").json()
-    assert body["orbit"]["source"] == "nasa-iss-oem"
+    assert body["orbit"]["source"] == "nasa-iss-oem-history"
 
 
-def test_historical_forecast_reaches_event_present_on_the_may_2024_event(
+def test_historical_analysis_reaches_event_present_on_the_may_2024_event(
     app_client: TestClient,
 ) -> None:
     """FN-41 приёмка п.4: ``EVENT_PRESENT`` достижим и различим. Выраженное
-    событие периода — 10–11 мая 2024 (AR3664, main-prompt.md §11): протонное
-    событие S1 объявлено уведомлением DONKI ``20240510-AL-004`` (13:46Z),
-    то есть ДО отсечения — строгий режим имеет право его видеть."""
+    событие периода — 10 мая 2024 (AR3664, main-prompt.md §11): протонное
+    событие DONKI ``2024-05-10T13:35:00-SEP-001`` попадает ВНУТРЬ окна
+    12:00–16:00, поэтому разбор видит его как подтверждённое событие."""
+    create = app_client.post(
+        "/api/calculations",
+        json={
+            "mode": "historical_analysis",
+            "start_at": "2024-05-10T12:00:00Z",
+            "duration_hours": 4,
+            "search_window_hours": 8,
+        },
+    )
+    job = wait_for_job(app_client, create.json()["task_id"])
+    assert job["status"] == "done", job
+    body = app_client.get(f"/api/results/{job['result_id']}").json()
+
+    win_a = next(w for w in body["windows"] if w["window_id"] == "win-a")
+    space_weather = next(
+        m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather"
+    )
+    assert space_weather["event_state"] == "EVENT_PRESENT"
+    # Подтверждённое событие без количественной оценки: уровень не выдумывается,
+    # но и «спокойно» не заявляется.
+    assert space_weather["status"] == "qualitative_only"
+    assert space_weather["max_level"] is None
+    assert space_weather["critical_gap"] is True
+    assert space_weather["record_ids"]  # прослеживаемость до уведомления (О4)
+    # Оценка КАЖДОЙ линии сохранена отдельно и подписана источником — ни одна
+    # не выбрана молча (второй комментарий Jira FN-41).
+    donki_line = next(
+        line
+        for line in space_weather["source_assessments"]
+        if line["source_id"] == "nasa-donki-notifications"
+    )
+    assert donki_line["event_state"] == "EVENT_PRESENT"
+
+    warning = next(
+        w for w in body["warnings"] if w["code"] == "space-weather-archived-event-present"
+    )
+    assert warning["severity"] == "critical"
+    assert set(warning["record_ids"]) == set(space_weather["record_ids"])
+
+    manifest_warnings = [
+        entry for entry in body["data_manifest"] if entry["record_kind"] == "warning"
+    ]
+    assert manifest_warnings
+    assert manifest_warnings[0]["source_id"] == "nasa-donki-notifications"
+
+
+def test_historical_forecast_after_an_announced_event_is_never_reported_as_quiet(
+    app_client: TestClient,
+) -> None:
+    """Строгий режим и уже объявленное, но не закрытое событие.
+
+    DONKI публикует уведомление в момент НАЧАЛА явления и не публикует
+    момента его окончания (``open_ended``, ``src/sources/archive_probe.py``).
+    Событие ``2024-05-10T13:35:00-SEP-001`` объявлено ДО отсечения
+    2024-05-11T00:00Z, но в само окно 11 мая 00:00–04:00 не попадает. Ни
+    «продолжалось», ни «закончилось» источником не утверждается, поэтому
+    честный ответ — ``INSUFFICIENT_DATA`` с НАЗВАННОЙ причиной, и ни при
+    каких условиях не ``NO_EVENT_DETECTED``
+    (``src/domain/spaceweather/archive_assessment.py``, main-prompt.md §2).
+    """
     create = app_client.post(
         "/api/calculations",
         json={
@@ -279,25 +339,18 @@ def test_historical_forecast_reaches_event_present_on_the_may_2024_event(
     space_weather = next(
         m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather"
     )
-    assert space_weather["event_state"] == "EVENT_PRESENT"
-    # Подтверждённое событие без количественной оценки: уровень не выдумывается,
-    # но и «спокойно» не заявляется.
-    assert space_weather["status"] == "qualitative_only"
+    assert space_weather["event_state"] == "INSUFFICIENT_DATA"
     assert space_weather["max_level"] is None
     assert space_weather["critical_gap"] is True
-    assert space_weather["record_ids"]  # прослеживаемость до уведомления (О4)
 
+    # Причина названа конкретно: объявленное явление без документированного
+    # конца, а не безликий «пробел архива» (критерий О4).
     warning = next(
-        w for w in body["warnings"] if w["code"] == "space-weather-archived-event-present"
+        w for w in body["warnings"] if w["code"] == "space-weather-announced-event-not-closed"
     )
     assert warning["severity"] == "critical"
-    assert set(warning["record_ids"]) == set(space_weather["record_ids"])
-
-    manifest_warnings = [
-        entry for entry in body["data_manifest"] if entry["record_kind"] == "warning"
-    ]
-    assert manifest_warnings
-    assert manifest_warnings[0]["source_id"] == "nasa-donki-notifications"
+    assert warning["record_ids"], "предупреждение обязано ссылаться на записи"
+    assert "SEP" in warning["message"]
 
 
 def test_historical_analysis_reaches_no_event_detected_on_the_quiet_control_period(
@@ -503,7 +556,41 @@ def test_historical_recompute_creates_a_new_immutable_result(
 
     first_body = app_client.get(f"/api/results/{first['result_id']}").json()
     second_body = app_client.get(f"/api/results/{second['result_id']}").json()
-    assert first_body["windows"] == second_body["windows"]  # те же данные — та же оценка
+
+    # Те же данные и та же версия алгоритма — та же ОЦЕНКА (main-prompt.md §3).
+    # Пояснения (``notes``) сравниваются отдельно: в них честно печатается
+    # момент, когда покрытие архива было прочитано ЭТОЙ попыткой
+    # (``CoverageInterval.fetched_at``), и он у двух прогонов законно разный —
+    # это происхождение факта, а не результат оценки.
+    def _assessment(body: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                key: value
+                for key, value in mechanism.items()
+                if key not in {"notes", "source_assessments"}
+            }
+            for window in body["windows"]
+            for mechanism in window["mechanisms"]
+        ]
+
+    assert _assessment(first_body) == _assessment(second_body)
+    for first_window, second_window in zip(
+        first_body["windows"], second_body["windows"], strict=True
+    ):
+        assert first_window["window_id"] == second_window["window_id"]
+        assert first_window["excluded_from_comparison"] == (
+            second_window["excluded_from_comparison"]
+        )
+        for first_mech, second_mech in zip(
+            first_window["mechanisms"], second_window["mechanisms"], strict=True
+        ):
+            assert len(first_mech["notes"]) == len(second_mech["notes"])
+            assert [line["source_id"] for line in first_mech["source_assessments"]] == [
+                line["source_id"] for line in second_mech["source_assessments"]
+            ]
+            assert [line["event_state"] for line in first_mech["source_assessments"]] == [
+                line["event_state"] for line in second_mech["source_assessments"]
+            ]
 
 
 def test_a_record_published_after_as_of_does_not_change_historical_forecast(

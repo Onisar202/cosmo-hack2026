@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,7 +53,7 @@ REAL_FILE_SHA256 = "c7b1abc031c04f04255f9c7f40ec2f1612ce2f921e06c5d34be5b3914970
 
 
 @pytest.fixture
-def db_conn(tmp_path: Path) -> sqlite3.Connection:
+def db_conn(tmp_path: Path) -> Iterator[sqlite3.Connection]:
     conn = connect(tmp_path / "store.sqlite3")
     yield conn
     conn.close()

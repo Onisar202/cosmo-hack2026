@@ -59,6 +59,60 @@ CREATE TABLE IF NOT EXISTS calculation_results (
 
 CREATE INDEX IF NOT EXISTS idx_calculation_results_mode
     ON calculation_results (mode, computed_at);
+
+-- FN-42 round 4/6/7 ревью PR #37: неизменяемый снимок ВХОДА строгого
+-- historical_forecast (и записи, и карта покрытия — ВМЕСТЕ), закреплённый
+-- для конкретного расчёта (computation_id) один раз и воспроизводимый
+-- дальше дословно. Только вставка, без UPDATE, тот же принцип, что и у
+-- source_records/calculation_results выше (src/store/forecast_snapshot.py):
+-- первый вызов для (computation_id, source_id, as_of) закрепляет то, что
+-- ему передали — включая пустой вход (round 6 ревью, finding 1) — под
+-- собственным, сервером сгенерированным snapshot_id (round 7 ревью,
+-- finding 3, ⚠️: не полагается на совпадение computation_id с будущим
+-- result_id, snapshot_id можно сохранить в data_manifest и восстановить
+-- использованный вход из выгрузки независимо). Любой последующий вызов с
+-- тем же (computation_id, source_id, as_of) читает уже сохранённое
+-- содержимое целиком и игнорирует то, что ему передали — в том числе рост
+-- набора пригодных записей (round 7 ревью, finding 2: не только карта
+-- покрытия, но и сам набор record_id входа расчёта закреплён этим снимком)
+-- и рост карты покрытия (round 4 ревью).
+-- computation_id — идентификатор конкретного расчёта (round 6 ревью,
+-- finding 3): без него первая же оценка для пары (source_id, as_of) — из
+-- любого, в том числе несвязанного, расчёта — необратимо решала бы, какой
+-- вход увидят ВСЕ независимые расчёты с тем же as_of. Два вызова с одним и
+-- тем же computation_id — идемпотентный повтор одного расчёта; с разными —
+-- независимые закрепления, не делящие состояние.
+CREATE TABLE IF NOT EXISTS archive_forecast_snapshots (
+    computation_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    PRIMARY KEY (computation_id, source_id, as_of)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_archive_forecast_snapshots_snapshot_id
+    ON archive_forecast_snapshots (snapshot_id);
+
+-- record_id входа, закреплённые вместе снимком snapshot_id выше. seq
+-- сохраняет порядок закрепления (main-prompt.md §3: воспроизводимость).
+CREATE TABLE IF NOT EXISTS archive_forecast_snapshot_records (
+    snapshot_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    record_id TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, seq)
+);
+
+-- Интервалы покрытия, закреплённые вместе снимком snapshot_id выше —
+-- итог merged_ingested_intervals на момент первого закрепления, сохранённый
+-- дословно, а не пересчитываемый заново при повторном чтении.
+CREATE TABLE IF NOT EXISTS archive_forecast_snapshot_intervals (
+    snapshot_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    interval_start TEXT NOT NULL,
+    interval_end TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, seq)
+);
 """
 
 

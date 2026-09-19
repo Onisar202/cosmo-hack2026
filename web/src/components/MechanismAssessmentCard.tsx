@@ -3,7 +3,12 @@ import Chip from '@mui/material/Chip'
 import Stack from '@mui/material/Stack'
 import Typography from '@mui/material/Typography'
 import type { MechanismAssessment } from '../api/types'
-import { EVENT_STATE_LABELS, MECHANISM_LABELS, MECHANISM_STATUS_LABELS } from './labels'
+import {
+  EVENT_STATE_LABELS,
+  MECHANISM_LABELS,
+  MECHANISM_STATUS_LABELS,
+  SOURCE_AGREEMENT_LABELS,
+} from './labels'
 import { NullValue } from './NullValue'
 import { StatusBadge } from './StatusBadge'
 
@@ -32,6 +37,13 @@ export function MechanismAssessmentCard({ assessment }: { assessment: MechanismA
   // состояние действительно есть, а не подменяется значением по умолчанию.
   const eventStateSpec =
     assessment.event_state == null ? null : EVENT_STATE_LABELS[assessment.event_state]
+  // Та же оговорка: поле обязательно контрактом с FN-41, но результаты,
+  // сохранённые до него, его не несут.
+  const agreementSpec =
+    assessment.source_agreement == null
+      ? null
+      : SOURCE_AGREEMENT_LABELS[assessment.source_agreement]
+  const sourceLines = assessment.source_assessments ?? []
 
   return (
     <Box sx={{ border: 1, borderColor: 'divider', borderRadius: 1, p: 1.5 }}>
@@ -50,6 +62,28 @@ export function MechanismAssessmentCard({ assessment }: { assessment: MechanismA
               icon={eventStateSpec.icon}
             />
           </Typography>
+        )}
+        {agreementSpec != null && (
+          <Typography variant="body2" component="div">
+            <strong>Согласие источников внутри механизма:</strong>{' '}
+            <StatusBadge
+              label={agreementSpec.label}
+              tone={agreementSpec.tone}
+              icon={agreementSpec.icon}
+            />
+          </Typography>
+        )}
+        {sourceLines.length > 0 && (
+          <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+            {sourceLines.map((line) => (
+              <Typography key={line.source_id} component="li" variant="body2">
+                <code>{line.source_id}</code>: {EVENT_STATE_LABELS[line.event_state].label},
+                покрытие {(line.coverage_fraction * 100).toFixed(0)}%
+                {line.beyond_horizon ? ' · за горизонтом линии' : ''}
+                {line.record_ids.length > 0 && ` · записи: ${line.record_ids.join(', ')}`}
+              </Typography>
+            ))}
+          </Box>
         )}
         <Typography variant="body2">
           <strong>Максимальный уровень:</strong>{' '}
