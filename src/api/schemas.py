@@ -41,8 +41,18 @@ Mode = Literal["current", "historical_analysis", "historical_forecast"]
 ARCHIVE_START = datetime(2024, 5, 1, 0, 0, 0, tzinfo=timezone.utc)
 ARCHIVE_END = datetime(2024, 6, 30, 23, 59, 59, 999999, tzinfo=timezone.utc)
 
-ALGORITHM_VERSION = "0.2.0"
-"""FN-34 (S2-04): recommendation.status/exclusion_reason for `current` are now
+ALGORITHM_VERSION = "0.3.0"
+"""FN-38 (S2-08): mechanisms[*space_weather] for `current` is no longer always
+not_implemented — src.domain.spaceweather.observed_classifier classifies the
+observed GOES proton flux (>=10 MeV, pfu) against the NOAA S-scale
+(main-prompt.md §11) and can now yield status=ok/missing_data/stale_data/
+source_error/beyond_horizon with a real max_level/exceedance_hours_by_level.
+Same identity-changing kind of change as FN-34 (S2-04, see history below):
+main-prompt.md §3 requires a version bump whenever the algorithm producing
+the result changes, even for requests where the observable output happens to
+stay the same (e.g. mmod, still not_implemented pending FN-39).
+
+FN-34 (S2-04): recommendation.status/exclusion_reason for `current` are now
 derived from src.domain.windows.dominance (rule v2) instead of a hardcoded
 literal — same identity of the algorithm producing the result, main-prompt.md
 §3 requires a version bump on any such change even when today's observable

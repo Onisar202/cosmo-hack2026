@@ -345,6 +345,43 @@ def get_latest_record(
     return payload
 
 
+def select_observed_range(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    record_kind: str,
+    start_at: datetime,
+    end_at: datetime,
+) -> list[dict[str, Any]]:
+    """Возвращает записи заданного источника/вида с ``observed_at`` в
+    полуоткрытом интервале ``[start_at, end_at)``, независимо от
+    ``published_at``/``replay_eligible``.
+
+    Третий сценарий выборки рядом с :func:`select_as_of` (строгий as-of
+    replay) и :func:`get_latest_record` (только самая свежая запись): здесь
+    нужен весь диапазон наблюдений, пересекающихся с окном ВКД, для
+    источника, у которого ``published_at`` не предоставляется поставщиком
+    вообще (``noaa-swpc-proton-flux`` — main-prompt.md §11 «наблюдаемый поток
+    протонов», см. ``src/sources/swpc.py``) — :func:`select_as_of` для такого
+    источника никогда не вернул бы ни одной записи (``published_at IS NOT
+    NULL`` в его условии), а :func:`get_latest_record` даёт только одну,
+    последнюю по получению, запись, не диапазон. Индекс
+    ``idx_source_records_observed_at`` (``src/store/schema.py``) заведён
+    заранее ровно под этот запрос.
+    """
+    _require_aware(start_at, "start_at")
+    _require_aware(end_at, "end_at")
+    rows = conn.execute(
+        """
+        SELECT payload_json FROM source_records
+        WHERE source_id = ? AND record_kind = ? AND observed_at >= ? AND observed_at < ?
+        ORDER BY observed_at ASC, record_id ASC
+        """,
+        (source_id, record_kind, _iso_utc(start_at), _iso_utc(end_at)),
+    ).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
 def select_as_of(
     conn: sqlite3.Connection,
     as_of: datetime,
