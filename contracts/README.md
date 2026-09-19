@@ -224,6 +224,12 @@
 - `GET /api/results/{result_id}` — объект по `result.schema.json`. Тот же
   объект используют HTML- и JSON-выгрузка (`export/`) и интерфейс — без
   отдельной сборки из другого источника.
+- `GET /api/results/{result_id}/export.json` — та же семантика, что у
+  `GET /api/results/{result_id}` (независимая копия того же объекта);
+  `GET /api/results/{result_id}/export.html` — читаемая HTML-версия того же
+  объекта (FN-36, S2-06, реализация — `src/export/`). Оба формата читают
+  результат тем же запросом к хранилищу, что и `GET /api/results/{result_id}`
+  — не отдельной выборкой.
 - `GET /api/results` — список сохранённых результатов (постранично), поля —
   подмножество `result.schema.json` (`result_id`, `computed_at`, `mode`,
   `as_of`, `recommendation.status`) без полных `windows`/`data_manifest`.
