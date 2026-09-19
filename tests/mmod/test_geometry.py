@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,8 +30,9 @@ from src.domain.mmod import geometry
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "mmod"
 
 
-def _load_reference_cases() -> dict:
-    return json.loads((FIXTURES_DIR / "reference-cases.json").read_text())
+def _load_reference_cases() -> dict[str, Any]:
+    result: dict[str, Any] = json.loads((FIXTURES_DIR / "reference-cases.json").read_text())
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +204,38 @@ def test_missing_shower_velocity_raises_for_open_radiant() -> None:
     with pytest.raises(geometry.MmodMissingInputError):
         geometry.effective_flux_ratio(
             None, radiant_unit_vector, (6771.0, 0.0, 0.0), (0.0, 7.6726, 0.0)
+        )
+
+
+def test_missing_shower_velocity_raises_for_shielded_radiant_too() -> None:
+    """Round 1 ревью PR #23: экранирование геометрически не зависит от
+    скорости потока, но отсутствующая скорость обязана быть замечена даже
+    когда экранирование само по себе уже даёт effective_flux_ratio=0.0 —
+    иначе пропуск данных молча маскируется структурным нулём."""
+    radiant_unit_vector = (-1.0, 0.0, 0.0)  # направлен точно в надир — экранирован
+    with pytest.raises(geometry.MmodMissingInputError):
+        geometry.effective_flux_ratio(
+            None, radiant_unit_vector, (6771.0, 0.0, 0.0), (0.0, 7.6726, 0.0)
+        )
+
+
+def test_missing_station_velocity_raises_for_shielded_radiant_too() -> None:
+    """Тот же принцип (round 1 ревью PR #23), для station_velocity_kms."""
+    radiant_unit_vector = (-1.0, 0.0, 0.0)  # экранирован
+    with pytest.raises(geometry.MmodMissingInputError):
+        geometry.effective_flux_ratio(66.0, radiant_unit_vector, (6771.0, 0.0, 0.0), None)  # type: ignore[arg-type]
+
+
+def test_missing_shower_velocity_raises_in_full_assessment_for_shielded_radiant() -> None:
+    """Тот же принцип для ``assess_shower_geometry`` целиком: экранированный
+    радиант не должен маскировать отсутствующую скорость потока."""
+    with pytest.raises(geometry.MmodMissingInputError):
+        geometry.assess_shower_geometry(
+            radiant_ra_deg=180.0,  # unit vector (-1, 0, 0) — экранирован
+            radiant_dec_deg=0.0,
+            shower_geocentric_velocity_kms=None,
+            station_position_km=(6771.0, 0.0, 0.0),
+            station_velocity_kms=(0.0, 7.6726, 0.0),
         )
 
 

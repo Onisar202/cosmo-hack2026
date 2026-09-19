@@ -120,6 +120,15 @@ def _scale(vector: Vector3, factor: float) -> Vector3:
     return (vector[0] * factor, vector[1] * factor, vector[2] * factor)
 
 
+def _validate_shower_velocity(shower_geocentric_velocity_kms: float | None) -> float:
+    v_g = _require_present(shower_geocentric_velocity_kms, "shower_geocentric_velocity_kms")
+    if v_g <= 0.0:
+        raise MmodImpossibleInputError(
+            f"shower_geocentric_velocity_kms={v_g} должна быть положительной"
+        )
+    return v_g
+
+
 def radiant_unit_vector_equatorial(
     radiant_ra_deg: float | None, radiant_dec_deg: float | None
 ) -> Vector3:
@@ -193,11 +202,7 @@ def relative_velocity_kms(
     радианта к Земле, т.е. противоположно направлению на радиант);
     ``v_rel_vec = v_meteor_vec - v_station_vec``.
     """
-    v_g = _require_present(shower_geocentric_velocity_kms, "shower_geocentric_velocity_kms")
-    if v_g <= 0.0:
-        raise MmodImpossibleInputError(
-            f"shower_geocentric_velocity_kms={v_g} должна быть положительной"
-        )
+    v_g = _validate_shower_velocity(shower_geocentric_velocity_kms)
     radiant_unit_raw = _require_finite_vector(radiant_unit_vector, "radiant_unit_vector")
     radiant_unit = _unit_vector(radiant_unit_raw, name="radiant_unit_vector")
     station_velocity = _require_finite_vector(station_velocity_kms, "station_velocity_kms")
@@ -216,12 +221,19 @@ def effective_flux_ratio(
     потока (docs/mechanisms.md §6): 0, если радиант закрыт Землёй, иначе
     ``|v_rel_vec| / V_g``.
 
+    Все обязательные параметры (скорость потока, скорость станции)
+    валидируются до проверки экранирования (round 1 ревью PR #23) — иначе
+    отсутствующая или невозможная скорость молча маскируется структурным
+    нулём экранированного случая, и пропуск данных остаётся незамеченным
+    (.ai/main-prompt.md §2, приёмка FN-32 п.4).
+
     **Не** является ``ratio_to_background`` и не несёт готового уровня MMOD
     — см. docstring модуля."""
+    v_g = _validate_shower_velocity(shower_geocentric_velocity_kms)
+    station_velocity = _require_finite_vector(station_velocity_kms, "station_velocity_kms")
     if is_radiant_shielded(radiant_unit_vector, station_position_km):
         return 0.0
-    v_g = _require_present(shower_geocentric_velocity_kms, "shower_geocentric_velocity_kms")
-    v_rel = relative_velocity_kms(v_g, radiant_unit_vector, station_velocity_kms)
+    v_rel = relative_velocity_kms(v_g, radiant_unit_vector, station_velocity)
     return v_rel / v_g
 
 
@@ -256,14 +268,18 @@ def assess_shower_geometry(
 
     Любой отсутствующий (``None``) или физически невозможный параметр
     поднимает :class:`MmodMissingInputError`/:class:`MmodImpossibleInputError`
-    — вызывающая сторона (будущая интеграция с ``src/domain/windows``)
-    обязана явно отобразить это в ``mechanismStatus`` контракта
-    (``missing_data``/``source_error``), а не подставлять правдоподобное
-    значение (задача FN-32, приёмка п.4).
+    — включая скорость потока при экранированном радианте: экранирование
+    не зависит от скорости, но пропуск данных о скорости обязан быть
+    замечен всегда, а не молча замаскирован структурным нулём (round 1
+    ревью PR #23) — вызывающая сторона (будущая интеграция с
+    ``src/domain/windows``) обязана явно отобразить это в
+    ``mechanismStatus`` контракта (``missing_data``/``source_error``), а не
+    подставлять правдоподобное значение (задача FN-32, приёмка п.4).
     """
     position = _require_finite_vector(station_position_km, "station_position_km")
     velocity = _require_finite_vector(station_velocity_kms, "station_velocity_kms")
     radiant_unit = radiant_unit_vector_equatorial(radiant_ra_deg, radiant_dec_deg)
+    v_g = _validate_shower_velocity(shower_geocentric_velocity_kms)
     r_station = _vector_magnitude(position)
     theta_crit = shielding_critical_angle_deg(r_station)
     angle = angle_to_nadir_deg(radiant_unit, position)
@@ -278,7 +294,6 @@ def assess_shower_geometry(
             v_rel_kms=None,
         )
 
-    v_g = _require_present(shower_geocentric_velocity_kms, "shower_geocentric_velocity_kms")
     v_rel = relative_velocity_kms(v_g, radiant_unit, velocity)
     return MmodGeometryAssessment(
         shielded=False,
