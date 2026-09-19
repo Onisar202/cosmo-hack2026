@@ -1,0 +1,32 @@
+{
+  "algorithm_version": "0.1.0",
+  "as_of": "2024-05-28T00:00:00Z",
+  "coverage": {
+    "donki_evidence_window_fraction": 0.0,
+    "mmod_mean_coverage_fraction": null,
+    "note": "orbit_release_available: whether an OEM release covering the full requested interval, published by as_of, was found at all. mmod_mean_coverage_fraction: mean of mechanismAssessment.coverage_fraction (mmod) across this scenario's windows, real output of src.domain.mmod.background.assess_mmod_background — null when no production result was built. donki_evidence_window_fraction: fraction of this scenario's windows for which the DONKI evidence probe found at least one overlapping notification known by as_of (any type, not filtered to SEP/GST — a broader signal-presence measure than event_miss/false_warning above).",
+    "orbit_release_available": false
+  },
+  "event_miss": {
+    "applicable": false,
+    "baseline_missed": null,
+    "evidence_missed": null,
+    "note": "expected_event is not True for this scenario — event_miss does not apply."
+  },
+  "expected_event": null,
+  "false_warning": {
+    "applicable": false,
+    "baseline_false_warning": null,
+    "evidence_false_warning": null,
+    "note": "expected_event is not False for this scenario — false_warning does not apply."
+  },
+  "lead_time_stability_note": "Not computed: DONKI notifications are point-in-time event alerts, not a continuous quantitative flux series, so a lead-time-before-threshold-crossing or run-to-run stability metric cannot be honestly derived from what this stand actually reads (main-prompt.md §2 — inventing a formula unsupported by the archived data would be worse than skipping it).",
+  "scenario": "missing_data",
+  "selected_window_change": {
+    "baseline_has_window_preference": false,
+    "divergence": false,
+    "explanation": "No production result was built for this scenario (orbit selection failed — see production_failure.json), so there is nothing to compare a window preference against.",
+    "production_recommendation_status": null,
+    "production_recommendation_window_id": null
+  }
+}

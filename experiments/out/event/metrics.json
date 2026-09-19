@@ -1,0 +1,32 @@
+{
+  "algorithm_version": "0.1.0",
+  "as_of": "2024-05-11T04:30:00Z",
+  "coverage": {
+    "donki_evidence_window_fraction": 1.0,
+    "mmod_mean_coverage_fraction": 1.0,
+    "note": "orbit_release_available: whether an OEM release covering the full requested interval, published by as_of, was found at all. mmod_mean_coverage_fraction: mean of mechanismAssessment.coverage_fraction (mmod) across this scenario's windows, real output of src.domain.mmod.background.assess_mmod_background — null when no production result was built. donki_evidence_window_fraction: fraction of this scenario's windows for which the DONKI evidence probe found at least one overlapping notification known by as_of (any type, not filtered to SEP/GST — a broader signal-presence measure than event_miss/false_warning above).",
+    "orbit_release_available": true
+  },
+  "event_miss": {
+    "applicable": true,
+    "baseline_missed": false,
+    "evidence_missed": false,
+    "note": "evidence_missed: the DONKI evidence probe found no SEP/GST notification overlapping any window. baseline_missed: the naive baseline's flat verdict was not event_carried_forward."
+  },
+  "expected_event": true,
+  "false_warning": {
+    "applicable": false,
+    "baseline_false_warning": null,
+    "evidence_false_warning": null,
+    "note": "expected_event is not False for this scenario — false_warning does not apply."
+  },
+  "lead_time_stability_note": "Not computed: DONKI notifications are point-in-time event alerts, not a continuous quantitative flux series, so a lead-time-before-threshold-crossing or run-to-run stability metric cannot be honestly derived from what this stand actually reads (main-prompt.md §2 — inventing a formula unsupported by the archived data would be worse than skipping it).",
+  "scenario": "event",
+  "selected_window_change": {
+    "baseline_has_window_preference": false,
+    "divergence": false,
+    "explanation": "Production status='all_windows_excluded' does not select a single window either (critical gap / tie / insufficient basis); the naive baseline also cannot express a window preference (same flat verdict for every window by construction). No divergence to report on this axis for this run — both methods end up without a differentiated pick, for different reasons (production: honestly declines due to the space_weather data gap; baseline: structurally incapable of comparing windows at all).",
+    "production_recommendation_status": "all_windows_excluded",
+    "production_recommendation_window_id": null
+  }
+}

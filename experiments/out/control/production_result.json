@@ -1,0 +1,263 @@
+{
+  "algorithm_version": "0.1.0",
+  "as_of": "2024-06-22T18:00:00Z",
+  "computed_at": "2024-06-22T18:00:00Z",
+  "coverage": {
+    "archive_gaps": [],
+    "requested_period_supported": true
+  },
+  "data_manifest": [
+    {
+      "record_id": "7d2398c5-d52f-5cb6-ac3c-fdfc2d7e02cf",
+      "record_kind": "orbital_elements",
+      "source_id": "nasa-iss-oem-history",
+      "source_version": "iss-coords/2024-06-18/ISS_OEM/ISS.OEM_J2K_EPH.txt:2024-06-18T03:23:22.072000+00:00:40c9c949aec10a16eceddd2cb1377c5a"
+    },
+    {
+      "record_id": "2604ec11-0481-56ff-812c-bd03d250b4f4",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "2f431bb7-8b97-5e3d-acae-bea7e671d5a2",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "36a63578-e355-584e-b4f9-ab717c329e20",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "5e7559ba-55ff-5d27-97a5-499c3b3bb367",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "6b91329d-7864-56dd-88ef-d3824d563552",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "8096702d-96e3-55e4-b014-4bba0cf31bf2",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "c3ab264c-ce3f-5e40-a376-759435b29067",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "c677c6b5-0e2e-516f-a092-8d92188c8d4d",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "cde561e8-6438-5161-9491-e5d8c4f90103",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "d54ef953-3e43-51ad-84ba-e99df42f3d6a",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "d7a1ccb7-5d3b-57fb-b291-5b4ed87a51c0",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "d7b6bc96-f084-57f8-9767-b471075d2343",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "d8d33439-efd5-51c1-ab30-9ff91f318a7d",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    },
+    {
+      "record_id": "f30b6b91-c21c-5c63-9869-d826e86e6627",
+      "record_kind": "forecast",
+      "source_id": "nasa-meo-leo-forecast-2024",
+      "source_version": "ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846"
+    }
+  ],
+  "limitations": [
+    "space_weather (Механизм 1): status=missing_data для каждого окна — нет архивного количественного наблюдения потока протонов (pfu) в этом репозитории (только живой noaa-swpc-proton-flux, никогда не replay_eligible). Архивная evidence-проба DONKI (record_kind=warning) показана в notes/record_ids/warnings как контекст и вход метрик experiments/, не как классификация. Строгая DONKI→шкала-S классификация — предмет FN-41/FN-42 (не слиты).",
+    "mmod (Механизм 2): ratio_to_background из NASA MEO 2024 LEO forecast, пороги 1.2/2 — эвристика команды поверх честного отношения (main-prompt.md §11). Геометрия станции (экранирование Землёй, относительная скорость встречи) не перемножается — тот же принцип, что и production mode=current.",
+    "orbit: NASA TOPO CCSDS OEM выпуск 2024-06-18T03:23:22.072000Z (is_reconstructed=False), интерполяция кубическая Эрмита между узлами; траектория участвует в отборе источника, а не в самих оценках механизмов этого стенда (MMOD-уровень не умножается на геометрию, см. выше).",
+    "Этот стенд — experiments/, отдельная от src/api/service.py сборка результата теми же нижележащими доменными/source-модулями (main-prompt.md §11 «Это доказательство доступности»); algorithm_version этого стенда самостоятельный, не совпадает с src.api.schemas.ALGORITHM_VERSION."
+  ],
+  "mode": "historical_forecast",
+  "orbit": {
+    "coordinate_system": "EME2000",
+    "elements_age_hours": 110.61053555555556,
+    "elements_epoch": "2024-06-18T03:23:22.072000Z",
+    "is_reconstructed": false,
+    "norad_id": "25544",
+    "record_id": "7d2398c5-d52f-5cb6-ac3c-fdfc2d7e02cf",
+    "source": "space-track"
+  },
+  "recommendation": {
+    "explanation": "Все окна исключены из сравнения: win-a — Критический пробел данных по механизму(ам) space_weather — окно выведено из сравнения (не проигрывает по баллам, main-prompt.md §11, правило предпочтения окон, п.1); окно остаётся видимым в результате.; win-b — Критический пробел данных по механизму(ам) space_weather — окно выведено из сравнения (не проигрывает по баллам, main-prompt.md §11, правило предпочтения окон, п.1); окно остаётся видимым в результате.",
+    "status": "all_windows_excluded",
+    "window_id": null
+  },
+  "request": {
+    "as_of": "2024-06-22T18:00:00Z",
+    "duration_hours": 6.0,
+    "mode": "historical_forecast",
+    "search_window_hours": 24.0,
+    "start_at": "2024-06-20T06:00:00Z"
+  },
+  "result_id": "res-experiment-control",
+  "source_status": [
+    {
+      "frozen": false,
+      "last_error_at": null,
+      "last_error_message": null,
+      "last_success_at": "2024-06-22T18:00:00Z",
+      "quota_limited": false,
+      "source_id": "nasa-iss-oem-history"
+    },
+    {
+      "frozen": false,
+      "last_error_at": null,
+      "last_error_message": null,
+      "last_success_at": "2024-06-22T18:00:00Z",
+      "quota_limited": false,
+      "source_id": "nasa-meo-leo-forecast-2024"
+    },
+    {
+      "frozen": false,
+      "last_error_at": null,
+      "last_error_message": null,
+      "last_success_at": "2024-06-22T18:00:00Z",
+      "quota_limited": false,
+      "source_id": "nasa-donki-notifications"
+    }
+  ],
+  "warnings": [],
+  "windows": [
+    {
+      "duration_hours": 6.0,
+      "end_at": "2024-06-20T12:00:00Z",
+      "excluded_from_comparison": true,
+      "exclusion_reason": "Критический пробел данных по механизму(ам) space_weather — окно выведено из сравнения (не проигрывает по баллам, main-prompt.md §11, правило предпочтения окон, п.1); окно остаётся видимым в результате.",
+      "lighting": {
+        "note": null,
+        "requested": false,
+        "status": "not_requested"
+      },
+      "mechanisms": [
+        {
+          "coverage_fraction": 0.0,
+          "critical_gap": true,
+          "exceedance_hours_by_level": null,
+          "max_level": null,
+          "mechanism": "space_weather",
+          "notes": [
+            "space_weather: нет архивного количественного наблюдения потока протонов (pfu) за этот период — noaa-swpc-proton-flux не несёт published_at и никогда не replay_eligible (FN-41/FN-42 — не слитые задачи, вне области FN-43). Честный статус — missing_data, не имитация уровня (main-prompt.md §2).",
+            "Архивная evidence-проба DONKI не нашла ни одного предупреждения, пересекающегося с этим окном и известного к as_of."
+          ],
+          "record_ids": [],
+          "status": "missing_data"
+        },
+        {
+          "coverage_fraction": 1.0,
+          "critical_gap": false,
+          "exceedance_hours_by_level": {
+            "elevated": 6.0,
+            "pronounced": 0.0
+          },
+          "max_level": "elevated",
+          "mechanism": "mmod",
+          "notes": [
+            "NASA MEO 2024 LEO forecast (factor 1.05e+02 J, linear-per-hour-v1): сетка покрывает 2024-01-01T00:00:00+00:00 .. 2025-01-01T06:00:00+00:00.",
+            "Максимальный уровень в окне: elevated (Фон — эвристика команды поверх ratio_to_background, main-prompt.md §11; ниже 1.2 — Фон, 1.2..2 — Повышенный, выше 2 — Выраженный)."
+          ],
+          "record_ids": [
+            "d8d33439-efd5-51c1-ab30-9ff91f318a7d",
+            "f30b6b91-c21c-5c63-9869-d826e86e6627",
+            "5e7559ba-55ff-5d27-97a5-499c3b3bb367",
+            "6b91329d-7864-56dd-88ef-d3824d563552",
+            "8096702d-96e3-55e4-b014-4bba0cf31bf2",
+            "36a63578-e355-584e-b4f9-ab717c329e20",
+            "c3ab264c-ce3f-5e40-a376-759435b29067"
+          ],
+          "status": "ok"
+        }
+      ],
+      "start_at": "2024-06-20T06:00:00Z",
+      "window_id": "win-a"
+    },
+    {
+      "duration_hours": 6.0,
+      "end_at": "2024-06-21T12:00:00Z",
+      "excluded_from_comparison": true,
+      "exclusion_reason": "Критический пробел данных по механизму(ам) space_weather — окно выведено из сравнения (не проигрывает по баллам, main-prompt.md §11, правило предпочтения окон, п.1); окно остаётся видимым в результате.",
+      "lighting": {
+        "note": null,
+        "requested": false,
+        "status": "not_requested"
+      },
+      "mechanisms": [
+        {
+          "coverage_fraction": 0.0,
+          "critical_gap": true,
+          "exceedance_hours_by_level": null,
+          "max_level": null,
+          "mechanism": "space_weather",
+          "notes": [
+            "space_weather: нет архивного количественного наблюдения потока протонов (pfu) за этот период — noaa-swpc-proton-flux не несёт published_at и никогда не replay_eligible (FN-41/FN-42 — не слитые задачи, вне области FN-43). Честный статус — missing_data, не имитация уровня (main-prompt.md §2).",
+            "Архивная evidence-проба DONKI не нашла ни одного предупреждения, пересекающегося с этим окном и известного к as_of."
+          ],
+          "record_ids": [],
+          "status": "missing_data"
+        },
+        {
+          "coverage_fraction": 1.0,
+          "critical_gap": false,
+          "exceedance_hours_by_level": {
+            "elevated": 6.0,
+            "pronounced": 0.0
+          },
+          "max_level": "elevated",
+          "mechanism": "mmod",
+          "notes": [
+            "NASA MEO 2024 LEO forecast (factor 1.05e+02 J, linear-per-hour-v1): сетка покрывает 2024-01-01T00:00:00+00:00 .. 2025-01-01T06:00:00+00:00.",
+            "Максимальный уровень в окне: elevated (Фон — эвристика команды поверх ratio_to_background, main-prompt.md §11; ниже 1.2 — Фон, 1.2..2 — Повышенный, выше 2 — Выраженный)."
+          ],
+          "record_ids": [
+            "d7a1ccb7-5d3b-57fb-b291-5b4ed87a51c0",
+            "2604ec11-0481-56ff-812c-bd03d250b4f4",
+            "d54ef953-3e43-51ad-84ba-e99df42f3d6a",
+            "cde561e8-6438-5161-9491-e5d8c4f90103",
+            "2f431bb7-8b97-5e3d-acae-bea7e671d5a2",
+            "d7b6bc96-f084-57f8-9767-b471075d2343",
+            "c677c6b5-0e2e-516f-a092-8d92188c8d4d"
+          ],
+          "status": "ok"
+        }
+      ],
+      "start_at": "2024-06-21T06:00:00Z",
+      "window_id": "win-b"
+    }
+  ]
+}
