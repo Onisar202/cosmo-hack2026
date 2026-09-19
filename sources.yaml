@@ -532,7 +532,15 @@ space_weather:
       Парсинг, нормализация и production-шлюз fetch_and_store (TTL,
       повторы, 429, заморозка/отключение) — src/sources/noaa_3day_forecast.py.
       Интерпретация для окна ВКД — src/domain/spaceweather/external_forecast.py.
-      ОСТАЁТСЯ (см. PR): проверка на реальном сохранённом текущем ответе.
+      Подключено к src/api/service.py (round 3 ревью PR #24): получается в
+      каждом mode=current расчёте и в /api/sources/refresh, статус — в
+      /api/sources/status, пригодные записи выбираются через select_as_of
+      и передаются в assess_external_forecast для каждого окна — notes/
+      record_ids окна и result.data_manifest несут реальные данные, когда
+      прогноз пересекается с окном (mechanisms[*].status остаётся
+      not_implemented — полноценная пороговая оценка требует ещё не
+      реализованной интерпретации наблюдения GOES). ОСТАЁТСЯ (см. PR):
+      проверка на реальном сохранённом текущем ответе.
 
   - id: noaa-swpc-3day-forecast-archive
     name: "NOAA SWPC 3-Day Forecast — архив исторических выпусков (NCEI)"
