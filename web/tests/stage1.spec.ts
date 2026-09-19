@@ -83,10 +83,23 @@ test.describe('FN-28: сквозная проверка развёрнутого
 
     await expect(orbitCard).toBeVisible()
     await expect(page.getByText('CelesTrak (текущие элементы)')).toBeVisible()
-    // Оба обязательных механизма воздействия ещё не реализованы на этом
-    // этапе (FN-26/FN-25/FN-22 — интерпретация приходит позже) — интерфейс
-    // показывает это честно, а не имитирует оценку.
-    await expect(page.getByText('механизм ещё не реализован').first()).toBeVisible()
+    // FN-38/FN-39: обе обязательные карточки приходят из сохранённого
+    // production-результата. Для сегодняшнего окна допустимы честные
+    // missing_data/beyond_horizon (NASA MEO покрывает 2024, GOES здесь —
+    // наблюдение, не прогноз), но прежнего not_implemented быть не должно.
+    await expect(page.getByText('Космическая погода (поток протонов)').first()).toBeVisible()
+    await expect(page.getByText('MMOD (метеороидная составляющая)').first()).toBeVisible()
+    await expect(page.getByText('механизм ещё не реализован')).toHaveCount(0)
+
+    // UI предлагает обе выгрузки именно для этого сохранённого result_id.
+    await expect(page.getByRole('link', { name: 'Скачать JSON' })).toHaveAttribute(
+      'href',
+      /\/api\/results\/res-[^/]+\/export\.json$/,
+    )
+    await expect(page.getByRole('link', { name: 'Скачать HTML' })).toHaveAttribute(
+      'href',
+      /\/api\/results\/res-[^/]+\/export\.html$/,
+    )
 
     // Тот же сохранённый объект доступен из «Сохранённые результаты»
     // (main-prompt.md §3 «интерфейс и обе выгрузки читают один и тот же

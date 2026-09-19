@@ -28,7 +28,7 @@ export const conflictResult: CalculationResult = {
   },
   mode: 'current',
   as_of: null,
-  algorithm_version: '0.2.0',
+  algorithm_version: '0.4.0',
   data_manifest: [
     {
       record_id: 'rec-conflict-orbit-0001',
@@ -44,9 +44,10 @@ export const conflictResult: CalculationResult = {
     },
     {
       record_id: 'rec-conflict-mmod-0001',
-      source_id: 'meteor-stream-static-ref',
-      source_version: '2024.1',
-      record_kind: 'observation',
+      source_id: 'nasa-meo-leo-forecast-2024',
+      source_version:
+        'ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846',
+      record_kind: 'forecast',
     },
   ],
   orbit: {
@@ -167,7 +168,7 @@ export const conflictResult: CalculationResult = {
       quota_limited: false,
     },
     {
-      source_id: 'meteor-stream-static-ref',
+      source_id: 'nasa-meo-leo-forecast-2024',
       last_success_at: '2024-01-01T00:00:00Z',
       last_error_at: null,
       last_error_message: null,
@@ -188,7 +189,7 @@ export const beyondHorizonResult: CalculationResult = {
   },
   mode: 'current',
   as_of: null,
-  algorithm_version: '0.2.0',
+  algorithm_version: '0.4.0',
   data_manifest: [
     {
       record_id: 'rec-horizon-orbit-0001',
@@ -204,9 +205,10 @@ export const beyondHorizonResult: CalculationResult = {
     },
     {
       record_id: 'rec-horizon-mmod-0001',
-      source_id: 'meteor-stream-static-ref',
-      source_version: '2024.1',
-      record_kind: 'observation',
+      source_id: 'nasa-meo-leo-forecast-2024',
+      source_version:
+        'ntrs-20230015158-distribution-2023-11-02T05:00:00Z-metadata-sha256-e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846',
+      record_kind: 'forecast',
     },
   ],
   orbit: {
@@ -331,7 +333,7 @@ export const beyondHorizonResult: CalculationResult = {
       quota_limited: false,
     },
     {
-      source_id: 'meteor-stream-static-ref',
+      source_id: 'nasa-meo-leo-forecast-2024',
       last_success_at: '2024-01-01T00:00:00Z',
       last_error_at: null,
       last_error_message: null,

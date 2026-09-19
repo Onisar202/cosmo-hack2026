@@ -52,7 +52,10 @@ services:
     ports:
       - "8080:80"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      # Alpine wget resolves localhost to ::1 first, while this nginx config
+      # listens on IPv4. Use the loopback address explicitly so health means
+      # the same thing as the published HTTP endpoint on every host.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
       interval: 10s
       timeout: 3s
       retries: 5

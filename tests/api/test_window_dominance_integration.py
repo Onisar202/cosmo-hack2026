@@ -159,9 +159,13 @@ def test_apply_window_dominance_excludes_window_with_critical_gap_but_keeps_it_v
 
 
 def test_apply_window_dominance_all_windows_excluded_when_not_implemented() -> None:
-    """Реальное сегодняшнее состояние сервиса: оба механизма
-    ``not_implemented``/``critical_gap=True`` — то же наблюдаемое поведение,
-    что и раньше захардкоженная константа, но теперь выведенное правилом."""
+    """Защитный сценарий для legacy/неполного producer payload.
+
+    Production current-путь после FN-38/FN-39 больше не создаёт
+    ``not_implemented`` для этих механизмов, однако доменное правило не
+    должно случайно рекомендовать окно, если такой неполный payload пришёл
+    от старой версии producer или сохранённой фикстуры.
+    """
     not_implemented_sw = _mechanism(
         "space_weather", status="not_implemented", max_level=None, exceedance=None,
         critical_gap=True,
