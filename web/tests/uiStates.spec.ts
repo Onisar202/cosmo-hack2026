@@ -18,14 +18,19 @@ const successFixture = JSON.parse(
  * FN-35: UI-путь сравнения окон, неполноты и пересчёта плана, покрытый
  * Playwright'ом БЕЗ живого бэкенда — в отличие от `web/tests/stage1.spec.ts`
  * (FN-28), которая намеренно бьёт по развёрнутому стеку (CelesTrak/NOAA SWPC
- * за сетью) и поэтому не входит в CI (`.github/workflows/ci.yml`:
- * `frontend-checks` гоняет только lint/format/test/build). Здесь весь
- * контракт `src/api/client.ts` (`POST /api/calculations`,
- * `GET /api/calculations/:id`, `GET /api/results/:id`,
- * `GET /api/sources/status`) перехватывается через `page.route`, поэтому
- * проверка воспроизводима без сети и годится для более широкого запуска —
- * см. также требование acceptance criterion 5 (успешный путь, конфликт,
- * отказ источника, гонка запросов).
+ * за сетью). Здесь весь контракт `src/api/client.ts`
+ * (`POST /api/calculations`, `GET /api/calculations/:id`,
+ * `GET /api/results/:id`, `GET /api/sources/status`) перехватывается через
+ * `page.route`, поэтому проверка воспроизводима без сети — этот файл гоняется
+ * отдельной конфигурацией `web/playwright.uiStates.config.ts`
+ * (`npm run test:e2e:mock`), которая сама поднимает `npm run preview` и не
+ * требует `STAGE1_WEB_BASE_URL`; она и есть в CI
+ * (`.github/workflows/ci.yml` → `frontend-checks` → «E2E (мок, Playwright)»),
+ * а не общий `playwright.config.ts`/`test:e2e`, который матчит и сетевой
+ * `stage1.spec.ts` (round 1 ревью PR #27 — заявленное покрытие обязано
+ * реально запускаться, а не только существовать как исходник). См. также
+ * требование acceptance criterion 5 (успешный путь, конфликт, отказ
+ * источника, гонка запросов).
  *
  * Два состояния (конфликт механизмов и `beyond_horizon`) не входят в четыре
  * канонические фикстуры контракта (`web/src/api/fixtures.ts` — инвариант

@@ -138,7 +138,7 @@ export const conflictResult: CalculationResult = {
       mechanism: null,
       message:
         'Окно A ниже по механизму 1 (S1 против S2 у окна B), но выше по механизму 2 (выраженный уровень против фона у окна B) — окно B наоборот: ниже по механизму 2, но выше по механизму 1. Конфликт между механизмами: ни одно окно не доминирует.',
-      record_ids: [],
+      record_ids: ['rec-conflict-swx-0001', 'rec-conflict-mmod-0001'],
       fetch_attempt_id: null,
       window_id: null,
     },
@@ -302,7 +302,7 @@ export const beyondHorizonResult: CalculationResult = {
       mechanism: 'space_weather',
       message:
         'Окно B начинается через 12 часов от момента расчёта — за пределами 6-часового горизонта прогноза механизма 1. Это «не покрыто», а не «спокойно».',
-      record_ids: [],
+      record_ids: ['rec-horizon-swx-0001'],
       fetch_attempt_id: null,
       window_id: 'win-b',
     },
