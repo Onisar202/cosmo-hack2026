@@ -9,7 +9,7 @@
   },
   "mode": "historical_analysis",
   "as_of": null,
-  "algorithm_version": "0.1.0",
+  "algorithm_version": "0.2.0",
   "data_manifest": [
     { "record_id": "rec-hist-orbit-0001", "source_id": "space-track-gp-history", "source_version": "2024-06-14T22:00:00Z", "record_kind": "orbital_elements" },
     { "record_id": "rec-mmod-stream-0002", "source_id": "meteor-stream-static-ref", "source_version": "2024.1", "record_kind": "observation" }
@@ -134,7 +134,7 @@
   "recommendation": {
     "status": "all_windows_excluded",
     "window_id": null,
-    "explanation": "Оба окна исключены: критический пробел по механизму 1 из-за отказа источника (квота 429), несмотря на доступность оценки по механизму 2 — хорошее покрытие одного механизма не компенсирует пробел в другом."
+    "explanation": "Оба окна исключены правилом доминирования v2 (FN-34): критический пробел по механизму 1 из-за отказа источника (квота 429), несмотря на доступность оценки по механизму 2 — хорошее покрытие одного механизма не компенсирует пробел в другом."
   },
   "source_status": [
     { "source_id": "space-track-gp-history", "last_success_at": "2024-06-14T22:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
