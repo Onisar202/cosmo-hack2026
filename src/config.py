@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     store_db_path: str = "data/store.sqlite3"
     store_raw_dir: str = "data/raw"
 
+    # Шаг расчёта траектории (.ai/main-prompt.md §6: «шаг расчёта траектории —
+    # параметр конфигурации, а не константа в коде»), src/domain/orbit/propagate.py.
+    orbit_step_minutes: float = 5.0
+    # Насколько давние (или «из будущего») орбитальные элементы ещё считаются
+    # подтверждёнными для расчёта; свыше этого порога геометрия помечается как
+    # реконструкция (src/domain/orbit/propagate.py:is_reconstructed_geometry,
+    # .ai/main-prompt.md §11 «Траектория»).
+    orbit_max_confirmed_age_hours: float = 24.0
+
 
 @lru_cache
 def get_settings() -> Settings:

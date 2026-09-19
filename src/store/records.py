@@ -313,6 +313,38 @@ def get_original(conn: sqlite3.Connection, raw_store: RawOriginalStore, record_i
     return raw_store.get(raw_ref, checksum)
 
 
+def get_latest_record(
+    conn: sqlite3.Connection, *, source_id: str, record_kind: str
+) -> dict[str, Any] | None:
+    """Возвращает самую недавно полученную (по ``fetched_at``) запись
+    заданного источника и вида, независимо от ``published_at``/
+    ``replay_eligible``.
+
+    Отдельный запрос от :func:`select_as_of`: тот обслуживает строгий
+    historical replay (только записи, пригодные и опубликованные не позже
+    отсечения); эта функция — другой сценарий, «последний пригодный ответ
+    сохраняется и отдаётся с явной давностью, когда источник недоступен»
+    (.ai/main-prompt.md §5). Для источников без времени публикации (например
+    ``celestrak-gp`` — ``published_at`` всегда ``None``) ``select_as_of``
+    никогда бы не вернул ни одной записи; здесь это и не нужно — вызывающая
+    сторона (обычно fallback при живом отказе источника) сама решает, как
+    показать давность и происхождение записи.
+    """
+    row = conn.execute(
+        """
+        SELECT payload_json FROM source_records
+        WHERE source_id = ? AND record_kind = ?
+        ORDER BY fetched_at DESC, record_id DESC
+        LIMIT 1
+        """,
+        (source_id, record_kind),
+    ).fetchone()
+    if row is None:
+        return None
+    payload: dict[str, Any] = json.loads(row[0])
+    return payload
+
+
 def select_as_of(
     conn: sqlite3.Connection,
     as_of: datetime,
