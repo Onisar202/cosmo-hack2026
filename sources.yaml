@@ -432,3 +432,170 @@ space_weather:
       зарегистрирован как отдельный источник, пока не найден отдельно.
       Полная постраничная загрузка обоих покрытых интервалов в хранилище —
       задача этапа 3.
+
+  # --- NOAA 3-Day Forecast (S1+), обязательное изменение №1 — FN-31 (S2-01). ---
+  # Отдельная от noaa-swpc-proton-flux выше линия: там — наблюдение GOES pfu,
+  # здесь — суточная вероятность (%) внешнего прогноза NOAA уровня S1 и выше
+  # на каждый из трёх прогнозных дней (main-prompt.md §11 «Механизм 1»,
+  # абзац «Прогноз — собственный или обоснованно применённый внешний»).
+  # Два раздельных id (живой продукт и архив) с ОБЩИМ парсером
+  # (src/sources/noaa_3day_forecast.py::parse_noaa_3day_forecast) — формат
+  # текста идентичен, различается только точка получения и то, что архивный
+  # ответ не требует TTL/периодического refresh (main-prompt.md §5 «кеш
+  # архивных ответов бессрочен»).
+
+  - id: noaa-swpc-3day-forecast
+    name: "NOAA SWPC 3-Day Forecast — суточная вероятность S1 и выше (Solar Radiation Storm Forecast)"
+    provider: "NOAA Space Weather Prediction Center (SWPC)"
+    url: "https://services.swpc.noaa.gov/text/3-day-forecast.txt"
+    product: >-
+      Текстовый бюллетень, обновляется NOAA раз в сутки; раздел B «NOAA
+      Solar Radiation Storm Forecast» несёт таблицу с тремя прогнозными
+      днями и строкой «S1 or greater» — суточной вероятностью (0-100%)
+      события уровня S1 и выше. Разделы A (геомагнитная активность Kp) и C
+      (радиошумовые блэкауты R) этим коннектором намеренно не извлекаются
+      — main-prompt.md §11 относит Kp и шкалу R к отдельному контексту
+      Механизма 1, не к этой линии.
+    record_kind: forecast
+    value_unit: percent
+    cadence: "публикуется NOAA номинально раз в сутки (документированная частота продукта; момент суток в этой сессии не подтверждён живым запросом, см. access_restrictions)."
+    coverage: >-
+      Только текущий (последний выпущенный) бюллетень — этот эндпоинт не
+      хранит архив; исторический период обслуживается отдельной записью
+      noaa-swpc-3day-forecast-archive ниже.
+    published_at: >-
+      Строка ':Issued:' внутри тела бюллетеня (тот же принцип, что и у
+      noaa-swpc-forecast-discussion-archive выше — не время HTTP-запроса и
+      не время слота из URL, которого у этого эндпоинта и нет: у живого
+      продукта единственный URL без даты). Продукт всегда несёт эту строку
+      (задокументированный формат NOAA text-продуктов этого семейства) —
+      её отсутствие в полученном ответе является ошибкой формата
+      (Noaa3DayForecastFormatError), а не поводом принять запись с
+      published_at=null.
+    versioning: >-
+      source_version — сам ':Issued:' в фиксированном формате.
+      provider_record_id идентифицирует не бюллетень, а прогнозируемый
+      КАЛЕНДАРНЫЙ ДЕНЬ ('noaa-3day-s1-plus:<YYYY-MM-DD>') — тот же день
+      появляется в трёх последовательных бюллетенях (как Day 3, Day 2,
+      затем Day 1); каждое повторное появление — новая версия рядом с
+      прежней, не перезапись (main-prompt.md §2). Это же свойство
+      реализует historical_forecast для этой линии без отдельного кода:
+      src/store/records.py::select_as_of уже отбирает для каждого
+      provider_record_id версию с наибольшим published_at <= as_of.
+    quality_notes: >-
+      Значение читается из таблицы как есть (quality=nominal) — в отличие
+      от noaa-swpc-forecast-discussion-archive выше, здесь не восстанавливается
+      никакой интервал: колонка таблицы прямо называет календарный день,
+      valid_from/valid_to — начало и конец этих суток UTC, наблюдение не
+      подменяется прогнозом ни в одном поле (main-prompt.md §1, §4).
+      Суточная вероятность НЕ делится по часам, НЕ умножается на
+      длительность окна ВКД, НЕ суммируется через полночь и не называется
+      вероятностью ВКД — реализовано в src/domain/spaceweather/external_forecast.py.
+    license: >-
+      Продукт NOAA — общественное достояние (U.S. Government work); NOAA
+      просит указывать атрибуцию "NOAA Space Weather Prediction Center".
+    independence_note: >-
+      Единственный зарегистрированный источник этой конкретной линии
+      (суточная вероятность S1+); независим от noaa-swpc-proton-flux (другая
+      величина — вероятность внешнего прогноза, а не измеренный поток) и от
+      noaa-swpc-forecast-discussion-archive (другая, структурированная
+      таблица, а не разбор свободного текста дискуссии).
+    network:
+      connect_timeout_seconds: 5.0
+      read_timeout_seconds: 10.0
+      max_retries: 3
+      retry_backoff_base_seconds: 1.0
+    freshness:
+      ttl_seconds: 3600
+      critical_staleness_seconds: 21600
+    replay_eligible_for_historical_forecast: true
+    replay_eligible_note: >-
+      published_at всегда известен из ':Issued:' для успешно распарсенного
+      бюллетеня (см. published_at выше) — по стандартному правилу
+      src/store/records.py записи этой линии пригодны для строгого replay.
+      НЕ ПОДТВЕРЖДЕНО на реальном сохранённом ответе в этой сессии (см.
+      implementation_note и access_restrictions) — только на синтетических,
+      явно помеченных фикстурах, повторяющих документированный формат
+      продукта. Это открытый пункт приёмки FN-31 п.1, не скрытый (main-prompt.md §2).
+    access_restrictions: >-
+      Без ключа/регистрации, публичный HTTP-эндпоинт. БЛОКЕР этой сессии:
+      исходящий сетевой прокси песочницы, где готовился этот PR, отвечает
+      403 на services.swpc.noaa.gov (подтверждено прямой попыткой в начале
+      этой задачи) — тот же класс ограничения, что уже задокументирован в
+      README «Известное ограничение окружения сборки» (FN-28). Реальный
+      живой ответ этого эндпоинта не был получен и не проверен в этой
+      сессии; парсер реализован по публично документированному, стабильному
+      текстовому формату продукта (тот же стиль заголовка, что и у уже
+      подтверждённого noaa-swpc-forecast-discussion-archive).
+    enabled: true
+    implementation_note: >-
+      Парсинг, нормализация и production-шлюз fetch_and_store (TTL,
+      повторы, 429, заморозка/отключение) — src/sources/noaa_3day_forecast.py.
+      Интерпретация для окна ВКД — src/domain/spaceweather/external_forecast.py.
+      ОСТАЁТСЯ (см. PR): проверка на реальном сохранённом текущем ответе.
+
+  - id: noaa-swpc-3day-forecast-archive
+    name: "NOAA SWPC 3-Day Forecast — архив исторических выпусков (NCEI)"
+    provider: "NOAA Space Weather Prediction Center (SWPC); архивируется NOAA NCEI/NGDC"
+    url: >-
+      https://www.ngdc.noaa.gov/stp/space-weather/swpc-products/daily_reports/forecast/{YYYY}/{MM}/{YYYYMMDDHHMM}forecast.txt
+    product: >-
+      Тот же текстовый бюллетень «3-Day Forecast», что и у
+      noaa-swpc-3day-forecast выше, из архива NCEI. URL строится по образцу
+      уже подтверждённого соседнего продукта
+      noaa-swpc-forecast-discussion-archive (тот же каталог
+      daily_reports/, та же схема ГГГГ/ММ/времяслотаHHMM в имени файла) —
+      **точное имя подкаталога и файла для 3-Day Forecast НЕ подтверждено
+      независимо в этой сессии** (сетевой доступ к www.ngdc.noaa.gov
+      заблокирован тем же прокси — см. access_restrictions ниже); это
+      явный, а не скрытый пробел (main-prompt.md §2).
+    record_kind: forecast
+    value_unit: percent
+    coverage: >-
+      НЕ ПРОВЕРЕНО в этой сессии — ни охват обязательного периода
+      01.05–30.06.2024, ни карта пробелов по телам реальных выпусков
+      (приёмка FN-31 п.1-2). Это главный открытый пункт задачи, см. PR и
+      docs/method.md §7.
+    published_at: >-
+      Строка ':Issued:' внутри тела бюллетеня — тот же парсер
+      (parse_noaa_3day_forecast), что и у живого продукта выше: формат
+      идентичен, различается только точка получения.
+    versioning: >-
+      Как у noaa-swpc-3day-forecast выше — та же схема
+      provider_record_id/source_version, тот же общий код нормализации
+      (noaa_3day_forecast_to_record_inputs).
+    quality_notes: "Как у noaa-swpc-3day-forecast выше."
+    access_restrictions: >-
+      Без ключа/регистрации по образцу соседнего архива (ожидается, не
+      подтверждено). БЛОКЕР этой сессии: www.ngdc.noaa.gov тоже отвечает
+      403 через прокси песочницы (подтверждено прямой попыткой). Ни один
+      реальный архивный ответ этого продукта не был получен.
+    license: >-
+      Продукт NOAA — общественное достояние (U.S. Government work), как и
+      живой продукт выше.
+    independence_note: >-
+      Тот же продукт, что и noaa-swpc-3day-forecast выше, другая точка
+      получения (архив, не живой эндпоинт) — раздельная регистрация по
+      тому же принципу, что и celestrak-gp/space-track-gp-history (текущее
+      против исторического одного и того же типа данных).
+    network:
+      connect_timeout_seconds: 5.0
+      read_timeout_seconds: 15.0
+      max_retries: 3
+      retry_backoff_base_seconds: 1.0
+    archive_cache: "Архивный ответ не меняется — кеш бессрочен (main-prompt.md §5), как и у noaa-swpc-forecast-discussion-archive."
+    replay_eligible_for_historical_forecast: true
+    replay_eligible_note: >-
+      Тот же принцип, что и у noaa-swpc-3day-forecast выше (published_at
+      всегда известен для успешно распарсенного бюллетеня). НЕ ПОДТВЕРЖДЕНО
+      на реальных архивных ответах в этой сессии — БЛОКЕР, требует
+      сетевого доступа для проверки (см. access_restrictions,
+      docs/method.md §7, PR "Remaining work").
+    enabled: true
+    implementation_note: >-
+      Разбор и сохранение одного известного слота —
+      src/sources/noaa_3day_forecast.py::fetch_and_store_archived_bulletin
+      (без TTL — архивный ответ не устаревает). Постраничная загрузка
+      всего периода (перебор дат, main-prompt.md §6 «стенд ходит в архив
+      пакетно») и карта пробелов по реальным телам — ОСТАЮТСЯ, требуют
+      сетевого доступа, отсутствующего в этой сессии (см. PR).

@@ -33,7 +33,14 @@ GP_HISTORY) ещё не реализованы — см. раздел «API» н
 демонстрационная панель по всем четырём фикстурам контракта — см. `web/README.md`.
 FN-28 (S1-10) собирает текущие API/UI/SQLite в единое развёртывание (`Dockerfile`,
 `compose.yaml`) и добавляет сквозную проверку этапа — см. раздел
-«Развёртывание» ниже.
+«Развёртывание» ниже. FN-31 (S2-01, этап 2) добавляет отдельную линию
+внешнего прогноза космопогоды — NOAA SWPC «3-Day Forecast», суточная
+вероятность S1 и выше (`src/sources/noaa_3day_forecast.py`), и её
+доменную интерпретацию для окна ВКД
+(`src/domain/spaceweather/external_forecast.py`) — см. раздел «Внешний
+прогноз NOAA 3-Day S1+» ниже; включает известное ограничение сессии
+(парсер проверен на синтетических, не на реальных сохранённых фикстурах —
+подробности там же и в `docs/method.md` §7.4).
 
 ## Стек
 
@@ -364,6 +371,35 @@ NOAA SWPC, интегральный поток протонов `>=10 МэВ` (�
   таймауты, TTL периодического refresh и порог критического устаревания
   для каждого источника (main-prompt.md §7 — конфигурация, а не код).
 
+### Внешний прогноз NOAA 3-Day S1+ (`src/sources/noaa_3day_forecast.py`, FN-31)
+
+Отдельная от наблюдения GOES выше линия обязательного изменения №1
+(main-prompt.md §11 «Прогноз»): суточная вероятность (0–100%, `percent`)
+события уровня S1 и выше на каждый из трёх дней бюллетеня NOAA SWPC
+«3-Day Forecast» (раздел B «Solar Radiation Storm Forecast»), отдельно
+получаемая, сохраняемая и интерпретируемая от наблюдения (`pfu`,
+`noaa-swpc-proton-flux`). Production-шлюз `fetch_and_store` (TTL, повторы,
+429, заморозка/отключение) — по образцу `src/sources/swpc.py`; для
+архивной линии — `fetch_and_store_archived_bulletin` (без TTL — архивный
+ответ не устаревает). Доменная интерпретация для окна ВКД —
+`src/domain/spaceweather/external_forecast.py`: показывает исходные
+прогнозные дни и их пересечение с окном, никогда не делит вероятность по
+часам, не умножает на длительность окна, не суммирует через полночь и не
+называет её вероятностью ВКД. Версионирование по прогнозируемому
+календарному дню даёт строгий `historical_forecast` (поздний выпуск после
+`as_of` не виден) через уже существующее правило `select_as_of`, без
+нового кода отсечения — подробности и доказательства на синтетических
+фикстурах — `docs/method.md` §7.
+
+**Известное ограничение этой сессии.** Сетевой доступ к
+`services.swpc.noaa.gov`/`www.ngdc.noaa.gov` был заблокирован
+egress-прокси песочницы (`403` на каждый проверенный хост) — парсер
+проверен на синтетических, явно помеченных как синтетические фикстурах
+(`tests/fixtures/sources/noaa_3day_forecast/synthetic/`), не на реальных
+сохранённых ответах. Проверка на реальном текущем и историческом (включая
+2024-05-10 12:30 UTC) выпуске и карта пробелов мая-июня 2024 по телам
+реальных выпусков — открытый пункт, подробно — `docs/method.md` §7.4.
+
 ## Орбита (`src/sources/orbit.py`, `src/domain/orbit/`)
 
 Первый коннектор источника и первый расчётный модуль сервиса.
@@ -543,20 +579,26 @@ src/
 │               # service.py (оркестрация), jobs.py (реестр задач), schemas.py
 ├── config.py   # Настройки из env, без секретов
 ├── sources/    # Получение и нормализация — http.py/swpc.py/status.py (NOAA SWPC),
-│               # orbit.py (CelesTrak GP/TLE), archive_probe.py (архивы DONKI/SWPC)
+│               # orbit.py (CelesTrak GP/TLE), archive_probe.py (архивы DONKI/SWPC),
+│               # noaa_3day_forecast.py (NOAA 3-Day Forecast S1+, FN-31)
 ├── store/      # Хранение, версии, выборка по as_of — schema.py/records.py/results.py
-├── domain/     # Расчёты: spaceweather, orbit (propagate.py — SGP4), mmod, lighting, windows
+├── domain/     # Расчёты: spaceweather (external_forecast.py — FN-31), orbit (propagate.py —
+│               # SGP4), mmod, lighting, windows
 └── export/     # HTML и JSON из сохранённого результата (пока не реализовано)
 sources.yaml    # Реестр источников (main-prompt.md §7): space_weather (noaa-swpc-proton-flux,
-                # nasa-donki-notifications, noaa-swpc-forecast-discussion-archive),
+                # nasa-donki-notifications, noaa-swpc-forecast-discussion-archive,
+                # noaa-swpc-3day-forecast[-archive]),
                 # sources (celestrak-gp, space-track-gp-history, MMOD)
 docs/
 ├── mechanisms.md  # Обоснование MMOD (FN-25)
-└── method.md      # Пригодность архивов космопогоды для строгого replay (FN-23)
+└── method.md      # Пригодность архивов космопогоды для строгого replay (FN-23);
+                   # §7 — NOAA 3-Day Forecast S1+ (FN-31)
 tests/
 ├── api/        # test_requests.py, test_isolation.py (S1-07)
-├── sources/    # test_swpc.py, test_archive_publication.py + fixtures/sources/{swpc,archive}/
-│               # (сохранённые реальные ответы)
+├── sources/    # test_swpc.py, test_archive_publication.py, test_noaa_3day_forecast.py +
+│               # fixtures/sources/{swpc,archive}/ (сохранённые реальные ответы),
+│               # fixtures/sources/noaa_3day_forecast/synthetic/ (явно синтетические, FN-31)
+├── domain/spaceweather/  # test_external_forecast.py (FN-31)
 ├── orbit/      # test_propagation.py
 ├── fixtures/orbit/  # TLE-фикстуры и независимый эталон SGP4 verification
 ├── store/      # test_versions.py, test_as_of.py

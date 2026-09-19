@@ -1,0 +1,16 @@
+:Product: 3-Day Forecast
+:Issued: 2025 Jan 05 2200 UTC
+# Prepared by the U.S. Dept. of Commerce, NOAA, Space Weather Prediction Center
+#
+A.NOAA Geomagnetic Activity Observation and Forecast
+
+The greatest observed 3 hr Kp over the past 24 hours was 3 (below NOAA Scale levels).
+
+C. NOAA Radio Blackout Forecast for Jan 05-Jan 07 2025
+
+Radio Blackout Forecast for Jan 05-Jan 07 2025
+             Jan 05       Jan 06       Jan 07
+R1-R2           35%          25%          20%
+R3 or greater    5%           5%           5%
+
+Rationale: Synthetic fixture missing section B entirely (source format changed).
