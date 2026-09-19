@@ -569,8 +569,8 @@ FN-39; сессия скачала их напрямую из вложений (
 ### 12.4. Подключение к production API
 
 `src/api/service.py::_mmod_mechanism_assessment` вызывается для каждого
-окна `mode=current` (`_build_current_result`), заменяя прежний
-`_not_implemented_mechanism("mmod")`. Источник — бандловая копия
+окна `mode=current` (`_build_current_result`), заменяя прежнюю заглушку
+`not_implemented`. Источник — бандловая копия
 проверенного файла (`src/sources/mmod.py::DEFAULT_DATA_PATH`, под `src/`,
 не `tests/`/`data/` — оба исключены `.dockerignore`, а работающему сервису
 файл нужен по-настоящему, не только тестам). Записи вставляются ЛЕНИВО,
@@ -601,15 +601,19 @@ FN-39 приёмка п.4 — «Production API выдаёт рассчитанн
 **Что FN-39 НЕ меняет и не обязана менять:** `src.domain.windows.dominance.excluded_windows`
 выводит окно из сравнения при критическом пробеле ПО ЛЮБОМУ из двух
 обязательных механизмов (main-prompt.md §11, правило предпочтения окон,
-п.1) — не только по MMOD. Механизм 1 (space_weather) в этой версии сервиса
-всегда `status="not_implemented"`/`critical_gap=True`
-(`_not_implemented_mechanism`, задачи зоны 2/3 всё ещё не реализовали
-комбинирование GOES pfu + внешнего прогноза), поэтому КАЖДОЕ окно
-`mode=current` сегодня выводится из сравнения этим, уже существовавшим ДО
-FN-39, ограничением — независимо от того, насколько содержательна оценка
-MMOD. `result.recommendation.status` в продакшен-ответе `mode=current`
-поэтому остаётся `all_windows_excluded`, пока не реализован Механизм 1; это
-задокументированный, не скрытый факт (main-prompt.md §2), не регресс этой
-задачи и не то, что FN-39 берётся исправить — цель FN-39 (снять научный
-gate FN-32 и дать реальный, а не заглушечный `mmod`) достигнута полностью
-независимо от этого.
+п.1) — не только по MMOD. Механизм 1 (space_weather, FN-38, слит в эту же
+ветвь после FN-39) теперь тоже даёт реальную оценку
+(`src.api.service._space_weather_mechanism`/`_window_observed_mechanism`) —
+`status="ok"`, когда окно полностью покрыто пригодными отсчётами GOES, и
+честные `missing_data`/`stale_data`/`source_error`/`beyond_horizon` иначе.
+Поэтому `result.recommendation.status` в продакшен-ответе `mode=current`
+больше не гарантированно `all_windows_excluded`: когда оба механизма
+покрыты (`critical_gap=False` у обоих в окне), правило предпочтения окон
+реально сравнивает окна — доминирование, конфликт, равенство или
+недостаточность оснований (main-prompt.md §11, п.2-4), см.
+`tests/api/test_observed_flux_integration.py::test_seeded_full_hour_of_observations_yields_ok_status_via_production_path`.
+`all_windows_excluded` по-прежнему возможен и корректен — как честный исход,
+когда хотя бы один механизм не покрыт для запрошенных дат (например
+`tests/api/test_mmod_wiring.py::TestMmodEndToEndCurrentMode::test_real_conflicting_windows_within_mandatory_period`,
+где фикстура GOES не покрывает май 2024), а не как захардкоженная
+константа.

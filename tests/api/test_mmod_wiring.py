@@ -7,18 +7,21 @@ integration-тесты. Все временны́е точки внутри об
 ``missing_data`` вне грида) взяты из РЕАЛЬНОГО первичного файла NASA MEO
 (``tests/sources/test_mmod.py`` уже сверяет его байты), не придуманы.
 
-**Известная, задокументированная граница** (``docs/mechanisms.md`` §12.5,
-уже верна ДО этой задачи): ``result.recommendation.status`` в
-``mode=current`` остаётся ``all_windows_excluded`` даже когда MMOD даёт
-реальную, различающуюся между окнами оценку — Механизм 1 (space_weather)
-всё ещё ``not_implemented``/``critical_gap=True`` в каждом окне
-(``src.api.service._not_implemented_mechanism``), а правило предпочтения
-окон (``src.domain.windows.dominance.excluded_windows``) выводит окно из
-сравнения при критическом пробеле ПО ЛЮБОМУ обязательному механизму — не
-только по MMOD. Поэтому conflict/equal демонстрируются здесь на уровне
-самой ``mechanismAssessment``/``compare_mechanism`` (то, что реально решает
-FN-39), а не как ``recommendation.status`` целиком (то, что решит будущая
-задача Механизма 1, не эта)."""
+**Механизм 1 (FN-38) теперь тоже реален** — ``not_implemented`` больше не
+гарантирован. В сценариях этого модуля space_weather тем не менее часто
+даёт ``missing_data``/``critical_gap=True``: фикстура GOES
+(``integral-protons-1-day.sample.json``) покрывает только 2024-05-10,
+поэтому для дат обязательного периода вне неё (например 2024-05-05/06)
+покрытия нет — честный пробел, не имитация. Правило предпочтения окон
+(``src.domain.windows.dominance.excluded_windows``) выводит окно из
+сравнения при критическом пробеле ПО ЛЮБОМУ обязательному механизму, не
+только по MMOD, поэтому ``result.recommendation.status`` в части сценариев
+этого модуля по-прежнему ``all_windows_excluded`` — но теперь потому, что
+это дал space_weather для ЭТИХ конкретных дат, а не потому, что MMOD
+недостижим. Поэтому conflict/equal демонстрируются здесь в первую очередь
+на уровне самой ``mechanismAssessment``/``compare_mechanism`` (то, что
+реально решает FN-39), не полагаясь на конкретное поведение space_weather в
+каждом сценарии."""
 
 from __future__ import annotations
 
@@ -283,12 +286,14 @@ class TestMmodEndToEndCurrentMode:
         manifest_ids = {e["record_id"] for e in mmod_manifest}
         assert manifest_ids >= set(mmod_a["record_ids"]) | set(mmod_b["record_ids"])
 
-        # Задокументированная граница (docs/mechanisms.md §12.5): space_weather
-        # остаётся not_implemented/critical_gap=True в каждом окне, поэтому
-        # оба окна ВСЁ РАВНО исключены из сравнения — это не баг этой
-        # задачи, см. docstring модуля.
+        # space_weather (FN-38) реален, но фикстура GOES этого теста
+        # покрывает только 2024-05-10 — вне неё честный critical_gap
+        # missing_data (см. docstring модуля), поэтому оба окна ВСЁ РАВНО
+        # исключены из сравнения правилом предпочтения окон (п.1), несмотря
+        # на реальную, различающуюся оценку MMOD выше.
         sw_a = next(m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather")
-        assert sw_a["status"] == "not_implemented"
+        assert sw_a["status"] == "missing_data"
+        assert sw_a["critical_gap"] is True
         assert win_a["excluded_from_comparison"] is True
         assert win_b["excluded_from_comparison"] is True
         assert result["recommendation"]["status"] == "all_windows_excluded"

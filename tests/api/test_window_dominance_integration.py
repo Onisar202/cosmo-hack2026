@@ -5,11 +5,13 @@
 константы ``all_windows_excluded``.
 
 Не гоняет полный HTTP-пайплайн (сеть/хранилище не нужны, main-prompt.md §8):
-строит ``window``-словари той же формы, что ``_window()``/
-``_not_implemented_mechanism()`` в ``src/api/service.py``, напрямую — так
-доступны сценарии (доминирование, конфликт, равенство), которые пока
-недостижимы через реальный ``mode=current`` (space_weather/mmod там всегда
-``not_implemented`` до задач зон 2/3).
+строит ``window``-словари той же формы, что ``_window()`` в
+``src/api/service.py``, напрямую — так доступны все сценарии
+(доминирование, конфликт, равенство) на контролируемых
+``mechanismAssessment``, не завися от конкретных фикстур реального
+``mode=current`` (оба механизма там уже реализованы, FN-38/FN-39, но какой
+именно сценарий доминирования получится — зависит от дат запроса и
+покрытия источников).
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ def _window(
 
 
 def test_algorithm_version_was_bumped_for_the_dominance_rule_change() -> None:
-    assert ALGORITHM_VERSION == "0.2.0"
+    assert ALGORITHM_VERSION == "0.3.0"
 
 
 def test_apply_window_dominance_selects_the_dominating_window() -> None:

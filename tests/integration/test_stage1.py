@@ -209,14 +209,19 @@ def test_current_mode_end_to_end_shape(completed_calculation: dict[str, Any]) ->
     assert body["data_manifest"]
     assert any(m["record_id"] == orbit["record_id"] for m in body["data_manifest"])
 
-    # Интерпретация обоих механизмов воздействия ещё не реализована на этом
-    # этапе (README.md, FN-26) — этап FN-28 её не добавляет и не имитирует.
+    # MMOD (Механизм 2) не реализован (FN-32/FN-39 — научный гейт не закрыт).
+    # Space weather (Механизм 1, FN-38) теперь реально классифицируется, но
+    # это окно — целиком в будущем относительно момента расчёта (start_at =
+    # now + 1 минута при создании запроса, см. _current_mode_request), а
+    # наблюдение GOES не имеет собственного горизонта прогноза вперёд —
+    # честно "beyond_horizon", не "not_implemented" (main-prompt.md §4).
     assert body["windows"]
     for window in body["windows"]:
         mechanisms = {m["mechanism"]: m for m in window["mechanisms"]}
         assert set(mechanisms) == {"space_weather", "mmod"}
+        assert mechanisms["mmod"]["status"] == "not_implemented"
+        assert mechanisms["space_weather"]["status"] == "beyond_horizon"
         for assessment in mechanisms.values():
-            assert assessment["status"] == "not_implemented"
             assert assessment["max_level"] is None
 
     source_ids = {s["source_id"] for s in body["source_status"]}
