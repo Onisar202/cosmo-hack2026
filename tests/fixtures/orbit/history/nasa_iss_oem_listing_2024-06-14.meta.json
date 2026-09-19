@@ -1,0 +1,24 @@
+{
+  "request_url": "https://nasa-public-data.s3.amazonaws.com/?list-type=2&prefix=iss-coords/2024-06-14/ISS_OEM/",
+  "api_key": "не требуется",
+  "http_status": 200,
+  "status_line": "HTTP/1.1 200 OK",
+  "fetched_at": "2026-09-19T08:59:05.317Z",
+  "response_received_at": "2026-09-19T08:59:05.792Z",
+  "response_headers": {
+    "date": "Sat, 19 Sep 2026 08:59:07 GMT",
+    "last-modified": null,
+    "etag": null,
+    "content-type": "application/xml",
+    "content-length": null,
+    "x-ratelimit-limit": null,
+    "x-ratelimit-remaining": null
+  },
+  "body_file": "nasa_iss_oem_listing_2024-06-14.xml",
+  "body_size_bytes": 772,
+  "body_sha256": "03546820c2dd6abf270c7fc86c65b4211283a78f692a75f6078b3add5d7e2e06",
+  "body_is_valid_json": null,
+  "body_item_count": null,
+  "client": "curl 8.18.0",
+  "note": "Тело сохранено байт-в-байт (curl -o, без форматирования). fetched_at — момент отправки запроса, UTC."
+}

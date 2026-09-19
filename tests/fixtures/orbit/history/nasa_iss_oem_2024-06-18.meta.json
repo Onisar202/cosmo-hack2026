@@ -1,0 +1,24 @@
+{
+  "request_url": "https://nasa-public-data.s3.amazonaws.com/iss-coords/2024-06-18/ISS_OEM/ISS.OEM_J2K_EPH.txt",
+  "api_key": "не требуется",
+  "http_status": 200,
+  "status_line": "HTTP/1.1 200 OK",
+  "fetched_at": "2026-09-19T08:59:10.696Z",
+  "response_received_at": "2026-09-19T08:59:11.646Z",
+  "response_headers": {
+    "date": "Sat, 19 Sep 2026 08:59:12 GMT",
+    "last-modified": "Tue, 18 Jun 2024 20:01:19 GMT",
+    "etag": "\"40c9c949aec10a16eceddd2cb1377c5a\"",
+    "content-type": "binary/octet-stream",
+    "content-length": "748200",
+    "x-ratelimit-limit": null,
+    "x-ratelimit-remaining": null
+  },
+  "body_file": "nasa_iss_oem_2024-06-18.txt",
+  "body_size_bytes": 748200,
+  "body_sha256": "8e9b95f56a1097028e5b084ec9956acc9fb8080413fc3c6b5c6ccdb8248617c6",
+  "body_is_valid_json": null,
+  "body_item_count": null,
+  "client": "curl 8.18.0",
+  "note": "Тело сохранено байт-в-байт (curl -o, без форматирования). fetched_at — момент отправки запроса, UTC."
+}

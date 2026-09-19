@@ -6,13 +6,24 @@
 ``src/domain/orbit/propagate.py``.
 
 Текущие элементы — CelesTrak (эта задача, продукт ``celestrak-gp`` в
-``sources.yaml``). Исторические — Space-Track ``GP_HISTORY`` с
-``CREATION_DATE`` как ``published_at`` (.ai/main-prompt.md §11
-«Траектория»); соответствующий коннектор — задача следующего этапа зоны 1
-(см. ``sources.yaml``, продукт ``space-track-gp-history``). До его
-появления исторический запрос честно поднимает
-:class:`HistoricalElementsUnsupportedError`, а не подставляет текущие
-элементы CelesTrak — современные элементы никогда не заменяют исторические
+``sources.yaml``); ``fetch_elements_for_request``/``require_supported_mode``
+ниже обслуживают ИМЕННО этот путь (живая сеть, только ``mode="current"``).
+
+**Исторические элементы (FN-33, S2-03) — NASA TOPO CCSDS OEM,**
+``src/sources/orbit_history.py`` (продукт ``nasa-iss-oem-history`` в
+``sources.yaml``): готовые векторы состояния + интерполяция
+(``src/domain/orbit/interpolate.py``), не GP/TLE и не SGP4.
+:func:`select_oem_elements_for_request` ниже — актуальная точка входа для
+``historical_analysis``/``historical_forecast``: она отбирает пригодный
+выпуск OEM среди уже полученных (``orbit_history.OemRelease``) и поднимает
+:class:`HistoricalElementsUnsupportedError`, только если пригодного выпуска
+нет (главный случай — критический пробел покрытия/публикации, а не «модуль
+исторических элементов вообще не поддерживает»). Space-Track ``GP_HISTORY``
+остаётся задокументированным, но не реализованным источником (нет учётной
+записи команды, см. ``sources.yaml``, продукт ``space-track-gp-history``) —
+``require_supported_mode``/``fetch_elements_for_request`` продолжают
+поднимать то же исключение для исторического запроса на путь CelesTrak, не
+подставляя текущие элементы вместо исторических ни при каких обстоятельствах
 (.ai/main-prompt.md §1, §11).
 """
 
@@ -25,6 +36,7 @@ from typing import Literal
 
 import httpx
 
+from src.sources import orbit_history
 from src.store.records import RecordInput
 
 ISS_NORAD_ID = "25544"
@@ -73,13 +85,26 @@ class CorruptedElementsError(ValueError):
 
 
 class HistoricalElementsUnsupportedError(NotImplementedError):
-    """Исторический режим запрошен, а Space-Track GP_HISTORY ещё не реализован.
+    """Исторический режим запрошен, а элементы для него недоступны.
 
-    Текущие элементы CelesTrak не подставляются вместо исторических ни при
-    каких обстоятельствах (.ai/main-prompt.md §11 «Траектория»): до задачи,
-    добавляющей коннектор ``space-track-gp-history`` (см. ``sources.yaml``),
-    запрос на историческую геометрию честно отказывает, а не имитирует
-    результат современными данными.
+    Два разных, но одинаково честных случая поднимают это исключение:
+
+    - запрос идёт по пути CelesTrak (:func:`require_supported_mode`,
+      :func:`fetch_elements_for_request`) — Space-Track ``GP_HISTORY`` ещё
+      не реализован (см. ``sources.yaml``, продукт
+      ``space-track-gp-history``), и текущие элементы CelesTrak не
+      подставляются вместо исторических ни при каких обстоятельствах
+      (.ai/main-prompt.md §11 «Траектория»);
+    - запрос идёт по актуальному пути OEM
+      (:func:`select_oem_elements_for_request`) — среди уже полученных
+      выпусков ``src/sources/orbit_history.py`` нет ни одного, пригодного по
+      правилу отбора (нет выпуска, опубликованного (S3 ``LastModified``) до
+      ``as_of`` и покрывающего запрошенный интервал целиком) — критический
+      пробел архива, а не повод взять более поздний или непокрывающий
+      выпуск.
+
+    В обоих случаях запрос на историческую геометрию честно отказывает, а не
+    имитирует результат современными данными.
     """
 
 
@@ -304,16 +329,22 @@ def build_orbital_elements_record(
 def require_supported_mode(mode: RequestMode) -> None:
     """Поднимает :class:`HistoricalElementsUnsupportedError` для любого режима, кроме ``current``.
 
-    Space-Track ``GP_HISTORY`` ещё не реализован (см. ``sources.yaml``), и
-    текущие элементы CelesTrak не подставляются вместо исторических
-    (.ai/main-prompt.md §11).
+    Гейт именно пути CelesTrak (:func:`fetch_elements_for_request`, живая
+    сеть): Space-Track ``GP_HISTORY`` ещё не реализован (см.
+    ``sources.yaml``), и текущие элементы CelesTrak не подставляются вместо
+    исторических (.ai/main-prompt.md §11) — для исторического режима эта
+    функция не пытается угадать доступность OEM, она просто не пускает
+    CelesTrak-путь на исторический запрос. Актуальный путь исторических
+    элементов — :func:`select_oem_elements_for_request` (NASA OEM, FN-33).
     """
     if mode != "current":
         raise HistoricalElementsUnsupportedError(
-            f"historical orbital elements are not supported yet (mode={mode!r}); "
-            "the Space-Track GP_HISTORY connector is a future task (see sources.yaml, "
-            "product space-track-gp-history) — current CelesTrak elements are not "
-            "substituted for historical ones (.ai/main-prompt.md §11)"
+            f"historical orbital elements are not served via CelesTrak (mode={mode!r}); "
+            "current CelesTrak elements are not substituted for historical ones "
+            "(.ai/main-prompt.md §11) — see select_oem_elements_for_request (NASA OEM, "
+            "src/sources/orbit_history.py) for the actual historical path, and "
+            "sources.yaml product space-track-gp-history for the still-unimplemented "
+            "Space-Track GP_HISTORY fallback"
         )
 
 
@@ -337,3 +368,77 @@ def fetch_elements_for_request(
     raw_bytes = fetch_current_tle(norad_id=norad_id, client=client, timeout=timeout)
     parsed = parse_tle_response(raw_bytes, expected_norad_id=norad_id)
     return parsed, raw_bytes, url
+
+
+def select_oem_elements_for_request(
+    mode: RequestMode,
+    releases: list[orbit_history.OemRelease],
+    *,
+    as_of: datetime | None = None,
+    interval_start: datetime | None = None,
+    interval_end: datetime | None = None,
+    moment: datetime | None = None,
+) -> orbit_history.OemSelection:
+    """Отбирает исторические орбитальные элементы (NASA OEM) для запроса.
+
+    Актуальная точка входа для ``historical_analysis``/``historical_forecast``
+    (FN-33, S2-03) — в отличие от :func:`fetch_elements_for_request`
+    (CelesTrak, только ``current``, не ходит по этому пути вообще), эта
+    функция не ходит в сеть: ``releases`` — уже полученные и разобранные
+    выпуски (``src/sources/orbit_history.py``, гейт/проба-масштаб задачи, см.
+    её модульный docstring); загрузка полного архива в хранилище — задача
+    следующего этапа.
+
+    - ``mode="historical_forecast"``: требует ``as_of``, ``interval_start``,
+      ``interval_end`` — делегирует
+      :func:`orbit_history.select_release_for_forecast`
+      (``published_at <= as_of`` и покрытие интервала целиком, максимальный
+      пригодный ``published_at``); возвращает
+      ``OemSelection(is_reconstruction=False)``.
+    - ``mode="historical_analysis"``: требует ``moment`` — делегирует
+      :func:`orbit_history.select_release_for_analysis` (НЕ фильтруется по
+      ``as_of`` — main-prompt.md §1 «Последующие наблюдения — отдельная
+      ветка кода»); возвращает ``OemSelection(is_reconstruction=True)``.
+    - ``mode="current"``: не обслуживается здесь — поднимает ``ValueError``
+      (текущий режим — :func:`fetch_elements_for_request`, CelesTrak).
+
+    Если ни один выпуск не пригоден по правилу отбора, поднимается
+    :class:`HistoricalElementsUnsupportedError` — критический пробел
+    архива/публикации на запрошенный момент, а не повод взять более поздний
+    или не покрывающий интервал выпуск, и не современные элементы CelesTrak
+    (.ai/main-prompt.md §1, §11).
+    """
+    if mode == "current":
+        raise ValueError(
+            "mode='current' is served by fetch_elements_for_request (CelesTrak), "
+            "not select_oem_elements_for_request"
+        )
+    if mode == "historical_forecast":
+        if as_of is None or interval_start is None or interval_end is None:
+            raise ValueError(
+                "mode='historical_forecast' requires as_of, interval_start and interval_end"
+            )
+        release = orbit_history.select_release_for_forecast(
+            releases, as_of=as_of, interval_start=interval_start, interval_end=interval_end
+        )
+        if release is None:
+            raise HistoricalElementsUnsupportedError(
+                f"no OEM release is published (S3 LastModified) by as_of={as_of.isoformat()} "
+                f"and covers [{interval_start.isoformat()}, {interval_end.isoformat()}] — "
+                "critical archive/publication gap, not a reason to substitute a later or "
+                "non-covering release, or current CelesTrak elements (.ai/main-prompt.md §1, §11)"
+            )
+        return orbit_history.OemSelection(release=release, is_reconstruction=False)
+    if mode == "historical_analysis":
+        if moment is None:
+            raise ValueError("mode='historical_analysis' requires moment")
+        release = orbit_history.select_release_for_analysis(releases, moment=moment)
+        if release is None:
+            raise HistoricalElementsUnsupportedError(
+                f"no OEM release covers moment={moment.isoformat()} "
+                "(USEABLE_START_TIME..USEABLE_STOP_TIME of every known release misses it) — "
+                "critical archive gap, not a reason to substitute current CelesTrak elements "
+                "(.ai/main-prompt.md §1, §11)"
+            )
+        return orbit_history.OemSelection(release=release, is_reconstruction=True)
+    raise ValueError(f"unknown mode {mode!r}")

@@ -1,0 +1,24 @@
+{
+  "request_url": "https://nasa-public-data.s3.amazonaws.com/?list-type=2&prefix=iss-coords/&delimiter=/",
+  "api_key": "не требуется",
+  "http_status": 200,
+  "status_line": "HTTP/1.1 200 OK",
+  "fetched_at": "2026-09-19T08:58:56.092Z",
+  "response_received_at": "2026-09-19T08:58:56.688Z",
+  "response_headers": {
+    "date": "Sat, 19 Sep 2026 08:58:57 GMT",
+    "last-modified": null,
+    "etag": null,
+    "content-type": "application/xml",
+    "content-length": null,
+    "x-ratelimit-limit": null,
+    "x-ratelimit-remaining": null
+  },
+  "body_file": "nasa_iss_oem_archive_index.xml",
+  "body_size_bytes": 53345,
+  "body_sha256": "00b0daf1eb0dbbb00f79de6f84543f7a840cffa9a2ad82a4fb8f08450acafa70",
+  "body_is_valid_json": null,
+  "body_item_count": null,
+  "client": "curl 8.18.0",
+  "note": "Тело сохранено байт-в-байт (curl -o, без форматирования). fetched_at — момент отправки запроса, UTC."
+}
