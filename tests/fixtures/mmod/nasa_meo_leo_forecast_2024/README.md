@@ -1,10 +1,10 @@
 # NASA MEO — 2024 meteor shower activity forecast for LEO (FN-39)
 
 Реальный первичный файл, полученный владельцем задачи FN-39 независимо от
-этой сессии (прямая загрузка с `ntrs.nasa.gov` недоступна из песочницы —
-сетевой прокси отвечает `403 connect_rejected` на этот и другие домены
-первоисточников, см. `docs/mechanisms.md` §11.3/§12) и приложенный к
-Jira-задаче FN-39. Байты проверены в этой сессии: SHA-256 совпадает с
+той сессии (тогда прямая загрузка с `ntrs.nasa.gov` была недоступна) и
+приложенный к Jira-задаче FN-39. В FN-40 официальный metadata endpoint
+NTRS стал доступен и сохранён отдельно для доказательства времени выпуска.
+Байты таблицы проверены: SHA-256 совпадает с
 контрольной суммой, зафиксированной в комментарии владельца задачи, и с
 контрольными строками (см. ниже) — до сохранения в репозиторий.
 
@@ -34,7 +34,7 @@ content-sniffing содержимого, не по `.gitattributes` клиент
 | NTRS record | 20230015158 |
 | URL цитирования | `https://ntrs.nasa.gov/citations/20230015158` |
 | URL файла | `https://ntrs.nasa.gov/api/citations/20230015158/downloads/flux_data.txt` |
-| Issued | 2023-11-02 (титульный лист сопроводительного PDF `LEO_Forecast_2024.pdf`, тоже приложенного к FN-39) |
+| Published | `2023-11-02T05:00:00Z` — совпадающие официальные поля NTRS `distributionDate` и `publications[0].publicationDate`; это не полночь, восстановленная из надписи `Issued November 2, 2023` |
 | Методика | Moorhead et al., *Meteor shower forecasting in near-Earth space*, Journal of Spacecraft and Rockets 56(5):1531–1545, 2019 (NTRS 20190030373) — заявлена в PDF как неизменная методика на этот выпуск |
 | Лицензия | Данные NASA — как правило, public domain (U.S. Government work); MEO не указывает дополнительных ограничений в самом документе |
 
@@ -65,6 +65,24 @@ PDF приводит полный почасовой ряд на весь год
 независимо вычислена в этой сессии над сохранёнными байтами (SHA-256
 распакованного содержимого — сжатие gzip побайтово обратимо).
 
+## Доказательство времени публикации
+
+Официальный JSON NTRS `GET /api/citations/20230015158` получен с HTTP 200
+2026-09-19 и сохранён как нормализованный HTTP metadata-sidecar:
+`src/sources/data/mmod/nasa_meo_leo_forecast_2024/ntrs-citation-20230015158.meta.json`.
+Он фиксирует URL, HTTP status/content type/size/ETag, SHA-256 сырого тела,
+поля `distributionDate`/`publicationDate` и ссылки на PDF/таблицы.
+
+- SHA-256 сохранённого sidecar:
+  `e448b15818e22455a0324c19226a81ac53ca001c5ff30b497bba7c0d4d2b7846`;
+- SHA-256 сырого HTTP response body, записанный в sidecar:
+  `42eeb330bfc9064c2d2de10388c6088ad6f51c88098cefbe37c57e26c99b1d30`;
+- доказанный `published_at`: `2023-11-02T05:00:00Z`.
+
+Checksum sidecar входит в `source_version`; ссылка и оба checksum едут в
+`spatial_context` записи. Поэтому от любой записи можно дойти не только до
+таблицы через `raw_ref`, но и до отдельного доказательства времени выпуска.
+
 ## Контрольные строки (проверены в этой сессии посимвольно)
 
 | UT дата/время | `factor 1.05e+02 J` | `ratio_to_background = 1 + factor` |
@@ -87,14 +105,15 @@ PDF приводит полный почасовой ряд на весь год
   интерполяция (`src/domain/mmod/background.py::_INTERPOLATION_VERSION`),
   зафиксированная решением владельца задачи в FN-39.
 - PDF (`meteor-shower-forecasting-near-earth-space.pdf`, методика; и
-  `LEO_Forecast_2024.pdf` §2 «Details») прямо указывает: «for a surface
-  directly facing the shower, this can further boost the significance… by
-  another factor of approximately 2», «it is possible for the Earth to
-  shield the spacecraft from all or part of a shower» — то есть `factor`
-  уже соответствует худшему случаю (полностью открытый, направленный на
-  радиант приёмник), а не траекторной оценке конкретной станции. Поэтому
-  `ratio_to_background` этой задачи НЕ умножается на
+  `LEO_Forecast_2024.pdf` §2 «Details») прямо указывает влияние ориентации
+  поверхности и экранирования Землёй. Поэтому `factor` хранится как
+  опубликованный unshielded/radiant-facing reference, но НЕ называется
+  абсолютным worst case для конкретной поверхности: `orientation_unmodeled`,
+  `damage_response_unmodeled`, `earth_shielding_unmodeled` и
+  `not_spacecraft_surface_specific` явно равны `true`.
+- `ratio_to_background` этой задачи НЕ умножается на
   `effective_flux_ratio`/результат экранирования
   (`src/domain/mmod/geometry.py`, FN-32) — они выводятся отдельно как
-  `trajectory_context`, результат помечается `worst_case_unshielded_leo` и
-  `not_spacecraft_surface_specific` (решение владельца задачи, FN-39).
+  `trajectory_context`: для корректного численного объединения агрегированного
+  NASA factor с конкретным радиантом, поверхностью и damage response данных
+  пока недостаточно.

@@ -31,7 +31,9 @@ FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "mmod"
 
 
 def _load_reference_cases() -> dict[str, Any]:
-    result: dict[str, Any] = json.loads((FIXTURES_DIR / "reference-cases.json").read_text())
+    result: dict[str, Any] = json.loads(
+        (FIXTURES_DIR / "reference-cases.json").read_text(encoding="utf-8")
+    )
     return result
 
 
