@@ -10,7 +10,7 @@
   },
   "mode": "current",
   "as_of": null,
-  "algorithm_version": "0.1.0",
+  "algorithm_version": "0.2.0",
   "data_manifest": [
     { "record_id": "rec-cur-orbit-0001", "source_id": "celestrak-gp", "source_version": "2026-09-18T03:00:00Z", "record_kind": "orbital_elements" },
     { "record_id": "rec-cur-swx-0001", "source_id": "noaa-swpc-proton-flux", "source_version": "2026-09-18T13:30:00Z", "record_kind": "observation" }
@@ -127,7 +127,7 @@
   "recommendation": {
     "status": "all_windows_excluded",
     "window_id": null,
-    "explanation": "Оба окна исключены из сравнения: механизм MMOD не реализован в этой версии сервиса, а по механизму 1 в окне A источник не вернул данные (критический пробел). Рекомендация не выдаётся до реализации механизма 2 и восстановления получения данных."
+    "explanation": "Оба окна исключены из сравнения правилом доминирования v2 (критический пробел данных по любому механизму — автоматического победителя нет, FN-34): механизм MMOD не реализован в этой версии сервиса ни в одном из окон, а по механизму 1 в окне A источник не вернул данные. Рекомендация не выдаётся до реализации механизма 2 и восстановления получения данных."
   },
   "source_status": [
     { "source_id": "celestrak-gp", "last_success_at": "2026-09-18T03:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },

@@ -9,7 +9,7 @@
   },
   "mode": "current",
   "as_of": null,
-  "algorithm_version": "0.1.0",
+  "algorithm_version": "0.2.0",
   "data_manifest": [
     { "record_id": "rec-eq-orbit-0001", "source_id": "celestrak-gp", "source_version": "2026-09-18T15:00:00Z", "record_kind": "orbital_elements" },
     { "record_id": "rec-eq-swx-0001", "source_id": "noaa-swpc-proton-flux", "source_version": "2026-09-18T19:30:00Z", "record_kind": "observation" },
@@ -103,7 +103,7 @@
   "recommendation": {
     "status": "tie",
     "window_id": null,
-    "explanation": "Окна A и B идентичны по всем шагам правила предпочтения (максимальный уровень и длительность превышения по обоим механизмам, полнота данных) — различий нет, рекомендация не выдаётся (main-prompt §11, пункт 6)."
+    "explanation": "Окна A и B равнозначны по правилу доминирования v2: по каждому механизму (максимальный уровень и длительность превышения) A не хуже B и B не хуже A одновременно — различий, дающих основание предпочесть одно окно другому, нет (FN-34, S2-04)."
   },
   "source_status": [
     { "source_id": "celestrak-gp", "last_success_at": "2026-09-18T15:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },

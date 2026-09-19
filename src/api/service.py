@@ -56,6 +56,7 @@ from src.domain.spaceweather.external_forecast import (
     assess_external_forecast,
     external_forecast_days_from_records,
 )
+from src.domain.windows import WindowCandidate, excluded_windows, recommend
 from src.sources import noaa_3day_forecast as noaa_3day_source
 from src.sources import orbit
 from src.sources import swpc as swpc_source
@@ -483,6 +484,11 @@ def _window(
     space_weather_notes: list[str] | None = None,
     space_weather_record_ids: list[str] | None = None,
 ) -> dict[str, Any]:
+    """Строит окно без ``excluded_from_comparison``/``exclusion_reason`` —
+    эти два поля решает правило доминирования v2 (FN-34,
+    ``src.domain.windows``) над ГОТОВЫМ набором окон, см.
+    :func:`_apply_window_dominance`, а не эта функция для одного окна в
+    изоляции."""
     end_at = start_at + timedelta(hours=duration_hours)
     return {
         "window_id": window_id,
@@ -498,13 +504,39 @@ def _window(
             _not_implemented_mechanism("mmod"),
         ],
         "lighting": {"requested": False, "status": "not_requested", "note": None},
-        "excluded_from_comparison": True,
-        "exclusion_reason": (
-            "Критический пробел по обоим обязательным механизмам (space_weather и "
-            "mmod ещё не реализованы в этой версии сервиса) — окно выводится из "
-            "сравнения, а не проигрывает по баллам (.ai/main-prompt.md §11, "
-            "правило предпочтения окон, п.1)."
-        ),
+    }
+
+
+def _apply_window_dominance(windows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Заполняет ``excluded_from_comparison``/``exclusion_reason`` каждого
+    окна и строит ``result.recommendation`` через правило доминирования v2
+    (FN-34/S2-04, ``src.domain.windows.dominance``) — единственное место,
+    решающее это для ``mode = current``. Мутирует переданные словари окон на
+    месте (тот же паттерн, что и остальная сборка результата в этом модуле)
+    и возвращает ``recommendation`` для `result`.
+
+    Реальные механизмы (space_weather/mmod) в этой версии сервиса всегда
+    ``status = "not_implemented"``/``critical_gap = True`` (см.
+    ``_not_implemented_mechanism``), поэтому сегодня это неизбежно даёт
+    ``all_windows_excluded`` — то же наблюдаемое поведение, что и раньше
+    захардкоженная константа, но теперь через общее правило, готовое к
+    подключению настоящих оценок механизмов зон 2/3 без изменений здесь.
+    """
+    candidates = [
+        WindowCandidate.from_assessments(w["window_id"], w["duration_hours"], w["mechanisms"])
+        for w in windows
+    ]
+    exclusions = excluded_windows(candidates)
+    for window in windows:
+        reason = exclusions.get(window["window_id"])
+        window["excluded_from_comparison"] = reason is not None
+        window["exclusion_reason"] = reason
+
+    outcome = recommend(candidates)
+    return {
+        "status": outcome.status,
+        "window_id": outcome.window_id,
+        "explanation": outcome.explanation,
     }
 
 
@@ -789,6 +821,7 @@ def _build_current_result(
             space_weather_notes=win_b_notes, space_weather_record_ids=win_b_record_ids,
         ),
     ]
+    recommendation = _apply_window_dominance(windows)
 
     forecast_manifest_entries = [
         {
@@ -865,17 +898,7 @@ def _build_current_result(
         "coverage": {"requested_period_supported": True, "archive_gaps": []},
         "limitations": limitations,
         "warnings": warnings,
-        "recommendation": {
-            "status": "all_windows_excluded",
-            "window_id": None,
-            "explanation": (
-                "Оба сравниваемых окна исключены из сравнения: ни один из двух "
-                "обязательных механизмов воздействия ещё не оценивается в этой "
-                "версии сервиса (S1-07 поставляет API и хранение; интерпретация "
-                "— последующие задачи зон 2/3). Рекомендация появится вместе с "
-                "реализацией механизмов."
-            ),
-        },
+        "recommendation": recommendation,
         "source_status": source_status,
     }
     _validate_result_or_raise(result)

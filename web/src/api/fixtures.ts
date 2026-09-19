@@ -23,7 +23,7 @@ export const DEMO_FIXTURES: DemoFixture[] = [
     id: 'success',
     label: 'Успешный расчёт',
     description:
-      'historical_forecast, два окна: окно A выигрывает по правилу предпочтения (меньший максимальный уровень механизма 1).',
+      'historical_forecast, два окна: окно A доминирует над B по правилу доминирования v2 (не хуже по обоим механизмам, устойчиво лучше по механизму 1).',
     result: success as CalculationResult,
   },
   {
@@ -42,7 +42,8 @@ export const DEMO_FIXTURES: DemoFixture[] = [
   {
     id: 'equal-windows',
     label: 'Равнозначные окна',
-    description: 'Оба окна идентичны по правилу предпочтения — рекомендация не выдаётся (tie).',
+    description:
+      'Оба окна равнозначны по правилу доминирования v2 — рекомендация не выдаётся (tie).',
     result: equalWindows as CalculationResult,
   },
 ]

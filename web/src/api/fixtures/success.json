@@ -11,7 +11,7 @@
   },
   "mode": "historical_forecast",
   "as_of": "2024-05-10T09:00:00Z",
-  "algorithm_version": "0.1.0",
+  "algorithm_version": "0.2.0",
   "data_manifest": [
     { "record_id": "rec-orbit-histelem-0001", "source_id": "space-track-gp-history", "source_version": "2024-05-09T21:03:11Z", "record_kind": "orbital_elements" },
     { "record_id": "rec-swx-donki-forecast-0001", "source_id": "nasa-ccmc-donki", "source_version": "2024-05-09T18:00:00Z", "record_kind": "forecast" },
@@ -140,7 +140,7 @@
   "recommendation": {
     "status": "selected",
     "window_id": "win-a",
-    "explanation": "Окно A выбрано по правилу предпочтения: меньший максимальный уровень механизма 1 (S2 против S3 в окне B) при равном механизме 2 (оба — фон) и равной полноте данных."
+    "explanation": "Окно A выбрано по правилу доминирования v2 (FN-34): по механизму 1 окно A не хуже и устойчиво лучше окна B (максимальный уровень S2 против S3, длительность превышения по каждому порогу меньше или равна — 4.0/2.5/0 против 6.0/5.0/4.0 часов), по механизму 2 окна равны (оба — фон); A не хуже B по обоим механизмам и строго лучше хотя бы по одному — B не доминирует, конфликта между механизмами нет."
   },
   "source_status": [
     { "source_id": "space-track-gp-history", "last_success_at": "2024-05-09T22:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },

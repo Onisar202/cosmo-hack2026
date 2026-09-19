@@ -41,7 +41,12 @@ Mode = Literal["current", "historical_analysis", "historical_forecast"]
 ARCHIVE_START = datetime(2024, 5, 1, 0, 0, 0, tzinfo=timezone.utc)
 ARCHIVE_END = datetime(2024, 6, 30, 23, 59, 59, 999999, tzinfo=timezone.utc)
 
-ALGORITHM_VERSION = "0.1.0"
+ALGORITHM_VERSION = "0.2.0"
+"""FN-34 (S2-04): recommendation.status/exclusion_reason for `current` are now
+derived from src.domain.windows.dominance (rule v2) instead of a hardcoded
+literal — same identity of the algorithm producing the result, main-prompt.md
+§3 requires a version bump on any such change even when today's observable
+output for not_implemented mechanisms is unchanged."""
 
 
 def _require_aware(value: datetime, field_name: str) -> datetime:
