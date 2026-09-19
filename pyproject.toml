@@ -31,7 +31,15 @@ package = false
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-addopts = "-ra"
+# integration-тесты (tests/integration/) требуют реально запущенного
+# сервиса (docker compose или `uv run python -m src.api.app`) и настоящей
+# сети до CelesTrak/NOAA SWPC — CI и обычный `pytest` их не запускают.
+# README.md «Развёртывание» — как включить явно (`-m integration` в
+# командной строке переопределяет это же -m из addopts).
+addopts = "-ra -m 'not integration'"
+markers = [
+    "integration: сквозная проверка развёрнутого стека (tests/integration/test_stage1.py); не входит в `uv run pytest` по умолчанию.",
+]
 
 [tool.ruff]
 target-version = "py311"

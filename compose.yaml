@@ -1,0 +1,59 @@
+# Развёртывание основы этапа 1 (FN-28 / S1-10): API + UI + постоянное
+# хранилище SQLite одной командой. Собирает существующие слои
+# (src/api, web/) в две цели одного Dockerfile — новых модулей не
+# добавляет (.ai/main-prompt.md §8: контейнеры — упаковка, не логика).
+#
+# Запуск: `docker compose up --build`; проверки — README.md «Развёртывание».
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    environment:
+      # Обязательная настройка (src/config.py) — без значения по умолчанию,
+      # намеренно задана здесь явно, а не через host .env (docker compose up
+      # воспроизводится одной командой без предварительного `cp .env.example .env`).
+      APP_ENV: production
+      LOG_LEVEL: INFO
+      # Путь внутри контейнера совпадает с точкой монтирования тома ниже —
+      # перезапуск (`docker compose restart api`) не теряет сохранённые
+      # записи источников и результаты расчёта (приёмка FN-28).
+      STORE_DB_PATH: data/store.sqlite3
+      STORE_RAW_DIR: data/raw
+    volumes:
+      - api-data:/app/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  # Именованный том, а не bind mount: воспроизводится одинаково у любого
+  # участника команды без прав на хостовую директорию (приёмка «другой
+  # участник воспроизводит запуск по README»).
+  api-data:
