@@ -24,10 +24,14 @@ export default defineConfig({
   },
   webServer: {
     // `npx vite preview` напрямую, а не `npm run preview --` — на раннере CI
-    // (round 1 ревью, повторный прогон после первого фикса) обёртка npm
-    // добавляла задержку старта, из-за которой первый прогон в
-    // frontend-checks не укладывался в 30 с ожидания вебсервера.
-    command: 'npx vite preview --port 4173 --strictPort',
+    // (round 1 ревью) обёртка npm добавляла задержку старта. Явный
+    // `--host 127.0.0.1` обязателен: без него `vite preview` слушает только
+    // хостнейм `localhost`, который на некоторых раннерах CI резолвится в
+    // `::1` (IPv6) — Playwright же опрашивает готовность строго по
+    // `http://127.0.0.1:4173` (см. `use.baseURL` ниже) и подключиться не
+    // может, из-за чего сервер выглядит недоступным все 60 с таймаута, хотя
+    // процесс уже поднят (frontend-checks run 35434397746).
+    command: 'npx vite preview --host 127.0.0.1 --port 4173 --strictPort',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
