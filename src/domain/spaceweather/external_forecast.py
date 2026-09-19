@@ -183,6 +183,22 @@ def assess_external_forecast(
     ``coverage_fraction`` — доля окна, покрытая хотя бы одним прогнозным
     днём, для дальнейшего использования вызывающей стороной (например
     правилом предпочтения окон, main-prompt.md §11).
+
+    **Дедупликация по календарному дню перед геометрией** (round 2 ревью
+    PR #24): предположение «дни не пересекаются друг с другом» верно только
+    для РАЗНЫХ календарных дней. Если на вход пришло несколько записей за
+    ОДИН И ТОТ ЖЕ ``forecast_day`` (например обе линии — живая и архивная —
+    отдали версию на одну и ту же дату, или вызывающая сторона не
+    отфильтровала устаревшую версию до вызова), их пересечения с окном
+    идентичны и наивное суммирование по каждой записи задвоило бы
+    покрытие — окно 22:00–04:00 с тремя версиями первого дня и вовсе без
+    записи на второй день ложно показало бы coverage 3×(2/6)=100% вместо
+    настоящих 2/6. Эта функция не доверяет вызывающей стороне уже
+    отфильтровавшей дубли: перед расчётом пересечений для каждого
+    ``forecast_day`` выбирается ровно одна запись — с наибольшим
+    ``published_at`` (самая свежая известная версия, тот же принцип
+    выбора, что и в ``src/store/records.py::select_as_of``); остальные не
+    участвуют ни в пересечениях, ни в ``max_probability_percent``.
     """
     if window_start.tzinfo is None or window_end.tzinfo is None:
         raise ValueError("window_start/window_end must be timezone-aware UTC datetimes")
@@ -191,9 +207,15 @@ def assess_external_forecast(
 
     window_duration = window_end - window_start
 
+    latest_by_day: dict[date, ExternalForecastDay] = {}
+    for day in days:
+        current = latest_by_day.get(day.forecast_day)
+        if current is None or day.published_at > current.published_at:
+            latest_by_day[day.forecast_day] = day
+
     overlaps: list[ForecastDayWindowOverlap] = []
     covered_duration = timedelta(0)
-    for day in days:
+    for day in latest_by_day.values():
         fd = day.forecast_day
         day_start = datetime(fd.year, fd.month, fd.day, tzinfo=UTC)
         day_end = day_start + timedelta(days=1)
@@ -201,10 +223,10 @@ def assess_external_forecast(
         overlap_end = min(day_end, window_end)
         overlaps_window = overlap_start < overlap_end
         if overlaps_window:
-            # Дни — разные календарные сутки, поэтому их пересечения с окном
-            # сами никогда не пересекаются друг с другом: сумма длительностей
-            # — это и есть длительность объединения, без риска задвоить один
-            # и тот же отрезок окна дважды.
+            # После дедупликации выше дни гарантированно различны — разные
+            # календарные сутки не могут перекрываться друг с другом, сумма
+            # длительностей их пересечений с окном равна длительности их
+            # объединения, без риска задвоить один и тот же отрезок окна.
             covered_duration += overlap_end - overlap_start
         overlaps.append(
             ForecastDayWindowOverlap(
@@ -218,7 +240,7 @@ def assess_external_forecast(
     intersecting = [o for o in overlaps if o.overlaps_window]
     max_probability = max((o.day.probability_percent for o in intersecting), default=None)
 
-    covered_duration = min(covered_duration, window_duration)  # защита от некорректного входа
+    assert covered_duration <= window_duration  # гарантировано дедупликацией выше, не клампом
     coverage_fraction = covered_duration / window_duration
     critical_gap = covered_duration < window_duration
 

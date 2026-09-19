@@ -191,6 +191,33 @@ def test_full_coverage_across_two_days_is_not_a_critical_gap() -> None:
     assert assessment.coverage_fraction == pytest.approx(1.0)
 
 
+def test_multiple_versions_of_the_same_day_do_not_inflate_coverage() -> None:
+    """Round 2 ревью PR #24: три версии одного и того же прогнозного дня
+    (например живая и архивная линия обе отдали дату, или устаревшая
+    версия не была отфильтрована вызывающей стороной до вызова) не должны
+    задваивать/затраивать покрытие. Окно 22:00-04:00, все три версии — за
+    первый день (22:00-00:00, 2 часа из 6); второй день (00:00-04:00) не
+    покрыт вовсе ни одной версией. Наивное суммирование по каждой записи
+    дало бы 3×2ч=6ч из 6ч — ложные 100% и critical_gap=False."""
+    stale = _day("2025-01-05", 5.0, "2025-01-04T22:00:00+00:00", "rec-stale")
+    revised = _day("2025-01-05", 60.0, "2025-01-05T10:00:00+00:00", "rec-revised")
+    latest = _day("2025-01-05", 20.0, "2025-01-05T22:00:00+00:00", "rec-latest")
+    window_start = datetime(2025, 1, 5, 22, 0, tzinfo=UTC)
+    window_end = datetime(2025, 1, 6, 4, 0, tzinfo=UTC)  # 6 часов, второй день не покрыт
+
+    assessment = assess_external_forecast(
+        [stale, revised, latest], window_start=window_start, window_end=window_end
+    )
+
+    # Только самая свежая версия (наибольший published_at) участвует в геометрии.
+    assert len(assessment.overlaps) == 1
+    assert assessment.overlaps[0].day.record_id == "rec-latest"
+    assert assessment.coverage_fraction == pytest.approx(2 / 6)
+    assert assessment.critical_gap is True
+    assert assessment.max_probability_percent == 20.0
+    assert assessment.record_ids == ("rec-latest",)
+
+
 def test_no_forecast_days_at_all_is_a_critical_gap() -> None:
     window_start = datetime(2025, 1, 5, 10, 0, tzinfo=UTC)
     window_end = datetime(2025, 1, 5, 14, 0, tzinfo=UTC)
