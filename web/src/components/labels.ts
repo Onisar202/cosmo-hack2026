@@ -26,6 +26,8 @@ import type {
   MechanismStatus,
   RecommendationStatus,
   RecordKind,
+  SourceAgreement,
+  SpaceWeatherEventState,
   WarningSeverity,
 } from '../api/types'
 
@@ -49,6 +51,56 @@ export const MECHANISM_STATUS_LABELS: Record<MechanismStatus, LabelSpec> = {
   stale_data: { label: 'данные устарели', tone: 'warning', icon: HistoryToggleOffIcon },
   source_error: { label: 'отказ источника', tone: 'error', icon: ErrorIcon },
   beyond_horizon: { label: 'за горизонтом прогноза', tone: 'info', icon: ScheduleIcon },
+  qualitative_only: {
+    label: 'событие подтверждено, уровень не восстановим',
+    tone: 'error',
+    icon: ReportProblemIcon,
+  },
+}
+
+/**
+ * FN-41: три состояния архивной событийной линии Механизма 1. Подписи
+ * намеренно НЕ сокращают «покрытие не подтверждено» до «нет данных» и не
+ * превращают «событие не выявлено» в «спокойно»: это разные утверждения о
+ * разной степени знания (main-prompt.md §2). NOT_APPLICABLE показывается
+ * нейтрально — линия не применялась, и это не вывод об обстановке.
+ */
+export const EVENT_STATE_LABELS: Record<SpaceWeatherEventState, LabelSpec> = {
+  EVENT_PRESENT: { label: 'событие выявлено', tone: 'error', icon: ReportProblemIcon },
+  NO_EVENT_DETECTED: {
+    label: 'событие не выявлено (покрытие подтверждено)',
+    tone: 'success',
+    icon: CheckCircleIcon,
+  },
+  INSUFFICIENT_DATA: {
+    label: 'оценить невозможно: покрытие не подтверждено',
+    tone: 'warning',
+    icon: HelpIcon,
+  },
+  NOT_APPLICABLE: {
+    label: 'архивная событийная линия не применялась',
+    tone: 'default',
+    icon: BlockIcon,
+  },
+}
+
+/**
+ * FN-41: согласие источников ВНУТРИ механизма. Подписи намеренно не путают
+ * его с расхождением механизмов между собой и не превращают «сравнивать
+ * нечего» в «источники согласны» (main-prompt.md §2).
+ */
+export const SOURCE_AGREEMENT_LABELS: Record<SourceAgreement, LabelSpec> = {
+  CONSISTENT: { label: 'источники согласны', tone: 'success', icon: CheckCircleIcon },
+  CONFLICT: {
+    label: 'конфликт источников — нужна проверка человеком',
+    tone: 'error',
+    icon: ReportProblemIcon,
+  },
+  INSUFFICIENT_DATA: {
+    label: 'согласие источников установить нельзя',
+    tone: 'warning',
+    icon: HelpIcon,
+  },
 }
 
 export const WARNING_SEVERITY_LABELS: Record<WarningSeverity, LabelSpec> = {

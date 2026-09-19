@@ -59,27 +59,68 @@ S3 ``LastModified`` объекта из листинга бакета (см.
 преобразование в TEME здесь не требуется и не делается (TEME — только у
 SGP4/TLE-пути ``src/sources/orbit.py``).
 
-Область задачи (гейт/проба, main-prompt.md §11 «Это доказательство
+Область задачи FN-33 (гейт/проба, main-prompt.md §11 «Это доказательство
 доступности, не реализованный replay всего сервиса», по аналогии с
-``src/sources/archive_probe.py``): парсинг и отбор работают над уже
-полученными файлами (реальные фикстуры
-``tests/fixtures/orbit/history/``, см. её README о происхождении) — этот
-модуль не содержит production-шлюза с периодическим refresh/TTL наподобие
-``src/sources/swpc.py::fetch_and_store``; постраничная загрузка полного
-архива в хранилище — задача следующего этапа.
+``src/sources/archive_probe.py``): парсинг и отбор работали над уже
+полученными файлами (реальные фикстуры ``tests/fixtures/orbit/history/``,
+см. её README о происхождении).
+
+**FN-41 (этап 3) добавляет production-шлюз** :func:`ensure_releases_for_interval`
+поверх того же парсинга и тех же двух правил отбора: реальный HTTP
+(``src/sources/http.py`` — раздельные таймауты, ограниченные повторы,
+отдельная обработка 429), перепроверка целостности скачанных байт против
+S3-листинга (:func:`verify_release_bytes`) и сохранение выпуска в
+хранилище. Объём шлюза осознанно ограничен **загрузкой по требованию для
+расчётного интервала конкретного запроса**: кандидаты — датированные
+выпуски архива в окне :data:`_RELEASE_LOOKBACK_DAYS` вокруг интервала, не
+весь архив из 736 выпусков и не фоновая задача обновления. Кеш архивных
+ответов бессрочен (main-prompt.md §5): уже сохранённый выпуск
+восстанавливается из хранилища (:func:`release_from_stored_record`) вместо
+повторного скачивания многомегабайтного файла, без TTL — архивный объект
+не меняется.
+
+**``quality`` сохранённой записи выпуска — всегда как получено
+(``nominal``), метка реконструкции живёт в РЕЗУЛЬТАТЕ, не в записи**
+(изменение FN-41 к прежней формулировке FN-33 «запись по пути анализа
+несёт ``quality="reconstructed"``). Причина техническая и содержательная
+одновременно: один и тот же датированный выпуск законно отбирается обеими
+ветками (:func:`select_release_for_forecast` и
+:func:`select_release_for_analysis`), а дедуп-ключ хранилища
+``(source_id, provider_record_id, source_version)`` вместе со сравнением
+содержания (``src/store/records.py``) считает ``quality`` частью
+содержания — запись одних и тех же байт дважды с разным ``quality`` дала
+бы ``DuplicateKeyConflictError``, то есть режим запроса портил бы
+хранилище. Реконструкция — свойство ОТБОРА, а не байт поставщика, и
+доходит до интерфейса и выгрузки штатным каналом контракта:
+``result.orbit.is_reconstructed`` + ``limitations``
+(``contracts/result.schema.json``, main-prompt.md §1). Защита строгого
+``historical_forecast`` от записи «из будущего» при этом не ослабевает:
+она обеспечивается правилом ``published_at <= as_of`` + полным покрытием
+интервала в :func:`select_release_for_forecast`, а не флагом ``quality``.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+import sqlite3
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Literal
 
-from src.store.records import RecordInput
+import httpx
+import yaml
+
+from src.sources import http as source_http
+from src.store.records import (
+    RawOriginalStore,
+    RecordInput,
+    insert_record,
+    select_by_provider_record_id,
+)
 
 SOURCE_ID = "nasa-iss-oem-history"
 
@@ -90,6 +131,42 @@ OEM_URL_TEMPLATE = (
     "https://nasa-public-data.s3.amazonaws.com/iss-coords/{release_date}/ISS_OEM/"
     "ISS.OEM_J2K_EPH.txt"
 )
+
+#: Индекс датированных выпусков архива (``CommonPrefixes`` — по одному на
+#: папку выпуска) и листинг одной папки выпуска (``Contents`` — ``.txt`` и
+#: ``.xml`` объекты с ``LastModified``/``ETag``/``Size``). Оба адреса — те
+#: же, что задокументированы в ``sources.yaml#nasa-iss-oem-history`` и
+#: ``tests/fixtures/orbit/history/README.md``, и подтверждены сохранёнными
+#: реальными ответами.
+ARCHIVE_INDEX_URL = (
+    "https://nasa-public-data.s3.amazonaws.com/?list-type=2&prefix=iss-coords/&delimiter=/"
+)
+RELEASE_LISTING_URL_TEMPLATE = (
+    "https://nasa-public-data.s3.amazonaws.com/?list-type=2&prefix=iss-coords/"
+    "{release_date}/ISS_OEM/"
+)
+
+_DEFAULT_SOURCES_YAML = Path(__file__).resolve().parent.parent.parent / "sources.yaml"
+
+#: Насколько далеко назад от начала расчётного интервала ищутся кандидаты
+#: (каждый выпуск покрывает ~15 суток вперёд от даты выпуска, максимальный
+#: наблюдаемый разрыв между выпусками в обязательном периоде — 5 суток,
+#: ``sources.yaml#nasa-iss-oem-history.temporal_coverage``): 16 суток
+#: гарантированно захватывают хотя бы один покрывающий выпуск, не скачивая
+#: весь архив.
+_RELEASE_LOOKBACK_DAYS = 16
+#: И немного вперёд — только для ветки ``historical_analysis``, которая
+#: предпочитает выпуск, СОЗДАННЫЙ вскоре после интересующего момента
+#: (:func:`select_release_for_analysis`). Больше двух суток бессмысленно:
+#: ``USEABLE_START_TIME`` выпуска начинается около его же даты, поэтому
+#: выпуск, датированный сильно позже момента, момент уже не покрывает.
+_RELEASE_LOOKAHEAD_DAYS = 2
+#: Верхняя граница числа скачиваемых за один расчёт выпусков — защита от
+#: неожиданно плотного участка архива (main-prompt.md §6 «не строй
+#: инфраструктуру там, где её не нужно», но и не выкачивай архив целиком на
+#: один запрос). Кандидаты берутся от новейшего к старейшему, поэтому
+#: обрезается самый старый, наименее вероятный к отбору хвост.
+_MAX_RELEASE_CANDIDATES = 8
 
 UTC = timezone.utc
 
@@ -681,27 +758,348 @@ def build_oem_orbital_elements_record(
     )
 
 
+# ---------------------------------------------------------------------------
+# Production-шлюз (FN-41, этап 3): реальный HTTP + сохранение выпуска
+# ---------------------------------------------------------------------------
+
+_COMMON_PREFIX_DATE_RE = re.compile(r"iss-coords/(?P<date>\d{4}-\d{2}-\d{2})/$")
+
+
+@dataclass(frozen=True)
+class OemSourceConfig:
+    """Сетевые параметры источника, читаемые из ``sources.yaml``, а не из кода
+    (.ai/main-prompt.md §7). TTL у архивного продукта отсутствует осознанно:
+    кеш архивных ответов бессрочен (§5), периодического refresh у
+    датированного выпуска не бывает."""
+
+    source_id: str
+    connect_timeout_seconds: float
+    read_timeout_seconds: float
+    max_retries: int
+    backoff_base_seconds: float
+    enabled: bool
+
+
+def load_source_config(
+    path: str | Path = _DEFAULT_SOURCES_YAML, *, source_id: str = SOURCE_ID
+) -> OemSourceConfig:
+    """Читает запись источника из ``sources.yaml`` заново при каждом вызове —
+    тем же правилом, что и ``src/sources/swpc.py::load_source_config``
+    (изменение ``enabled``/таймаутов действует без перезапуска сервиса)."""
+    doc = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    for entry in doc.get("sources") or []:
+        if entry.get("source_id") == source_id:
+            network = entry.get("network") or {}
+            return OemSourceConfig(
+                source_id=source_id,
+                connect_timeout_seconds=float(network["connect_timeout_seconds"]),
+                read_timeout_seconds=float(network["read_timeout_seconds"]),
+                max_retries=int(network["max_retries"]),
+                backoff_base_seconds=float(network["retry_backoff_base_seconds"]),
+                enabled=bool(entry.get("enabled", True)),
+            )
+    raise KeyError(f"source_id {source_id!r} is not registered in {path}")
+
+
+def fetch(
+    url: str,
+    *,
+    config: OemSourceConfig,
+    client: httpx.Client | None = None,
+    now: datetime | None = None,
+) -> source_http.HttpFetchResult:
+    """Один сетевой вызов архива через общий HTTP-клиент слоя ``sources``.
+
+    Отдельная тонкая функция — тем же паттерном, что
+    ``src.sources.swpc.fetch``/``src.sources.mmod.fetch``: тесты подменяют
+    именно её (``monkeypatch.setattr``) и потому детерминированы и без сети
+    (.ai/main-prompt.md §9)."""
+    return source_http.fetch(
+        url,
+        connect_timeout_seconds=config.connect_timeout_seconds,
+        read_timeout_seconds=config.read_timeout_seconds,
+        max_retries=config.max_retries,
+        backoff_base_seconds=config.backoff_base_seconds,
+        client=client,
+        now=now,
+    )
+
+
+def parse_archive_index(xml_bytes: bytes) -> list[str]:
+    """Разбирает индекс архива (``?prefix=iss-coords/&delimiter=/``) в список
+    дат датированных выпусков (``"2024-05-08"``), по возрастанию.
+
+    Только ``CommonPrefixes`` — имена папок; ни одного утверждения о времени
+    публикации отсюда не делается (имя папки — не ``published_at``, см.
+    модульный docstring). Усечённый (``IsTruncated = true``) индекс — ошибка
+    формата, а не «столько выпусков и есть»: молча обрезанный список
+    кандидатов дал бы пропуск покрывающего выпуска, неотличимый от реального
+    пробела архива (main-prompt.md §2).
+    """
+    if not xml_bytes or not xml_bytes.strip():
+        raise OemListingFormatError("empty S3 archive index response body")
+    try:
+        root = ET.fromstring(xml_bytes)  # noqa: S314 — доверенный архив, не пользовательский ввод
+    except ET.ParseError as exc:
+        raise OemListingFormatError(f"S3 archive index is not valid XML: {exc}") from exc
+
+    truncated_el = root.find("s3:IsTruncated", _S3_NS)
+    if truncated_el is not None and (truncated_el.text or "").strip().lower() == "true":
+        raise OemListingFormatError(
+            "S3 archive index is truncated (IsTruncated=true) — a silently shortened "
+            "candidate list would hide a covering release as if the archive had a gap "
+            "(.ai/main-prompt.md §2); pagination of the index is not implemented"
+        )
+
+    dates: list[str] = []
+    for prefix_el in root.findall("s3:CommonPrefixes/s3:Prefix", _S3_NS):
+        match = _COMMON_PREFIX_DATE_RE.match((prefix_el.text or "").strip())
+        if match is not None:
+            dates.append(match.group("date"))
+    if not dates:
+        raise OemListingFormatError(
+            "S3 archive index has no dated <CommonPrefixes> entries — the archive "
+            "layout may have changed"
+        )
+    return sorted(set(dates))
+
+
+def verify_release_bytes(raw_bytes: bytes, listing_entry: S3ListingEntry) -> None:
+    """Перепроверяет скачанные байты против S3-листинга того же объекта.
+
+    Production-вариант :func:`verify_fetch_integrity` (та сверяет ТРИ
+    указания, включая сохранённые HTTP-заголовки ``*.meta.json`` фикстуры):
+    общий HTTP-клиент слоя ``sources`` (``src/sources/http.py``) не отдаёт
+    заголовки ответа, поэтому здесь сверяются два независимых указания —
+    размер и ETag листинга против фактических байт. Это честно меньше, чем
+    у фикстурной проверки, и сказано прямо, а не выдано за полную сверку;
+    главное свойство временной честности при этом не страдает:
+    ``published_at`` берётся из ``LastModified`` ТОГО ЖЕ листинга, а не из
+    ``CREATION_DATE`` и не из имени папки (модульный docstring).
+    """
+    if len(raw_bytes) != listing_entry.size:
+        raise OemIntegrityError(
+            f"size mismatch for {listing_entry.key!r}: S3 listing says "
+            f"{listing_entry.size} bytes, downloaded {len(raw_bytes)}"
+        )
+    actual_md5 = hashlib.md5(raw_bytes, usedforsecurity=False).hexdigest()
+    if actual_md5 != listing_entry.etag:
+        raise OemIntegrityError(
+            f"S3 ETag {listing_entry.etag!r} does not match MD5 of the downloaded bytes "
+            f"{actual_md5!r} for {listing_entry.key!r} — for a single-part upload these "
+            "must be equal"
+        )
+
+
+def release_from_stored_record(record: dict[str, object]) -> tuple[OemRelease, bytes]:
+    """Восстанавливает :class:`OemRelease` из уже сохранённой записи хранилища.
+
+    Кеш архивных ответов бессрочен (main-prompt.md §5) — повторный расчёт по
+    тому же периоду не скачивает тот же многомегабайтный выпуск заново.
+    ``published_at`` берётся из записи (там лежит S3 ``LastModified``, см.
+    :func:`build_oem_orbital_elements_record`), а не восстанавливается из
+    ``CREATION_DATE`` разобранного тела.
+    """
+    value = record["value"]
+    spatial_context = record["spatial_context"]
+    if not isinstance(value, dict) or not isinstance(spatial_context, dict):
+        raise OemFormatError("stored OEM record has an unexpected value/spatial_context shape")
+    raw_text = value.get("raw")
+    published_at_text = record.get("published_at")
+    if not isinstance(raw_text, str) or not isinstance(published_at_text, str):
+        raise OemFormatError("stored OEM record is missing value.raw or published_at")
+    raw_bytes = raw_text.encode("ascii")
+    parsed = parse_oem(raw_bytes)
+    provider_record_id = str(record["provider_record_id"])
+    release = OemRelease(
+        release_date=provider_record_id.removeprefix("iss-oem-"),
+        parsed=parsed,
+        published_at=_parse_s3_last_modified(published_at_text),
+        etag=str(spatial_context.get("etag", "")),
+        s3_key=str(spatial_context.get("s3_key", "")),
+        size=len(raw_bytes),
+        source_url=str(record["source_url"]),
+    )
+    return release, raw_bytes
+
+
+@dataclass(frozen=True)
+class OemArchiveFetch:
+    """Итог одного вызова :func:`ensure_releases_for_interval`.
+
+    ``releases`` — выпуски-кандидаты, готовые к отбору
+    (``src/sources/orbit.py::select_oem_elements_for_request``); отбор здесь
+    НЕ делается: получение не интерпретирует (main-prompt.md §8).
+    ``errors`` — причины, по которым отдельные кандидаты не получены;
+    непустой список при непустом ``releases`` означает частичный успех, и
+    вызывающая сторона обязана показать это, а не считать «архив пуст».
+    """
+
+    releases: tuple[OemRelease, ...]
+    record_ids: dict[str, str]  # release_date -> record_id сохранённой записи
+    errors: tuple[str, ...]
+    fetched_release_dates: tuple[str, ...]
+    cached_release_dates: tuple[str, ...]
+
+
+def _candidate_release_dates(
+    index_dates: list[str], *, first_day: date, last_day: date
+) -> list[str]:
+    selected = [
+        release_date
+        for release_date in index_dates
+        if first_day <= date.fromisoformat(release_date) <= last_day
+    ]
+    return selected[-_MAX_RELEASE_CANDIDATES:]
+
+
+def ensure_releases_for_interval(
+    conn: sqlite3.Connection,
+    raw_store: RawOriginalStore,
+    *,
+    interval_start: datetime,
+    interval_end: datetime,
+    fetched_at: datetime,
+    config: OemSourceConfig,
+    include_lookahead: bool,
+    http_client: httpx.Client | None = None,
+) -> OemArchiveFetch:
+    """Гарантирует, что выпуски OEM, способные покрыть расчётный интервал,
+    получены и сохранены — по требованию для ЭТОГО запроса, не весь архив.
+
+    ``include_lookahead`` — единственный параметр, зависящий от ветки
+    вызова, и он относится к НАБОРУ КАНДИДАТОВ на скачивание, а не к правилу
+    пригодности записи: ``historical_analysis`` предпочитает выпуск,
+    созданный вскоре ПОСЛЕ интересующего момента, поэтому её набор
+    кандидатов шире на :data:`_RELEASE_LOOKAHEAD_DAYS`. Правило «какие
+    записи пригодны» остаётся полностью в двух раздельных функциях отбора
+    (:func:`select_release_for_forecast`/:func:`select_release_for_analysis`,
+    main-prompt.md §1) — этот шлюз ни одну запись не отбрасывает и ни одну
+    не предпочитает.
+
+    Отказ отдельного кандидата не роняет вызов: он попадает в ``errors``, а
+    вызывающая сторона решает, достаточно ли полученного (main-prompt.md §2
+    — частичный результат виден как частичный, а не как пустой архив).
+    """
+    index_result = fetch(ARCHIVE_INDEX_URL, config=config, client=http_client, now=fetched_at)
+    index_dates = parse_archive_index(index_result.body)
+
+    first_day = (interval_start - timedelta(days=_RELEASE_LOOKBACK_DAYS)).date()
+    last_day = interval_end.date()
+    if include_lookahead:
+        last_day = last_day + timedelta(days=_RELEASE_LOOKAHEAD_DAYS)
+    candidates = _candidate_release_dates(index_dates, first_day=first_day, last_day=last_day)
+
+    releases: list[OemRelease] = []
+    record_ids: dict[str, str] = {}
+    errors: list[str] = []
+    fetched_dates: list[str] = []
+    cached_dates: list[str] = []
+
+    for release_date in candidates:
+        stored = select_by_provider_record_id(
+            conn, source_id=SOURCE_ID, provider_record_id=f"iss-oem-{release_date}"
+        )
+        if stored:
+            try:
+                release, _raw = release_from_stored_record(stored[0])
+            except (OemFormatError, OemListingFormatError) as exc:
+                errors.append(f"{release_date}: stored record is unusable ({exc})")
+                continue
+            releases.append(release)
+            record_ids[release_date] = str(stored[0]["record_id"])
+            cached_dates.append(release_date)
+            continue
+
+        try:
+            listing_result = fetch(
+                RELEASE_LISTING_URL_TEMPLATE.format(release_date=release_date),
+                config=config,
+                client=http_client,
+                now=fetched_at,
+            )
+            listing_entries = parse_s3_listing(listing_result.body)
+            txt_entry = _find_txt_entry(listing_entries)
+            source_url = OEM_URL_TEMPLATE.format(release_date=release_date)
+            body_result = fetch(source_url, config=config, client=http_client, now=fetched_at)
+            verify_release_bytes(body_result.body, txt_entry)
+            parsed = parse_oem(body_result.body)
+        except (
+            source_http.SourceHttpError,
+            OemFormatError,
+            OemListingFormatError,
+            OemIntegrityError,
+        ) as exc:
+            errors.append(f"{release_date}: {type(exc).__name__}: {exc}")
+            continue
+
+        release = build_oem_release(
+            parsed,
+            listing_entries=listing_entries,
+            release_date=release_date,
+            source_url=source_url,
+        )
+        record = build_oem_orbital_elements_record(
+            release, raw_bytes=body_result.body, fetched_at=fetched_at
+        )
+        try:
+            record_ids[release_date] = insert_record(conn, raw_store, record)
+        except sqlite3.IntegrityError:
+            # Два конкурентных исторических расчёта на близкие даты выбирают
+            # одних и тех же кандидатов и могут проиграть гонку
+            # "SELECT видит пусто у обоих -> INSERT" внутри insert_record
+            # (src/store/records.py делает SELECT-затем-INSERT без
+            # транзакционной защиты): один коммитит первым, второй получает
+            # UNIQUE constraint failed. Повторный вызов застаёт уже
+            # закоммиченную строку своим же SELECT и возвращает её id —
+            # содержимое идентично (те же байты того же объекта бакета), это
+            # не DuplicateKeyConflictError. Тот же приём и по той же причине,
+            # что и в src/api/service.py::fetch_and_store_orbit (приёмка
+            # FN-26 «два конкурентных запроса не смешивают данные»).
+            record_ids[release_date] = insert_record(conn, raw_store, record)
+        releases.append(release)
+        fetched_dates.append(release_date)
+
+    return OemArchiveFetch(
+        releases=tuple(releases),
+        record_ids=record_ids,
+        errors=tuple(errors),
+        fetched_release_dates=tuple(fetched_dates),
+        cached_release_dates=tuple(cached_dates),
+    )
+
+
 __all__ = [
+    "ARCHIVE_INDEX_URL",
     "ISS_NORAD_ID",
     "ISS_OBJECT_ID",
     "OEM_URL_TEMPLATE",
     "PUBLICATION_EVIDENCE",
     "PUBLICATION_EVIDENCE_NOTE",
+    "RELEASE_LISTING_URL_TEMPLATE",
     "SOURCE_ID",
     "MetaJsonProvenance",
+    "OemArchiveFetch",
     "OemFormatError",
     "OemIntegrityError",
     "OemListingFormatError",
     "OemRelease",
     "OemSelection",
+    "OemSourceConfig",
     "OemStateVectorRecord",
     "ParsedOem",
     "S3ListingEntry",
     "build_oem_orbital_elements_record",
     "build_oem_release",
+    "ensure_releases_for_interval",
+    "fetch",
+    "load_source_config",
+    "parse_archive_index",
     "parse_oem",
     "parse_s3_listing",
+    "release_from_stored_record",
     "select_release_for_analysis",
     "select_release_for_forecast",
     "verify_fetch_integrity",
+    "verify_release_bytes",
 ]

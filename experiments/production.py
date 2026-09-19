@@ -194,6 +194,13 @@ def _mmod_mechanism_assessment(
         return {
             "mechanism": "mmod",
             "status": "source_error",
+            # Архивная событийная линия — линия Механизма 1; для MMOD она не
+            # определена (contracts/result.schema.json → spaceWeatherEventState).
+            "event_state": "NOT_APPLICABLE",
+            # У MMOD одна линия данных — согласие источников устанавливать не из
+            # чего, и это не «источники согласны» (FN-41).
+            "source_agreement": "INSUFFICIENT_DATA",
+            "source_assessments": [],
             "max_level": None,
             "exceedance_hours_by_level": None,
             "coverage_fraction": 0.0,
@@ -208,6 +215,9 @@ def _mmod_mechanism_assessment(
     return {
         "mechanism": "mmod",
         "status": assessment.status,
+        "event_state": "NOT_APPLICABLE",
+        "source_agreement": "INSUFFICIENT_DATA",
+        "source_assessments": [],
         "max_level": assessment.max_level,
         "exceedance_hours_by_level": assessment.exceedance_hours_by_level,
         "coverage_fraction": assessment.coverage_fraction,
@@ -251,6 +261,12 @@ def _space_weather_mechanism(
     return {
         "mechanism": "space_weather",
         "status": "missing_data",
+        # Стенд Т5 намеренно не строит production-классификацию этой линии
+        # (см. докстринг модуля): «оценить невозможно», а не «событий не было».
+        "event_state": "INSUFFICIENT_DATA",
+        # Определённого высказывания нет ни у одной линии — сравнивать нечего.
+        "source_agreement": "INSUFFICIENT_DATA",
+        "source_assessments": [],
         "max_level": None,
         "exceedance_hours_by_level": None,
         "coverage_fraction": 0.0,

@@ -83,7 +83,7 @@
         "source": {
           "type": "string",
           "enum": ["celestrak", "space-track", "nasa-iss-oem-history"],
-          "description": "Текущие элементы — CelesTrak; исторические — Space-Track GP_HISTORY (задокументирован, не реализован) либо NASA TOPO CCSDS OEM (nasa-iss-oem-history, src/sources/orbit_history.py, актуальный исторический путь)."
+          "description": "Текущие элементы — CelesTrak (mode=current). Исторические (mode=historical_*) — nasa-iss-oem-history: датированный выпуск NASA TOPO CCSDS OEM (sources.yaml#nasa-iss-oem-history), готовые векторы состояния + интерполяция, не GP/TLE и не SGP4; celestrak в историческом результате невозможен по построению (FN-41, main-prompt.md §1, §11 — современные элементы не подставляются вместо исторических). space-track (GP_HISTORY) остаётся задокументированным, но не реализованным источником."
         },
         "norad_id": { "type": "string", "minLength": 1 },
         "elements_epoch": { "$ref": "#/$defs/utcDateTime" },
@@ -248,9 +248,44 @@
         "missing_data",
         "stale_data",
         "source_error",
-        "beyond_horizon"
+        "beyond_horizon",
+        "qualitative_only"
       ],
-      "description": "ok — оценка выполнена; not_implemented — механизм ещё не реализован в этой версии сервиса (не имитируется готовым); missing_data — данных для окна нет; stale_data — данные устарели; source_error — отказ/квота источника; beyond_horizon — окно вне горизонта прогноза («не покрыто», не «спокойно»)."
+      "description": "ok — количественная оценка выполнена; not_implemented — механизм ещё не реализован в этой версии сервиса (не имитируется готовым); missing_data — данных для окна нет; stale_data — данные устарели; source_error — отказ/квота источника; beyond_horizon — окно вне горизонта прогноза («не покрыто», не «спокойно»); qualitative_only (FN-41) — наличие воздействия ПОДТВЕРЖДЕНО качественно (event_state = EVENT_PRESENT), но уровень и длительность превышения порогов по доступной линии не восстанавливаются: окно выводится из автоматического сравнения (critical_gap = true), но это «оценить невозможно количественно при подтверждённом событии», а не благоприятная оценка и не отсутствие данных."
+    },
+    "spaceWeatherEventState": {
+      "type": "string",
+      "enum": ["EVENT_PRESENT", "NO_EVENT_DETECTED", "INSUFFICIENT_DATA", "NOT_APPLICABLE"],
+      "description": "FN-41: три различимых состояния архивной СОБЫТИЙНОЙ линии Механизма 1 для исторических окон (main-prompt.md §2 «воздействие не выявлено / данные устарели / оценить невозможно» — три состояния, не два; подтверждено доменным экспертом 2026-09-19). EVENT_PRESENT — в окне (с учётом обратного запаса на уже объявленное событие) есть пригодное уведомление квалифицирующего типа; NO_EVENT_DETECTED — покрытие архива на этот интервал ПОДТВЕРЖДЕНО и квалифицирующих уведомлений нет (подтверждённое отсутствие, не молчание); INSUFFICIENT_DATA — покрытие подтвердить нельзя (пробел архива, отказ получения, неразрешимое время публикации) — критический пробел, а не «событий не было»; NOT_APPLICABLE — эта линия не участвует в оценке (механизм mmod; mode = current, где Механизм 1 оценивается наблюдением GOES и внешним прогнозом NOAA)."
+    },
+    "sourceAgreement": {
+      "type": "string",
+      "enum": ["CONSISTENT", "CONFLICT", "INSUFFICIENT_DATA"],
+      "description": "FN-41: согласие ИСТОЧНИКОВ ВНУТРИ одного механизма — отдельно от конфликта МЕЖДУ механизмами, который выражает правило предпочтения окон (.ai/main-prompt.md §11, src/domain/windows). CONSISTENT — не менее двух линий этого механизма высказались определённо (EVENT_PRESENT/NO_EVENT_DETECTED) и совпали; CONFLICT — не менее двух высказались определённо и разошлись: обе оценки сохраняются в source_assessments, ни одна не выбирается молча, окно выводится из автоматического сравнения (critical_gap = true) и требует проверки человеком; INSUFFICIENT_DATA — определённых высказываний меньше двух, сравнивать нечего (третье состояние, а не «источники согласны», main-prompt.md §2). Свежесть/устаревание сюда не входят — они отслеживаются отдельно в source_status."
+    },
+    "sourceLineAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "event_state",
+        "coverage_fraction",
+        "beyond_horizon",
+        "record_ids",
+        "notes"
+      ],
+      "description": "Оценка ОДНОЙ линии данных внутри механизма, сохранённая как есть. Существует ровно затем, чтобы сведение нескольких линий к одному состоянию механизма не стирало ни одну из них (FN-41): по этому массиву видно, какая линия что утверждала и на каких записях.",
+      "properties": {
+        "source_id": { "type": "string", "minLength": 1 },
+        "event_state": { "$ref": "#/$defs/spaceWeatherEventState" },
+        "coverage_fraction": { "type": "number", "minimum": 0, "maximum": 1 },
+        "beyond_horizon": {
+          "type": "boolean",
+          "description": "Часть окна вышла за фактический горизонт ЭТОЙ линии (sources.yaml → forecast_horizon_hours; null там означает «горизонт не установлен», и тогда вперёд от as_of ничего не засчитывается)."
+        },
+        "record_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "notes": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
     },
     "mechanismAssessment": {
       "type": "object",
@@ -258,6 +293,9 @@
       "required": [
         "mechanism",
         "status",
+        "event_state",
+        "source_agreement",
+        "source_assessments",
         "max_level",
         "exceedance_hours_by_level",
         "coverage_fraction",
@@ -268,6 +306,13 @@
       "properties": {
         "mechanism": { "$ref": "#/$defs/mechanism" },
         "status": { "$ref": "#/$defs/mechanismStatus" },
+        "event_state": { "$ref": "#/$defs/spaceWeatherEventState" },
+        "source_agreement": { "$ref": "#/$defs/sourceAgreement" },
+        "source_assessments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sourceLineAssessment" },
+          "description": "Оценка каждой линии данных этого механизма по отдельности, включая ту, что осталась без мнения. Пустой массив — линий, способных высказаться, у этого механизма в этом режиме нет вовсе (например mmod, у которого одна линия и собственной событийной оценки нет); это не «источники согласны»."
+        },
         "max_level": {
           "description": "Максимальный уровень внутри окна. null, если status != ok (не имитируется значение, которого нет)."
         },
@@ -303,6 +348,47 @@
               "max_level": { "const": null },
               "exceedance_hours_by_level": { "const": null }
             }
+          }
+        },
+        {
+          "if": { "properties": { "mechanism": { "const": "mmod" } }, "required": ["mechanism"] },
+          "then": {
+            "properties": { "event_state": { "const": "NOT_APPLICABLE" } },
+            "description": "Архивная событийная линия — линия Механизма 1; для MMOD она не определена и не имитируется."
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "qualitative_only" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "mechanism": { "const": "space_weather" },
+              "event_state": { "const": "EVENT_PRESENT" },
+              "critical_gap": { "const": true }
+            },
+            "description": "qualitative_only существует только ради подтверждённого, но количественно не восстановимого события Механизма 1 — без EVENT_PRESENT этот статус не имеет смысла, а без critical_gap окно попало бы в автоматическое сравнение без пригодных сопоставимых показателей."
+          }
+        },
+        {
+          "if": {
+            "properties": { "event_state": { "const": "INSUFFICIENT_DATA" } },
+            "required": ["event_state"]
+          },
+          "then": {
+            "properties": { "critical_gap": { "const": true } },
+            "description": "«Оценить невозможно» по этой линии — критический пробел по определению (main-prompt.md §2); иначе окно участвовало бы в сравнении как благополучное."
+          }
+        },
+        {
+          "if": {
+            "properties": { "source_agreement": { "const": "CONFLICT" } },
+            "required": ["source_agreement"]
+          },
+          "then": {
+            "properties": { "source_assessments": { "minItems": 2 }, "critical_gap": { "const": true } },
+            "description": "Конфликт источников внутри механизма возможен только когда определённо высказались минимум две линии, и обе обязаны быть сохранены рядом (никакого молчаливого выбора одной). Расхождение линий выводит окно из автоматического сравнения — это повод для проверки человеком, а не повод ранжировать источники."
           }
         },
         {

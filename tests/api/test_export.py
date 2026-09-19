@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.api.conftest import wait_for_job
@@ -103,3 +105,63 @@ def test_repeated_export_is_deterministic_and_does_not_change_stored_data(
     still_stored = app_client.get(f"/api/results/{result_id}").json()
     assert still_stored["result_id"] == result_id
     assert still_stored == first_json
+
+
+HISTORICAL_CASES: dict[str, dict[str, Any]] = {
+    # Выраженное событие периода (10 мая 2024, AR3664) разбором —
+    # EVENT_PRESENT (протонное событие 13:35Z попадает внутрь окна
+    # 12:00–16:00); контрольный спокойный период (16–27 июня) разбором —
+    # NO_EVENT_DETECTED; тот же спокойный период строгим режимом —
+    # INSUFFICIENT_DATA («не покрыто» за отсечением).
+    "EVENT_PRESENT": {
+        "mode": "historical_analysis",
+        "start_at": "2024-05-10T12:00:00Z",
+        "duration_hours": 4,
+        "search_window_hours": 8,
+    },
+    "NO_EVENT_DETECTED": {
+        "mode": "historical_analysis",
+        "start_at": "2024-06-20T09:00:00Z",
+        "duration_hours": 4,
+        "search_window_hours": 8,
+    },
+    "INSUFFICIENT_DATA": {
+        "mode": "historical_forecast",
+        "start_at": "2024-06-20T09:00:00Z",
+        "duration_hours": 4,
+        "search_window_hours": 8,
+        "as_of": "2024-06-20T00:00:00Z",
+    },
+}
+
+
+@pytest.mark.parametrize("expected_state", sorted(HISTORICAL_CASES))
+def test_three_event_states_are_distinguishable_in_both_exports(
+    app_client: TestClient, expected_state: str
+) -> None:
+    """FN-41 приёмка п.4: EVENT_PRESENT / NO_EVENT_DETECTED /
+    INSUFFICIENT_DATA различимы не только в сохранённом результате, но и в
+    ОБЕИХ выгрузках — и обе читают тот же самый объект (main-prompt.md §3),
+    отдельного пути сборки отчёта не появилось."""
+    create = app_client.post("/api/calculations", json=HISTORICAL_CASES[expected_state])
+    job = wait_for_job(app_client, create.json()["task_id"])
+    assert job["status"] == "done", job
+    result_id = job["result_id"]
+
+    stored = app_client.get(f"/api/results/{result_id}").json()
+    states = {
+        mechanism["event_state"]
+        for window in stored["windows"]
+        for mechanism in window["mechanisms"]
+        if mechanism["mechanism"] == "space_weather"
+    }
+    assert expected_state in states
+
+    exported_json = app_client.get(f"/api/results/{result_id}/export.json").json()
+    assert exported_json == stored  # выгрузка — тот же объект, не пересборка
+    assert expected_state in json.dumps(exported_json, ensure_ascii=False)
+
+    html = app_client.get(f"/api/results/{result_id}/export.html").text
+    assert expected_state in html  # машинный токен состояния виден как есть
+    assert "Архивная событийная линия" in html  # и человекочитаемая подпись
+    assert stored["orbit"]["record_id"] in html

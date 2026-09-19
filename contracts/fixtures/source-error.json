@@ -11,15 +11,15 @@
   "as_of": null,
   "algorithm_version": "0.2.0",
   "data_manifest": [
-    { "record_id": "rec-hist-orbit-0001", "source_id": "space-track-gp-history", "source_version": "2024-06-14T22:00:00Z", "record_kind": "orbital_elements" },
+    { "record_id": "rec-hist-orbit-0001", "source_id": "nasa-iss-oem-history", "source_version": "2024-06-14T22:00:00Z", "record_kind": "orbital_elements" },
     { "record_id": "rec-mmod-stream-0002", "source_id": "meteor-stream-static-ref", "source_version": "2024.1", "record_kind": "observation" }
   ],
   "orbit": {
-    "source": "space-track",
+    "source": "nasa-iss-oem-history",
     "norad_id": "25544",
     "elements_epoch": "2024-06-14T22:00:00Z",
     "elements_age_hours": 9.0,
-    "coordinate_system": "TEME",
+    "coordinate_system": "EME2000",
     "is_reconstructed": false,
     "record_id": "rec-hist-orbit-0001"
   },
@@ -33,6 +33,20 @@
         {
           "mechanism": "space_weather",
           "status": "source_error",
+          "event_state": "INSUFFICIENT_DATA",
+          "source_agreement": "INSUFFICIENT_DATA",
+          "source_assessments": [
+            {
+              "source_id": "nasa-donki-notifications",
+              "event_state": "INSUFFICIENT_DATA",
+              "coverage_fraction": 0.0,
+              "beyond_horizon": false,
+              "record_ids": [],
+              "notes": [
+                "Архив nasa-donki-notifications: интервал окна не прочитан (квота 429) — оценить невозможно, это отсутствие данных, а не благоприятная обстановка."
+              ]
+            }
+          ],
           "max_level": null,
           "exceedance_hours_by_level": null,
           "coverage_fraction": 0.0,
@@ -45,6 +59,9 @@
         {
           "mechanism": "mmod",
           "status": "ok",
+          "event_state": "NOT_APPLICABLE",
+          "source_agreement": "INSUFFICIENT_DATA",
+          "source_assessments": [],
           "max_level": "background",
           "exceedance_hours_by_level": { "elevated": 0, "pronounced": 0 },
           "coverage_fraction": 1.0,
@@ -68,6 +85,20 @@
         {
           "mechanism": "space_weather",
           "status": "source_error",
+          "event_state": "INSUFFICIENT_DATA",
+          "source_agreement": "INSUFFICIENT_DATA",
+          "source_assessments": [
+            {
+              "source_id": "nasa-donki-notifications",
+              "event_state": "INSUFFICIENT_DATA",
+              "coverage_fraction": 0.0,
+              "beyond_horizon": false,
+              "record_ids": [],
+              "notes": [
+                "Архив nasa-donki-notifications: интервал окна не прочитан (квота 429) — оценить невозможно, это отсутствие данных, а не благоприятная обстановка."
+              ]
+            }
+          ],
           "max_level": null,
           "exceedance_hours_by_level": null,
           "coverage_fraction": 0.0,
@@ -80,6 +111,9 @@
         {
           "mechanism": "mmod",
           "status": "ok",
+          "event_state": "NOT_APPLICABLE",
+          "source_agreement": "INSUFFICIENT_DATA",
+          "source_assessments": [],
           "max_level": "elevated",
           "exceedance_hours_by_level": { "elevated": 1.5, "pronounced": 0 },
           "coverage_fraction": 1.0,
@@ -137,7 +171,7 @@
     "explanation": "Оба окна исключены правилом доминирования v2 (FN-34): критический пробел по механизму 1 из-за отказа источника (квота 429), несмотря на доступность оценки по механизму 2 — хорошее покрытие одного механизма не компенсирует пробел в другом."
   },
   "source_status": [
-    { "source_id": "space-track-gp-history", "last_success_at": "2024-06-14T22:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
+    { "source_id": "nasa-iss-oem-history", "last_success_at": "2024-06-14T22:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
     { "source_id": "noaa-ncei-swpc-archive", "last_success_at": "2026-09-10T00:00:00Z", "last_error_at": "2026-09-18T07:55:00Z", "last_error_message": "HTTP 429 Too Many Requests — исчерпана квота обращений к архиву за интервал запроса.", "frozen": false, "quota_limited": true },
     { "source_id": "meteor-stream-static-ref", "last_success_at": "2024-01-01T00:00:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false }
   ]

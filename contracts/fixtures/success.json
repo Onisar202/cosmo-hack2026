@@ -13,17 +13,17 @@
   "as_of": "2024-05-10T09:00:00Z",
   "algorithm_version": "0.2.0",
   "data_manifest": [
-    { "record_id": "rec-orbit-histelem-0001", "source_id": "space-track-gp-history", "source_version": "2024-05-09T21:03:11Z", "record_kind": "orbital_elements" },
+    { "record_id": "rec-orbit-histelem-0001", "source_id": "nasa-iss-oem-history", "source_version": "2024-05-09T21:03:11Z", "record_kind": "orbital_elements" },
     { "record_id": "rec-swx-donki-forecast-0001", "source_id": "nasa-ccmc-donki", "source_version": "2024-05-09T18:00:00Z", "record_kind": "forecast" },
     { "record_id": "rec-swx-watch-0002", "source_id": "noaa-swpc-geomag-watch", "source_version": "2024-05-09T20:00:00Z", "record_kind": "warning" },
     { "record_id": "rec-mmod-stream-0004", "source_id": "meteor-stream-static-ref", "source_version": "2024.1", "record_kind": "observation" }
   ],
   "orbit": {
-    "source": "space-track",
+    "source": "nasa-iss-oem-history",
     "norad_id": "25544",
     "elements_epoch": "2024-05-09T21:03:11Z",
     "elements_age_hours": 11.93,
-    "coordinate_system": "TEME",
+    "coordinate_system": "EME2000",
     "is_reconstructed": false,
     "record_id": "rec-orbit-histelem-0001"
   },
@@ -37,6 +37,30 @@
         {
           "mechanism": "space_weather",
           "status": "ok",
+          "event_state": "EVENT_PRESENT",
+          "source_agreement": "CONSISTENT",
+          "source_assessments": [
+            {
+              "source_id": "nasa-donki-notifications",
+              "event_state": "EVENT_PRESENT",
+              "coverage_fraction": 1.0,
+              "beyond_horizon": false,
+              "record_ids": ["rec-swx-donki-forecast-0001"],
+              "notes": [
+                "Архив nasa-donki-notifications: окно пересекает сообщение о событии, известное к отсечению as_of."
+              ]
+            },
+            {
+              "source_id": "noaa-swpc-forecast-discussion-archive",
+              "event_state": "EVENT_PRESENT",
+              "coverage_fraction": 1.0,
+              "beyond_horizon": false,
+              "record_ids": ["rec-swx-watch-0002"],
+              "notes": [
+                "Архив noaa-swpc-forecast-discussion-archive: выпуск того же периода подтверждает событие независимо от DONKI — это подтверждение другого поставщика, не перепечатка того же измерения."
+              ]
+            }
+          ],
           "max_level": "S2",
           "exceedance_hours_by_level": { "S1": 4.0, "S2": 2.5, "S3": 0 },
           "coverage_fraction": 1.0,
@@ -49,6 +73,9 @@
         {
           "mechanism": "mmod",
           "status": "ok",
+          "event_state": "NOT_APPLICABLE",
+          "source_agreement": "INSUFFICIENT_DATA",
+          "source_assessments": [],
           "max_level": "background",
           "exceedance_hours_by_level": { "elevated": 0, "pronounced": 0 },
           "coverage_fraction": 1.0,
@@ -72,6 +99,30 @@
         {
           "mechanism": "space_weather",
           "status": "ok",
+          "event_state": "EVENT_PRESENT",
+          "source_agreement": "CONSISTENT",
+          "source_assessments": [
+            {
+              "source_id": "nasa-donki-notifications",
+              "event_state": "EVENT_PRESENT",
+              "coverage_fraction": 1.0,
+              "beyond_horizon": false,
+              "record_ids": ["rec-swx-donki-forecast-0001"],
+              "notes": [
+                "Архив nasa-donki-notifications: окно пересекает сообщение о событии, известное к отсечению as_of."
+              ]
+            },
+            {
+              "source_id": "noaa-swpc-forecast-discussion-archive",
+              "event_state": "EVENT_PRESENT",
+              "coverage_fraction": 1.0,
+              "beyond_horizon": false,
+              "record_ids": ["rec-swx-watch-0002"],
+              "notes": [
+                "Архив noaa-swpc-forecast-discussion-archive: выпуск того же периода подтверждает событие независимо от DONKI."
+              ]
+            }
+          ],
           "max_level": "S3",
           "exceedance_hours_by_level": { "S1": 6.0, "S2": 5.0, "S3": 4.0 },
           "coverage_fraction": 1.0,
@@ -84,6 +135,9 @@
         {
           "mechanism": "mmod",
           "status": "ok",
+          "event_state": "NOT_APPLICABLE",
+          "source_agreement": "INSUFFICIENT_DATA",
+          "source_assessments": [],
           "max_level": "background",
           "exceedance_hours_by_level": { "elevated": 0, "pronounced": 0 },
           "coverage_fraction": 1.0,
@@ -143,7 +197,7 @@
     "explanation": "Окно A выбрано по правилу доминирования v2 (FN-34): по механизму 1 окно A не хуже и устойчиво лучше окна B (максимальный уровень S2 против S3, длительность превышения по каждому порогу меньше или равна — 4.0/2.5/0 против 6.0/5.0/4.0 часов), по механизму 2 окна равны (оба — фон); A не хуже B по обоим механизмам и строго лучше хотя бы по одному — B не доминирует, конфликта между механизмами нет."
   },
   "source_status": [
-    { "source_id": "space-track-gp-history", "last_success_at": "2024-05-09T22:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
+    { "source_id": "nasa-iss-oem-history", "last_success_at": "2024-05-09T22:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
     { "source_id": "nasa-ccmc-donki", "last_success_at": "2024-05-09T18:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
     { "source_id": "noaa-swpc-geomag-watch", "last_success_at": "2024-05-09T20:05:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false },
     { "source_id": "meteor-stream-static-ref", "last_success_at": "2024-01-01T00:00:00Z", "last_error_at": null, "last_error_message": null, "frozen": false, "quota_limited": false }

@@ -38,6 +38,7 @@ _MECHANISM_STATUS_LABELS: dict[str, str] = {
     "stale_data": "данные устарели",
     "source_error": "отказ источника",
     "beyond_horizon": "за горизонтом прогноза",
+    "qualitative_only": "событие подтверждено, количественная оценка невозможна",
 }
 
 _MECHANISM_STATUS_NULL_REASONS: dict[str, str] = {
@@ -46,6 +47,32 @@ _MECHANISM_STATUS_NULL_REASONS: dict[str, str] = {
     "stale_data": "доступные данные устарели",
     "source_error": "отказ или квота источника",
     "beyond_horizon": "интервал за пределами горизонта прогноза — «не покрыто», не «спокойно»",
+    "qualitative_only": (
+        "событие подтверждено архивной линией, но уровень и длительность превышения "
+        "по ней не восстанавливаются — это не «спокойно» и не «нет данных»"
+    ),
+}
+
+#: FN-41: три состояния архивной событийной линии обязаны быть различимы не
+#: только в сохранённом объекте и JSON-выгрузке, но и в HTML (main-prompt.md
+#: §3 «интерфейс и обе выгрузки читают один и тот же сохранённый объект» —
+#: значит и показывают одно и то же).
+_EVENT_STATE_LABELS: dict[str, str] = {
+    "EVENT_PRESENT": "событие выявлено (EVENT_PRESENT)",
+    "NO_EVENT_DETECTED": "событие не выявлено при подтверждённом покрытии (NO_EVENT_DETECTED)",
+    "INSUFFICIENT_DATA": "оценить невозможно: покрытие не подтверждено (INSUFFICIENT_DATA)",
+    "NOT_APPLICABLE": "архивная событийная линия не применялась (NOT_APPLICABLE)",
+}
+#: FN-41: согласие ИСТОЧНИКОВ внутри механизма (не согласие механизмов между
+#: собой — то выражает правило предпочтения окон). Видно и в интерфейсе, и в
+#: обеих выгрузках, потому что все трое читают один сохранённый объект.
+_SOURCE_AGREEMENT_LABELS: dict[str, str] = {
+    "CONSISTENT": "источники согласны (CONSISTENT)",
+    "CONFLICT": "КОНФЛИКТ источников — требуется проверка человеком (CONFLICT)",
+    "INSUFFICIENT_DATA": (
+        "согласие источников установить нельзя: определённое высказывание есть меньше "
+        "чем у двух линий (INSUFFICIENT_DATA)"
+    ),
 }
 _DEFAULT_NULL_REASON = "нет данных для оценки"
 
@@ -78,7 +105,7 @@ _RECORD_KIND_LABELS: dict[str, str] = {
 _ORBIT_SOURCE_LABELS: dict[str, str] = {
     "celestrak": "CelesTrak (текущие элементы)",
     "space-track": "Space-Track GP_HISTORY (исторические элементы)",
-    "nasa-iss-oem-history": "NASA TOPO CCSDS OEM (исторические элементы)",
+    "nasa-iss-oem-history": "NASA TOPO CCSDS OEM (исторические эфемериды, интерполяция)",
 }
 
 _MECHANISM_UNITS_NOTE = (
@@ -187,8 +214,41 @@ def _orbit_section(result: dict[str, Any]) -> str:
     return "<section id=\"orbit\"><h2>Орбита</h2><table>" + "".join(rows) + "</table></section>"
 
 
+def _source_assessments_html(lines: list[dict[str, Any]]) -> str:
+    """Оценка каждой линии данных механизма по отдельности (FN-41).
+
+    Ни одна линия не сворачивается в общий вывод молча: у каждой видно свой
+    ``event_state``, своя полнота, свои записи и свои пояснения — именно по
+    этому списку читатель проверяет, почему согласие источников оказалось
+    таким, каким оно заявлено.
+    """
+    if not lines:
+        return _null_span("отдельных линий данных у этого механизма нет")
+    items = []
+    for line in lines:
+        state = line.get("event_state", "NOT_APPLICABLE")
+        horizon = " · за горизонтом линии" if line.get("beyond_horizon") else ""
+        record_ids = _record_ids_html(line.get("record_ids") or [])
+        notes = _list_or_none(line.get("notes") or [], empty_reason="пояснений нет")
+        items.append(
+            "<li>"
+            f"<code>{_esc(line.get('source_id', ''))}</code>: "
+            f"{_esc(_EVENT_STATE_LABELS.get(state, state))}, покрытие "
+            f"{float(line.get('coverage_fraction', 0.0)) * 100:.0f}%{_esc(horizon)}"
+            f"<div>{record_ids}</div>{notes}"
+            "</li>"
+        )
+    return "<ul>" + "".join(items) + "</ul>"
+
+
 def _mechanism_html(mechanism: dict[str, Any]) -> str:
     status = mechanism["status"]
+    # Поле обязательно контрактом с FN-41; ``.get`` только на случай
+    # результата, сохранённого более старой версией сервиса (хранилище
+    # неизменяемо, старые результаты продолжают читаться, main-prompt.md §3).
+    event_state = mechanism.get("event_state", "NOT_APPLICABLE")
+    agreement = mechanism.get("source_agreement", "INSUFFICIENT_DATA")
+    source_lines = mechanism.get("source_assessments") or []
     reason = _MECHANISM_STATUS_NULL_REASONS.get(status, _DEFAULT_NULL_REASON)
     max_level_html = (
         _esc(mechanism["max_level"]) if mechanism["max_level"] is not None else _null_span(reason)
@@ -205,6 +265,15 @@ def _mechanism_html(mechanism: dict[str, Any]) -> str:
     rows = [
         _row("Механизм", _esc(_MECHANISM_LABELS.get(mechanism_kind, mechanism_kind))),
         _row("Статус", _esc(_MECHANISM_STATUS_LABELS.get(status, status))),
+        _row(
+            "Архивная событийная линия",
+            _esc(_EVENT_STATE_LABELS.get(event_state, event_state)),
+        ),
+        _row(
+            "Согласие источников внутри механизма",
+            _esc(_SOURCE_AGREEMENT_LABELS.get(agreement, agreement)),
+        ),
+        _row("Оценка по каждой линии", _source_assessments_html(source_lines)),
         _row("Максимальный уровень в окне", max_level_html),
         _row("Длительность превышения по порогам", exceedance_html),
         _row("Полнота данных (coverage_fraction)", f"{mechanism['coverage_fraction'] * 100:.0f}%"),

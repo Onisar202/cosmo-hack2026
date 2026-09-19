@@ -15,10 +15,12 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,6 +31,7 @@ from src.domain.orbit.interpolate import (
 )
 from src.sources import orbit as sources_orbit
 from src.sources import orbit_history
+from src.sources.http import HttpFetchResult, SourceHttpError
 from src.store import RawOriginalStore, connect, get_record, insert_record
 
 UTC = timezone.utc
@@ -618,3 +621,193 @@ def test_select_oem_elements_for_request_raises_when_no_release_is_eligible(
 def test_select_oem_elements_for_request_rejects_current_mode() -> None:
     with pytest.raises(ValueError, match="current"):
         sources_orbit.select_oem_elements_for_request("current", [])
+
+
+# ---------------------------------------------------------------------------
+# Production-шлюз архива (FN-41, этап 3): реальный путь получения выпусков
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def oem_config() -> orbit_history.OemSourceConfig:
+    """Конфигурация без чтения ``sources.yaml`` — тест не зависит от правок
+    файла в репозитории (тот же приём, что и ``swpc_config``)."""
+    return orbit_history.OemSourceConfig(
+        source_id=orbit_history.SOURCE_ID,
+        connect_timeout_seconds=5.0,
+        read_timeout_seconds=30.0,
+        max_retries=1,
+        backoff_base_seconds=0.0,
+        enabled=True,
+    )
+
+
+def _fake_archive_fetch(url: str, **_kwargs: Any) -> HttpFetchResult:
+    """Ответы реального архива из сохранённых фикстур; выпуск, которого в
+    фикстурах нет, даёт 404 — ровно как недоступный объект бакета."""
+    if url == orbit_history.ARCHIVE_INDEX_URL:
+        body = (HISTORY_DIR / "nasa_iss_oem_archive_index.xml").read_bytes()
+        return HttpFetchResult(status_code=200, body=body, url=url, elapsed_seconds=0.001)
+    match = re.search(r"iss-coords/(\d{4}-\d{2}-\d{2})/", url)
+    assert match is not None
+    release_date = match.group(1)
+    if release_date not in RELEASE_DATES:
+        raise SourceHttpError(f"{url} responded 404 (not retried)")
+    name = (
+        f"nasa_iss_oem_{release_date}.txt"
+        if url.endswith(".txt")
+        else f"nasa_iss_oem_listing_{release_date}.xml"
+    )
+    return HttpFetchResult(
+        status_code=200, body=(HISTORY_DIR / name).read_bytes(), url=url, elapsed_seconds=0.001
+    )
+
+
+def test_parse_archive_index_lists_dated_releases_and_rejects_truncation() -> None:
+    dates = orbit_history.parse_archive_index(
+        (HISTORY_DIR / "nasa_iss_oem_archive_index.xml").read_bytes()
+    )
+
+    # 736 выпусков, индекс не обрезан (README фикстур).
+    assert len(dates) == 736
+    assert dates == sorted(dates)
+    assert {"2024-05-08", "2024-05-12", "2024-06-14", "2024-06-18"} <= set(dates)
+
+    truncated = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+        b"<IsTruncated>true</IsTruncated>"
+        b"<CommonPrefixes><Prefix>iss-coords/2024-05-08/</Prefix></CommonPrefixes>"
+        b"</ListBucketResult>"
+    )
+    with pytest.raises(orbit_history.OemListingFormatError):
+        # Молча обрезанный список кандидатов скрыл бы покрывающий выпуск под
+        # видом реального пробела архива (main-prompt.md §2).
+        orbit_history.parse_archive_index(truncated)
+
+
+def test_ensure_releases_for_interval_fetches_stores_and_reuses_the_archive_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: sqlite3.Connection,
+    raw_store: RawOriginalStore,
+    oem_config: orbit_history.OemSourceConfig,
+) -> None:
+    """Шлюз получает кандидатов на интервал, сохраняет их записями и при
+    повторном вызове берёт из хранилища: кеш архивных ответов бессрочен
+    (main-prompt.md §5), многомегабайтный файл повторно не скачивается."""
+    monkeypatch.setattr(orbit_history, "fetch", _fake_archive_fetch)
+    fetched_at = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+
+    first = orbit_history.ensure_releases_for_interval(
+        db_conn,
+        raw_store,
+        interval_start=datetime(2024, 5, 10, 9, 0, tzinfo=UTC),
+        interval_end=datetime(2024, 5, 10, 21, 0, tzinfo=UTC),
+        fetched_at=fetched_at,
+        config=oem_config,
+        include_lookahead=False,
+    )
+
+    assert "2024-05-08" in first.fetched_release_dates
+    assert first.cached_release_dates == ()
+    assert first.record_ids["2024-05-08"]
+    # Кандидаты, которых нет в фикстурах, честно попали в errors, а не
+    # молча исчезли (иначе частичное получение было бы неотличимо от
+    # полного, main-prompt.md §2).
+    assert first.errors
+
+    def _forbidden(url: str, **_kwargs: Any) -> HttpFetchResult:
+        if url.endswith(".txt"):
+            raise AssertionError("already stored release must not be downloaded again")
+        return _fake_archive_fetch(url)
+
+    monkeypatch.setattr(orbit_history, "fetch", _forbidden)
+    second = orbit_history.ensure_releases_for_interval(
+        db_conn,
+        raw_store,
+        interval_start=datetime(2024, 5, 10, 9, 0, tzinfo=UTC),
+        interval_end=datetime(2024, 5, 10, 21, 0, tzinfo=UTC),
+        fetched_at=fetched_at,
+        config=oem_config,
+        include_lookahead=False,
+    )
+
+    assert "2024-05-08" in second.cached_release_dates
+    assert second.fetched_release_dates == ()
+    assert second.record_ids["2024-05-08"] == first.record_ids["2024-05-08"]
+    # Восстановленный из хранилища выпуск несёт то же доказанное время
+    # публикации (S3 LastModified), а не CREATION_DATE.
+    restored = next(r for r in second.releases if r.release_date == "2024-05-08")
+    assert restored.published_at == datetime(2024, 5, 8, 20, 28, 59, tzinfo=UTC)
+    assert restored.parsed.creation_date != restored.published_at
+
+
+def test_gateway_stores_the_release_as_fetched_so_both_modes_can_select_it(
+    monkeypatch: pytest.MonkeyPatch,
+    db_conn: sqlite3.Connection,
+    raw_store: RawOriginalStore,
+    oem_config: orbit_history.OemSourceConfig,
+) -> None:
+    """FN-41: ``quality`` записи выпуска — как получено (``nominal``), а
+    метка реконструкции живёт в результате (``OemSelection.is_reconstruction``
+    → ``result.orbit.is_reconstructed``). Иначе один и тот же выпуск,
+    отобранный обеими ветками, конфликтовал бы по дедуп-ключу хранилища и
+    режим запроса портил бы хранилище."""
+    monkeypatch.setattr(orbit_history, "fetch", _fake_archive_fetch)
+    archive = orbit_history.ensure_releases_for_interval(
+        db_conn,
+        raw_store,
+        interval_start=datetime(2024, 6, 20, 9, 0, tzinfo=UTC),
+        interval_end=datetime(2024, 6, 20, 21, 0, tzinfo=UTC),
+        fetched_at=datetime(2026, 9, 19, 12, 0, tzinfo=UTC),
+        config=oem_config,
+        include_lookahead=True,
+    )
+
+    stored = get_record(db_conn, archive.record_ids["2024-06-18"])
+    assert stored is not None
+    assert stored["quality"] == "nominal"
+    assert stored["replay_eligible"] is True
+
+    analysis = sources_orbit.select_oem_elements_for_request(
+        "historical_analysis",
+        list(archive.releases),
+        moment=datetime(2024, 6, 20, 9, 0, tzinfo=UTC),
+    )
+    assert analysis.is_reconstruction is True
+
+
+def test_verify_release_bytes_rejects_a_body_that_is_not_the_listed_object() -> None:
+    """Перепроверка целостности production-шлюза: размер и ETag (MD5) из
+    S3-листинга против фактических байт."""
+    release, raw_bytes = _load_release("2024-05-08")
+    entry = orbit_history.S3ListingEntry(
+        key=release.s3_key,
+        last_modified=release.published_at,
+        etag=release.etag,
+        size=release.size,
+    )
+    orbit_history.verify_release_bytes(raw_bytes, entry)  # согласованный случай
+
+    with pytest.raises(orbit_history.OemIntegrityError):
+        orbit_history.verify_release_bytes(raw_bytes + b"\n", entry)
+
+    with pytest.raises(orbit_history.OemIntegrityError):
+        orbit_history.verify_release_bytes(
+            raw_bytes,
+            orbit_history.S3ListingEntry(
+                key=entry.key,
+                last_modified=entry.last_modified,
+                etag="0" * 32,
+                size=entry.size,
+            ),
+        )
+
+
+def test_registered_oem_config_is_readable_from_sources_yaml() -> None:
+    loaded = orbit_history.load_source_config()
+
+    assert loaded.source_id == orbit_history.SOURCE_ID
+    assert loaded.connect_timeout_seconds > 0
+    assert loaded.read_timeout_seconds > 0
+    assert loaded.enabled is True

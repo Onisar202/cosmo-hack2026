@@ -24,6 +24,7 @@ from src.store.records import (
     get_record,
     insert_record,
     select_as_of,
+    select_by_provider_record_id,
     select_observed_range,
 )
 from src.store.results import (
@@ -52,6 +53,7 @@ __all__ = [
     "read_sealed_snapshot",
     "seal_forecast_input_snapshot",
     "select_as_of",
+    "select_by_provider_record_id",
     "select_observed_range",
     "select_verification_records",
     "store_result",

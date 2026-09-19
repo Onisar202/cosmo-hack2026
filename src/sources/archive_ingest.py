@@ -312,6 +312,13 @@ class ArchiveIngestReport:
     #: Провайдерские id, сохранённые, но навсегда непригодные для строгого
     #: replay: ``published_at`` неизвестен (main-prompt.md §1).
     stored_not_replay_eligible: tuple[str, ...]
+    #: ``messageType`` каждой непригодной записи выше, тот же порядок и та же
+    #: длина, что у ``stored_not_replay_eligible`` (FN-41) — нужно строгой
+    #: ветке ``historical_forecast``: такая запись НЕ попадает в
+    #: ``select_as_of``, поэтому её отсутствие в строгой выборке нельзя
+    #: читать как «события не было», если она РЕЛЕВАНТНОГО типа
+    #: (:meth:`has_unprovable_publication_of`).
+    stored_not_replay_eligible_message_types: tuple[str, ...]
     #: Сообщения о конфликте дедуп-ключа с другим содержимым — не «дубликат».
     conflicts: tuple[str, ...]
     #: ``messageType`` записи, вызвавшей каждый конфликт выше — тот же
@@ -341,12 +348,31 @@ class ArchiveIngestReport:
             & relevant_message_types
         )
 
+    def has_unprovable_publication_of(self, relevant_message_types: frozenset[str]) -> bool:
+        """True, если в этом ответе есть РЕЛЕВАНТНОЕ уведомление, сохранённое
+        без доказуемого времени публикации (``published_at is None``).
+
+        FN-41. Такая запись существует в хранилище, но ``select_as_of`` её
+        никогда не вернёт (``replay_eligible = false``, main-prompt.md §1) —
+        поэтому для СТРОГОЙ ветки ``historical_forecast`` её невидимость
+        означает «подтвердить нечем», а не «события не было». Реальный
+        случай — ``20240516-7D-001``, у которого два независимых указания
+        времени выпуска расходятся (docs/method.md §4).
+
+        Отдельный предикат от :meth:`has_unresolved_notifications_of`, а не
+        добавленный в него флаг: для ``historical_analysis`` такая запись
+        полностью пригодна (она выбирается по времени события, а не по
+        публикации), и портить ей доверие к интервалу было бы неверно
+        (main-prompt.md §1 — две ветки, не один флаг).
+        """
+        return bool(set(self.stored_not_replay_eligible_message_types) & relevant_message_types)
+
 
 def _insert_all(
     conn: sqlite3.Connection,
     raw_store: RawOriginalStore,
     record_inputs: Iterable[RecordInput],
-) -> tuple[list[tuple[str, RecordInput]], list[str], list[tuple[str, str]]]:
+) -> tuple[list[tuple[str, RecordInput]], list[tuple[str, str]], list[tuple[str, str]]]:
     """Вставляет записи, разделяя пригодные/непригодные/конфликтные.
 
     Возвращает пары ``(record_id, RecordInput)``, а не два независимых
@@ -367,18 +393,27 @@ def _insert_all(
     (round 3 ревью PR #37, :meth:`ArchiveIngestReport.has_unresolved_notifications_of`).
     """
     stored: list[tuple[str, RecordInput]] = []
-    not_eligible: list[str] = []
+    not_eligible: list[tuple[str, str]] = []
     conflicts: list[tuple[str, str]] = []
     for record_input in record_inputs:
+        message_type = str(record_input.spatial_context.get("message_type", ""))
         try:
             record_id = insert_record(conn, raw_store, record_input)
         except DuplicateKeyConflictError as exc:
-            message_type = str(record_input.spatial_context.get("message_type", ""))
             conflicts.append((str(exc), message_type))
             continue
+        except sqlite3.IntegrityError:
+            # Гонка двух конкурентных исторических расчётов за одну и ту же
+            # запись архива: insert_record делает SELECT-затем-INSERT без
+            # транзакционной защиты, поэтому проигравший получает UNIQUE
+            # constraint failed вместо идемпотентного возврата id. Повтор
+            # застаёт уже закоммиченную строку — содержимое то же самое (тот
+            # же messageID того же архива), это не конфликт версии. Тот же
+            # приём, что и в src/api/service.py::fetch_and_store_orbit (FN-41).
+            record_id = insert_record(conn, raw_store, record_input)
         stored.append((record_id, record_input))
         if record_input.published_at is None:
-            not_eligible.append(record_input.provider_record_id)
+            not_eligible.append((record_input.provider_record_id, message_type))
     return stored, not_eligible, conflicts
 
 
@@ -446,7 +481,8 @@ def ingest_donki_notifications(
         replay_eligible_record_ids=tuple(eligible),
         skipped_without_event_time=tuple(skipped),
         skipped_message_types=tuple(skipped_types),
-        stored_not_replay_eligible=tuple(not_eligible),
+        stored_not_replay_eligible=tuple(pid for pid, _ in not_eligible),
+        stored_not_replay_eligible_message_types=tuple(mt for _, mt in not_eligible),
         conflicts=tuple(c for c, _ in conflict_pairs),
         conflict_message_types=tuple(t for _, t in conflict_pairs),
         publication_days=tuple(publication_days),
@@ -495,7 +531,8 @@ def ingest_swpc_forecast_discussion(
         replay_eligible_record_ids=eligible,
         skipped_without_event_time=(),
         skipped_message_types=(),
-        stored_not_replay_eligible=tuple(not_eligible),
+        stored_not_replay_eligible=tuple(pid for pid, _ in not_eligible),
+        stored_not_replay_eligible_message_types=tuple(mt for _, mt in not_eligible),
         conflicts=tuple(c for c, _ in conflict_pairs),
         conflict_message_types=tuple(t for _, t in conflict_pairs),
         publication_days=(discussion.issued_at.astimezone(UTC).date(),),
@@ -599,6 +636,39 @@ def merged_ingested_intervals(
             continue
         merged.append(interval)
     return tuple(merged)
+
+
+def strict_replay_intervals(
+    reports: Iterable[ArchiveIngestReport],
+    *,
+    source_id: str,
+    relevant_message_types: frozenset[str],
+) -> tuple[IngestedInterval, ...]:
+    """Покрытие для СТРОГОЙ ветки ``historical_forecast`` (FN-41).
+
+    То же, что :func:`merged_ingested_intervals`, плюс одно дополнительное
+    исключение: отчёт, в котором есть релевантное уведомление, сохранённое
+    БЕЗ доказуемого времени публикации
+    (:meth:`ArchiveIngestReport.has_unprovable_publication_of`), не участвует
+    в склейке. Такая запись не попадает в ``select_as_of``, поэтому для
+    строгого прогноза её невидимость означает «подтвердить нечем», а объявить
+    интервал полностью прочитанным значило бы превратить неизвестную
+    публикацию в вывод «события не было» (main-prompt.md §1, §2).
+
+    Отдельная функция, а не параметр-флаг у :func:`merged_ingested_intervals`:
+    для ``historical_analysis`` это исключение неверно (там записи выбираются
+    по времени события, а не по публикации), и «флаг рано или поздно окажется
+    не в том значении» (main-prompt.md §1).
+    """
+    return merged_ingested_intervals(
+        (
+            report
+            for report in reports
+            if not report.has_unprovable_publication_of(relevant_message_types)
+        ),
+        source_id=source_id,
+        relevant_message_types=relevant_message_types,
+    )
 
 
 def select_forecast_inputs(
@@ -708,7 +778,7 @@ def assemble_historical_forecast_input(
     result: dict[str, HistoricalForecastInput] = {}
     for product in strategy.enabled_products:
         candidate_records = selected[product.source_id]
-        candidate_intervals = merged_ingested_intervals(
+        candidate_intervals = strict_replay_intervals(
             reports,
             source_id=product.source_id,
             relevant_message_types=product.event_message_types,
@@ -764,4 +834,5 @@ __all__ = [
     "load_archive_product",
     "merged_ingested_intervals",
     "select_forecast_inputs",
+    "strict_replay_intervals",
 ]

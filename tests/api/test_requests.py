@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,19 +14,27 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api import routes as routes_module
-from src.api.schemas import CalculationRequest
+from src.api.schemas import ALGORITHM_VERSION, CalculationRequest
 from src.api.service import ensure_store_ready
 from src.api.service import run_calculation as _run_calculation
 from src.config import get_settings
+from src.sources import archive_probe
+from src.sources import donki as donki_source
 from src.sources import noaa_3day_forecast as noaa_3day_source
 from src.sources import orbit as orbit_source
 from src.sources import swpc as swpc_source
 from src.sources.http import HttpFetchResult, SourceTimeoutError
 from src.sources.status import SourceStatusRegistry
-from src.store import RawOriginalStore
+from src.store import RawOriginalStore, insert_record
 from src.store import connect as connect_store
+from src.store import get_record as get_store_record
 from src.store import get_result as store_get_result
-from tests.api.conftest import orbit_tle_bytes, swpc_sample_bytes, wait_for_job
+from tests.api.conftest import (
+    install_archive_fetch_fakes,
+    orbit_tle_bytes,
+    swpc_sample_bytes,
+    wait_for_job,
+)
 
 CURRENT_REQUEST: dict[str, Any] = {
     "mode": "current",
@@ -148,29 +157,559 @@ def test_current_mode_full_flow_returns_real_orbit_and_honest_mechanism_gaps(
     assert swpc_status["last_success_at"] is not None  # реальная фикстура успешно получена
 
 
-@pytest.mark.parametrize("mode", ["historical_analysis", "historical_forecast"])
-def test_historical_modes_fail_with_clear_not_implemented(
-    app_client: TestClient, mode: str
+@pytest.mark.parametrize(
+    ("mode", "start_at", "as_of"),
+    [
+        # Произвольные даты внутри обязательного периода 01.05–30.06.2024
+        # (main-prompt.md §11), намеренно РАЗНЫЕ у двух режимов: путь не
+        # зашит под одну дату.
+        ("historical_analysis", "2024-06-20T09:00:00Z", None),
+        ("historical_forecast", "2024-05-11T00:00:00Z", "2024-05-11T00:00:00Z"),
+    ],
+)
+def test_historical_modes_return_a_real_stored_result_not_not_implemented(
+    app_client: TestClient, mode: str, start_at: str, as_of: str | None
 ) -> None:
+    """FN-41 приёмка п.1: оба исторических режима на произвольной дате
+    периода дают НОВЫЙ неизменяемый результат (или именованный критический
+    пробел) — общего ``historical_mode_not_implemented`` больше нет.
+
+    Приёмка п.2 проверяется здесь же: в историческом результате видны
+    источник/эпоха/система координат/флаг реконструкции орбиты, и источник
+    — NASA OEM, никогда не CelesTrak.
+    """
     payload: dict[str, Any] = {
         "mode": mode,
-        "start_at": "2024-05-10T09:00:00Z",
+        "start_at": start_at,
         "duration_hours": 4,
         "search_window_hours": 8,
     }
-    if mode == "historical_forecast":
-        payload["as_of"] = "2024-05-09T00:00:00Z"
+    if as_of is not None:
+        payload["as_of"] = as_of
 
     create = app_client.post("/api/calculations", json=payload)
     assert create.status_code == 202
-    task_id = create.json()["task_id"]
+    job = wait_for_job(app_client, create.json()["task_id"])
+    assert job["status"] == "done", job
+    assert job["error"] is None
 
-    job = wait_for_job(app_client, task_id)
+    body = app_client.get(f"/api/results/{job['result_id']}").json()
+    assert body["mode"] == mode
+    assert body["as_of"] == as_of
+    assert body["algorithm_version"] == ALGORITHM_VERSION
+
+    orbit = body["orbit"]
+    assert orbit["source"] == "nasa-iss-oem-history"  # не celestrak и не space-track
+    assert orbit["norad_id"] == "25544"
+    assert orbit["coordinate_system"] == "EME2000"
+    assert orbit["elements_age_hours"] >= 0
+    assert orbit["elements_epoch"].startswith("2024-")  # эпоха ИЗ ПЕРИОДА, не 2020/2026
+    assert orbit["record_id"]
+    # historical_analysis допускает выпуск позже интересующего момента — и
+    # обязан пометить это реконструкцией (main-prompt.md §1).
+    assert orbit["is_reconstructed"] is (mode == "historical_analysis")
+
+    manifest = {entry["record_id"]: entry for entry in body["data_manifest"]}
+    assert manifest[orbit["record_id"]]["source_id"] == "nasa-iss-oem-history"
+    assert manifest[orbit["record_id"]]["record_kind"] == "orbital_elements"
+    assert all(entry["source_id"] != "celestrak-gp" for entry in body["data_manifest"])
+
+    for window in body["windows"]:
+        mechanisms = {m["mechanism"]: m for m in window["mechanisms"]}
+        assert set(mechanisms) == {"space_weather", "mmod"}
+        assert mechanisms["mmod"]["event_state"] == "NOT_APPLICABLE"
+        assert mechanisms["space_weather"]["event_state"] in {
+            "EVENT_PRESENT",
+            "NO_EVENT_DETECTED",
+            "INSUFFICIENT_DATA",
+        }
+
+
+def test_historical_modes_never_touch_the_modern_celestrak_source(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FN-41 приёмка п.2, сильная форма: современные элементы не просто
+    отсутствуют в результате — путь CelesTrak в историческом расчёте не
+    вызывается вовсе (main-prompt.md §1, §11)."""
+
+    def forbidden_fetch(**_kwargs: Any) -> bytes:
+        raise AssertionError("CelesTrak must not be contacted in a historical mode")
+
+    monkeypatch.setattr(orbit_source, "fetch_current_tle", forbidden_fetch)
+
+    create = app_client.post(
+        "/api/calculations",
+        json={
+            "mode": "historical_forecast",
+            "start_at": "2024-05-11T00:00:00Z",
+            "duration_hours": 4,
+            "search_window_hours": 8,
+            "as_of": "2024-05-11T00:00:00Z",
+        },
+    )
+    job = wait_for_job(app_client, create.json()["task_id"])
+
+    assert job["status"] == "done", job
+    body = app_client.get(f"/api/results/{job['result_id']}").json()
+    assert body["orbit"]["source"] == "nasa-iss-oem-history"
+
+
+def test_historical_analysis_reaches_event_present_on_the_may_2024_event(
+    app_client: TestClient,
+) -> None:
+    """FN-41 приёмка п.4: ``EVENT_PRESENT`` достижим и различим. Выраженное
+    событие периода — 10 мая 2024 (AR3664, main-prompt.md §11): протонное
+    событие DONKI ``2024-05-10T13:35:00-SEP-001`` попадает ВНУТРЬ окна
+    12:00–16:00, поэтому разбор видит его как подтверждённое событие."""
+    create = app_client.post(
+        "/api/calculations",
+        json={
+            "mode": "historical_analysis",
+            "start_at": "2024-05-10T12:00:00Z",
+            "duration_hours": 4,
+            "search_window_hours": 8,
+        },
+    )
+    job = wait_for_job(app_client, create.json()["task_id"])
+    assert job["status"] == "done", job
+    body = app_client.get(f"/api/results/{job['result_id']}").json()
+
+    win_a = next(w for w in body["windows"] if w["window_id"] == "win-a")
+    space_weather = next(
+        m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather"
+    )
+    assert space_weather["event_state"] == "EVENT_PRESENT"
+    # Подтверждённое событие без количественной оценки: уровень не выдумывается,
+    # но и «спокойно» не заявляется.
+    assert space_weather["status"] == "qualitative_only"
+    assert space_weather["max_level"] is None
+    assert space_weather["critical_gap"] is True
+    assert space_weather["record_ids"]  # прослеживаемость до уведомления (О4)
+    # Оценка КАЖДОЙ линии сохранена отдельно и подписана источником — ни одна
+    # не выбрана молча (второй комментарий Jira FN-41).
+    donki_line = next(
+        line
+        for line in space_weather["source_assessments"]
+        if line["source_id"] == "nasa-donki-notifications"
+    )
+    assert donki_line["event_state"] == "EVENT_PRESENT"
+
+    warning = next(
+        w for w in body["warnings"] if w["code"] == "space-weather-archived-event-present"
+    )
+    assert warning["severity"] == "critical"
+    assert set(warning["record_ids"]) == set(space_weather["record_ids"])
+
+    manifest_warnings = [
+        entry for entry in body["data_manifest"] if entry["record_kind"] == "warning"
+    ]
+    assert manifest_warnings
+    assert manifest_warnings[0]["source_id"] == "nasa-donki-notifications"
+
+
+def test_historical_forecast_after_an_announced_event_is_never_reported_as_quiet(
+    app_client: TestClient,
+) -> None:
+    """Строгий режим и уже объявленное, но не закрытое событие.
+
+    DONKI публикует уведомление в момент НАЧАЛА явления и не публикует
+    момента его окончания (``open_ended``, ``src/sources/archive_probe.py``).
+    Событие ``2024-05-10T13:35:00-SEP-001`` объявлено ДО отсечения
+    2024-05-11T00:00Z, но в само окно 11 мая 00:00–04:00 не попадает. Ни
+    «продолжалось», ни «закончилось» источником не утверждается, поэтому
+    честный ответ — ``INSUFFICIENT_DATA`` с НАЗВАННОЙ причиной, и ни при
+    каких условиях не ``NO_EVENT_DETECTED``
+    (``src/domain/spaceweather/archive_assessment.py``, main-prompt.md §2).
+    """
+    create = app_client.post(
+        "/api/calculations",
+        json={
+            "mode": "historical_forecast",
+            "start_at": "2024-05-11T00:00:00Z",
+            "duration_hours": 4,
+            "search_window_hours": 8,
+            "as_of": "2024-05-11T00:00:00Z",
+        },
+    )
+    job = wait_for_job(app_client, create.json()["task_id"])
+    assert job["status"] == "done", job
+    body = app_client.get(f"/api/results/{job['result_id']}").json()
+
+    win_a = next(w for w in body["windows"] if w["window_id"] == "win-a")
+    space_weather = next(
+        m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather"
+    )
+    assert space_weather["event_state"] == "INSUFFICIENT_DATA"
+    assert space_weather["max_level"] is None
+    assert space_weather["critical_gap"] is True
+
+    # Причина названа конкретно: объявленное явление без документированного
+    # конца, а не безликий «пробел архива» (критерий О4).
+    warning = next(
+        w for w in body["warnings"] if w["code"] == "space-weather-announced-event-not-closed"
+    )
+    assert warning["severity"] == "critical"
+    assert warning["record_ids"], "предупреждение обязано ссылаться на записи"
+    assert "SEP" in warning["message"]
+
+
+def test_historical_analysis_reaches_no_event_detected_on_the_quiet_control_period(
+    app_client: TestClient,
+) -> None:
+    """FN-41 приёмка п.4: ``NO_EVENT_DETECTED`` достижим и отличается от
+    «нет данных». Контрольный спокойный период — 16–27 июня 2024
+    (main-prompt.md §11): уведомлений о протонных событиях и геомагнитных
+    бурях в нём нет, а покрытие архива на этот интервал подтверждено."""
+    create = app_client.post(
+        "/api/calculations",
+        json={
+            "mode": "historical_analysis",
+            "start_at": "2024-06-20T09:00:00Z",
+            "duration_hours": 4,
+            "search_window_hours": 8,
+        },
+    )
+    job = wait_for_job(app_client, create.json()["task_id"])
+    assert job["status"] == "done", job
+    body = app_client.get(f"/api/results/{job['result_id']}").json()
+
+    for window in body["windows"]:
+        space_weather = next(
+            m for m in window["mechanisms"] if m["mechanism"] == "space_weather"
+        )
+        assert space_weather["event_state"] == "NO_EVENT_DETECTED"
+        assert space_weather["status"] == "ok"
+        assert space_weather["max_level"] == "background"
+        assert space_weather["exceedance_hours_by_level"] == {"S1": 0.0, "S2": 0.0, "S3": 0.0}
+        assert space_weather["critical_gap"] is False
+        # Ретроспективная реконструкция помечена явно — эта линия не
+        # отсечена по времени публикации (main-prompt.md §1).
+        assert any("реконструкция" in note.lower() for note in space_weather["notes"])
+
+    assert body["coverage"]["archive_gaps"] == []
+    assert not any(
+        w["code"] == "space-weather-archived-event-present" for w in body["warnings"]
+    )
+
+
+def test_historical_forecast_beyond_the_cutoff_is_not_reported_as_quiet(
+    app_client: TestClient,
+) -> None:
+    """FN-41 приёмка п.4: ``INSUFFICIENT_DATA`` достижим и НЕ выглядит как
+    «событий не было». Тот же спокойный период, что и в тесте выше, но
+    строгим режимом: на момент отсечения архивная событийная линия о
+    будущем окне не знает ничего — «не покрыто», а не «спокойно»
+    (main-prompt.md §4)."""
+    create = app_client.post(
+        "/api/calculations",
+        json={
+            "mode": "historical_forecast",
+            "start_at": "2024-06-20T09:00:00Z",
+            "duration_hours": 4,
+            "search_window_hours": 8,
+            "as_of": "2024-06-20T00:00:00Z",
+        },
+    )
+    job = wait_for_job(app_client, create.json()["task_id"])
+    assert job["status"] == "done", job
+    body = app_client.get(f"/api/results/{job['result_id']}").json()
+
+    win_a = next(w for w in body["windows"] if w["window_id"] == "win-a")
+    space_weather = next(
+        m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather"
+    )
+    assert space_weather["event_state"] == "INSUFFICIENT_DATA"
+    assert space_weather["status"] == "beyond_horizon"
+    assert space_weather["max_level"] is None
+    assert space_weather["critical_gap"] is True
+    assert win_a["excluded_from_comparison"] is True
+
+    gaps = body["coverage"]["archive_gaps"]
+    assert gaps and gaps[0]["source_id"] == "nasa-donki-notifications"
+    assert "не покрыто" in gaps[0]["note"]
+
+
+def test_archive_fetch_failure_gives_insufficient_data_not_a_quiet_verdict(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FN-41 приёмка п.4 (третье состояние по причине отказа) и
+    main-prompt.md §9 п.3: недоступный архив даёт «оценить невозможно», а не
+    благоприятную оценку — тот же спокойный период, где при исправном
+    источнике получается NO_EVENT_DETECTED."""
+
+    def failing_fetch(url: str, **_kwargs: Any) -> HttpFetchResult:
+        raise SourceTimeoutError(f"simulated timeout for {url}")
+
+    monkeypatch.setattr(donki_source, "fetch", failing_fetch)
+
+    create = app_client.post(
+        "/api/calculations",
+        json={
+            "mode": "historical_analysis",
+            "start_at": "2024-06-20T09:00:00Z",
+            "duration_hours": 4,
+            "search_window_hours": 8,
+        },
+    )
+    job = wait_for_job(app_client, create.json()["task_id"])
+    assert job["status"] == "done", job  # отказ архива не роняет расчёт целиком
+    body = app_client.get(f"/api/results/{job['result_id']}").json()
+
+    for window in body["windows"]:
+        space_weather = next(
+            m for m in window["mechanisms"] if m["mechanism"] == "space_weather"
+        )
+        assert space_weather["event_state"] == "INSUFFICIENT_DATA"
+        assert space_weather["status"] == "source_error"
+        assert space_weather["critical_gap"] is True
+
+    donki_status = next(
+        s for s in body["source_status"] if s["source_id"] == "nasa-donki-notifications"
+    )
+    assert donki_status["last_error_message"] is not None
+    assert body["coverage"]["archive_gaps"]
+
+
+def test_unreadable_source_config_does_not_fall_back_to_hardcoded_thresholds(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """main-prompt.md §7 («пороги — в конфиге, не в коде») и §2: если
+    ``sources.yaml`` недоступен для этой попытки расчёта, квалифицирующие
+    типы уведомлений и обратный запас неизвестны — оценка честно не
+    строится, а не считается на зашитых в код запасных числах."""
+
+    def failing_config(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("simulated sources.yaml read failure")
+
+    monkeypatch.setattr(donki_source, "load_source_config", failing_config)
+
+    create = app_client.post(
+        "/api/calculations",
+        json={
+            "mode": "historical_analysis",
+            "start_at": "2024-06-20T09:00:00Z",
+            "duration_hours": 4,
+            "search_window_hours": 8,
+        },
+    )
+    job = wait_for_job(app_client, create.json()["task_id"])
+    assert job["status"] == "done", job  # орбита и MMOD по-прежнему считаются
+    body = app_client.get(f"/api/results/{job['result_id']}").json()
+
+    for window in body["windows"]:
+        space_weather = next(
+            m for m in window["mechanisms"] if m["mechanism"] == "space_weather"
+        )
+        assert space_weather["status"] == "source_error"
+        assert space_weather["event_state"] == "INSUFFICIENT_DATA"
+        assert space_weather["max_level"] is None
+        assert space_weather["critical_gap"] is True
+        assert any("sources.yaml" in note for note in space_weather["notes"])
+
+
+def test_historical_orbit_archive_gap_fails_with_a_named_code_not_not_implemented(
+    app_client: TestClient,
+) -> None:
+    """FN-41 приёмка п.1, вторая половина: когда пригодного исторического
+    выпуска нет, задача отказывает ИМЕНОВАННЫМ кодом пробела — не общим
+    not_implemented и не результатом с придуманной орбитой. 1 мая 2024
+    покрывается выпуском 2024-04-29, которого нет среди сохранённых
+    фикстур, поэтому этот запрос проходит ровно ту ветку, которая в
+    production означает реальный пробел архива."""
+    create = app_client.post(
+        "/api/calculations",
+        json={
+            "mode": "historical_forecast",
+            "start_at": "2024-05-01T06:00:00Z",
+            "duration_hours": 4,
+            "search_window_hours": 8,
+            "as_of": "2024-05-01T00:00:00Z",
+        },
+    )
+    job = wait_for_job(app_client, create.json()["task_id"])
 
     assert job["status"] == "failed"
     assert job["result_id"] is None
-    assert job["error"]["code"] == "historical_mode_not_implemented"
-    assert job["error"]["message"]  # не пустая, понятная ошибка, не фиктивный успех
+    assert job["error"]["code"] == "historical_orbit_archive_gap"
+    assert "not_implemented" not in job["error"]["code"]
+    assert job["error"]["message"]
+
+
+def test_historical_recompute_creates_a_new_immutable_result(
+    app_client: TestClient,
+) -> None:
+    """FN-41 приёмка п.5: пересчёт тех же параметров — новый ``result_id``,
+    а не правка сохранённого (main-prompt.md §3)."""
+    payload = {
+        "mode": "historical_analysis",
+        "start_at": "2024-06-20T09:00:00Z",
+        "duration_hours": 4,
+        "search_window_hours": 8,
+    }
+    first_task = app_client.post("/api/calculations", json=payload).json()["task_id"]
+    second_task = app_client.post("/api/calculations", json=payload).json()["task_id"]
+    first = wait_for_job(app_client, first_task)
+    second = wait_for_job(app_client, second_task)
+
+    assert first["status"] == "done" and second["status"] == "done"
+    assert first["result_id"] != second["result_id"]
+
+    first_body = app_client.get(f"/api/results/{first['result_id']}").json()
+    second_body = app_client.get(f"/api/results/{second['result_id']}").json()
+
+    # Те же данные и та же версия алгоритма — та же ОЦЕНКА (main-prompt.md §3).
+    # Пояснения (``notes``) сравниваются отдельно: в них честно печатается
+    # момент, когда покрытие архива было прочитано ЭТОЙ попыткой
+    # (``CoverageInterval.fetched_at``), и он у двух прогонов законно разный —
+    # это происхождение факта, а не результат оценки.
+    def _assessment(body: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                key: value
+                for key, value in mechanism.items()
+                if key not in {"notes", "source_assessments"}
+            }
+            for window in body["windows"]
+            for mechanism in window["mechanisms"]
+        ]
+
+    assert _assessment(first_body) == _assessment(second_body)
+    for first_window, second_window in zip(
+        first_body["windows"], second_body["windows"], strict=True
+    ):
+        assert first_window["window_id"] == second_window["window_id"]
+        assert first_window["excluded_from_comparison"] == (
+            second_window["excluded_from_comparison"]
+        )
+        for first_mech, second_mech in zip(
+            first_window["mechanisms"], second_window["mechanisms"], strict=True
+        ):
+            assert len(first_mech["notes"]) == len(second_mech["notes"])
+            assert [line["source_id"] for line in first_mech["source_assessments"]] == [
+                line["source_id"] for line in second_mech["source_assessments"]
+            ]
+            assert [line["event_state"] for line in first_mech["source_assessments"]] == [
+                line["event_state"] for line in second_mech["source_assessments"]
+            ]
+
+
+def test_a_record_published_after_as_of_does_not_change_historical_forecast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ОБЯЗАТЕЛЬНЫЙ тест на утечку времени (.ai/main-prompt.md §1, §9 п.1;
+    FN-41 приёмка п.3): добавление записи с ``published_at > as_of`` не
+    меняет результат ``historical_forecast`` НИ В ОДНОМ поле.
+
+    Выполняется через production-путь целиком (``run_calculation`` — тот же
+    вызов, что делает фоновая задача API), а не над изолированной функцией
+    выборки: утечка может появиться в любом слое между запросом и
+    сохранённым результатом, и проверять надо именно его.
+    """
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("STORE_DB_PATH", str(tmp_path / "store.sqlite3"))
+    monkeypatch.setenv("STORE_RAW_DIR", str(tmp_path / "raw"))
+    get_settings.cache_clear()
+    install_archive_fetch_fakes(monkeypatch)
+
+    settings = get_settings()
+    ensure_store_ready(settings)
+    raw_store = RawOriginalStore(settings.store_raw_dir)
+    registry = SourceStatusRegistry()
+
+    as_of = datetime(2024, 6, 20, 0, 0, tzinfo=timezone.utc)
+    request = CalculationRequest(
+        mode="historical_forecast",
+        start_at=datetime(2024, 6, 20, 9, 0, tzinfo=timezone.utc),
+        duration_hours=4,
+        search_window_hours=8,
+        as_of=as_of,
+    )
+    # Один и тот же момент расчёта в обоих прогонах: разница между
+    # результатами должна объясняться ТОЛЬКО поздней записью, если бы она
+    # протекла, а не разным computed_at.
+    now = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
+
+    before_id = _run_calculation(
+        request, settings=settings, raw_store=raw_store, registry=registry, now=now
+    )
+
+    # Запись «из будущего» относительно отсечения: протонное событие внутри
+    # окна, объявленное ПОСЛЕ as_of. Строгий режим не имеет права его видеть.
+    late_notification = archive_probe.DonkiNotification(
+        message_id="leak-test-20240620-AL-999",
+        message_type="SEP",
+        reported_issue_time=as_of + timedelta(hours=10),
+        resolved_issue_time=as_of + timedelta(hours=10),
+        url="https://kauai.ccmc.gsfc.nasa.gov/DONKI/view/Alert/leak-test/1",
+        raw_entry={
+            "messageType": "SEP",
+            "messageID": "leak-test-20240620-AL-999",
+            "messageURL": "https://kauai.ccmc.gsfc.nasa.gov/DONKI/view/Alert/leak-test/1",
+            "messageIssueTime": "2024-06-20T10:00Z",
+            "messageBody": (
+                "## Message Issue Date: 2024-06-20T10:00:00Z\n\n"
+                "The flux of > 10 MeV protons exceeds 10 pfu starting at "
+                "2024-06-20T10:00Z.\n\nActivity ID: 2024-06-20T10:00:00-SEP-001.\n"
+            ),
+        },
+    )
+    leaked_record = archive_probe.donki_notification_to_record_input(
+        late_notification,
+        source_url="https://api.nasa.gov/DONKI/notifications?startDate=2024-06-19&endDate=2024-06-21&type=all",
+        fetched_at=now,
+    )
+    assert leaked_record is not None
+    assert leaked_record.published_at is not None and leaked_record.published_at > as_of
+
+    conn = connect_store(settings.store_db_path)
+    try:
+        leaked_record_id = insert_record(conn, raw_store, leaked_record)
+        stored_leak = get_store_record(conn, leaked_record_id)
+    finally:
+        conn.close()
+    # Запись действительно лежит в хранилище и действительно пригодна к
+    # replay (иначе тест проверял бы отсутствие записи, а не отсечение).
+    assert stored_leak is not None and stored_leak["replay_eligible"] is True
+
+    after_id = _run_calculation(
+        request, settings=settings, raw_store=raw_store, registry=registry, now=now
+    )
+
+    conn = connect_store(settings.store_db_path)
+    try:
+        before = store_get_result(conn, before_id)
+        after = store_get_result(conn, after_id)
+    finally:
+        conn.close()
+    assert before is not None and after is not None
+
+    assert after["result_id"] != before["result_id"]  # пересчёт — новый результат
+    assert _comparable_result(after) == _comparable_result(before)
+    assert leaked_record_id not in json.dumps(after, ensure_ascii=False)
+    assert "leak-test" not in json.dumps(after, ensure_ascii=False)
+
+    get_settings.cache_clear()
+
+
+def _comparable_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Результат без двух полей, которые обязаны отличаться у ЛЮБЫХ двух
+    расчётов, даже полностью идентичных по данным: ``result_id``
+    (неизменяемый результат — новый id на каждый пересчёт, main-prompt.md §3)
+    и ``warning.fetch_attempt_id`` (идентификатор конкретной попытки
+    обращения к источнику, а не свойство данных). ``computed_at`` здесь
+    сравнивается наравне со всем остальным — в обоих прогонах теста явно
+    передан один и тот же ``now``.
+
+    Всё остальное — окна, оценки, event_state, notes, coverage, манифест,
+    ограничения, рекомендация, статусы источников — обязано совпасть до
+    последнего символа: это и есть «запись с published_at > as_of не меняет
+    результат НИ В ОДНОМ поле».
+    """
+    copy = json.loads(json.dumps(result, ensure_ascii=False))
+    copy.pop("result_id")
+    for warning in copy.get("warnings", []):
+        warning["fetch_attempt_id"] = "<attempt-id>"
+    return dict(copy)
 
 
 def test_orbit_source_failure_fails_the_job_not_a_fake_success(
@@ -322,7 +861,16 @@ def test_list_results_and_sources_status(app_client: TestClient) -> None:
     statuses = app_client.get("/api/sources/status")
     assert statuses.status_code == 200
     ids = {s["source_id"] for s in statuses.json()}
-    assert ids == {"celestrak-gp", "noaa-swpc-proton-flux", "noaa-swpc-3day-forecast"}
+    # FN-41 добавил два архивных источника исторических режимов: они видны в
+    # статусе всегда, даже до первого исторического расчёта — иначе «ни разу
+    # не отвечал» было бы неотличимо от «источника нет».
+    assert ids == {
+        "celestrak-gp",
+        "noaa-swpc-proton-flux",
+        "noaa-swpc-3day-forecast",
+        "nasa-iss-oem-history",
+        "nasa-donki-notifications",
+    }
 
 
 def test_refresh_sources_forces_a_fetch(app_client: TestClient) -> None:

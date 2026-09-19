@@ -213,7 +213,22 @@ sources:
     replay_eligible_note: "published_at (S3 LastModified) известен и проверяем для каждого сохранённого выпуска (см. published_at_note) — записи этого источника пригодны для строгого historical_forecast при условии полного покрытия расчётного интервала интервалом [USEABLE_START_TIME, USEABLE_STOP_TIME] выпуска (src/sources/orbit_history.py::select_release_for_forecast); частичное покрытие или отсутствие пригодного по as_of выпуска — критический пробел, не повод брать более поздний или непокрывающий выпуск. historical_analysis — отдельная, не гейтируемая as_of ветка отбора (select_release_for_analysis), записи по этой ветке помечаются quality=reconstructed и не должны использоваться как вход строгого replay."
     license: "Данные NASA, как правило, не охраняются авторским правом в США (public domain, U.S. Government work). Условия распространения вне хакатона — по странице ISS Trajectory Data на spotthestation.nasa.gov (не подтверждено независимо в этой сессии), см. tests/fixtures/orbit/history/README.md."
     is_duplicate_of: null
-    implementation_note: "Реализовано: src/sources/orbit_history.py (parse_oem, parse_s3_listing, verify_fetch_integrity, select_release_for_forecast, select_release_for_analysis, build_oem_orbital_elements_record) + src/domain/orbit/interpolate.py (interpolate_state, hermite-cubic-per-axis-v1) + src/sources/orbit.py::select_oem_elements_for_request (маршрутизация по mode). Гейт/проба-масштаб задачи (main-prompt.md §11, по аналогии с archive_probe.py): работает над уже полученными реальными фикстурами (tests/fixtures/orbit/history/, 4 выпуска) — производственный шлюз с периодическим refresh/TTL и постраничной загрузкой полного архива в хранилище не входит в объём этой задачи."
+    network:
+      # FN-41: жёсткие раздельные таймауты production-шлюза (main-prompt.md §5).
+      # read_timeout больше, чем у текстовых продуктов: тело одного выпуска —
+      # ~0.7–1.5 МБ (tests/fixtures/orbit/history/README.md).
+      connect_timeout_seconds: 5.0
+      read_timeout_seconds: 30.0
+      max_retries: 3
+      retry_backoff_base_seconds: 1.0
+    archive_cache: >-
+      Датированный выпуск не меняется — кеш бессрочен (main-prompt.md §5), TTL
+      у этого источника нет вовсе. Уже сохранённый выпуск восстанавливается из
+      хранилища (src/sources/orbit_history.py::release_from_stored_record) и
+      повторно не скачивается; свежесть последнего успеха на выбор выпуска не
+      влияет — влияет только published_at (S3 LastModified) самого выпуска.
+    enabled: true
+    implementation_note: "Реализовано: src/sources/orbit_history.py (parse_oem, parse_s3_listing, verify_fetch_integrity, select_release_for_forecast, select_release_for_analysis, build_oem_orbital_elements_record) + src/domain/orbit/interpolate.py (interpolate_state, hermite-cubic-per-axis-v1) + src/sources/orbit.py::select_oem_elements_for_request (маршрутизация по mode). FN-33 был гейтом/пробой над сохранёнными фикстурами; FN-41 (этап 3) добавил production-шлюз ensure_releases_for_interval — реальный HTTP через src/sources/http.py, разбор индекса архива (parse_archive_index), перепроверку целостности скачанных байт против S3-листинга (verify_release_bytes: размер + ETag как MD5; сверка сохранённых HTTP-заголовков из *.meta.json остаётся только у фикстурного verify_fetch_integrity, потому что общий HTTP-клиент заголовки не отдаёт) и сохранение выпуска в хранилище. Объём шлюза — загрузка по требованию для расчётного интервала запроса (кандидаты в окне 16 суток назад / 2 суток вперёд, не более 8 выпусков за расчёт); фоновая предзагрузка всего архива и планировщик обновления по-прежнему вне объёма. quality сохранённой записи выпуска — всегда nominal (как получено): метка реконструкции — свойство ОТБОРА (historical_analysis) и живёт в result.orbit.is_reconstructed, а не в записи, иначе один и тот же выпуск, отобранный обеими ветками, конфликтовал бы по дедуп-ключу хранилища (src/sources/orbit_history.py, модульный docstring)."
 
 # --- Механизм 1 (космическая погода) — задача FN-22 (S1-04). ---
 space_weather:
@@ -392,9 +407,19 @@ space_weather:
       retry_backoff_base_seconds: 1.0
     archive_cache: >-
       Архивный ответ не меняется — кеш бессрочен (main-prompt.md §5), в
-      отличие от TTL-обновления noaa-swpc-proton-flux выше. Полная
-      постраничная загрузка периода в хранилище источников реализована
-      в FN-42 (src/sources/archive_ingest.py::ingest_donki_notifications).
+      отличие от TTL-обновления noaa-swpc-proton-flux выше. Нормализация и
+      запись в хранилище — FN-42
+      (src/sources/archive_ingest.py::ingest_donki_notifications); FN-41
+      добавил поверх неё сетевой шлюз src/sources/donki.py, который
+      загружает архив ПО ТРЕБОВАНИЮ на расчётный интервал запроса (один
+      запрос на расчёт, покрывающий оба окна с суточным запасом по времени
+      выпуска). TTL-пропуска по свежести последнего успеха у этого
+      источника нет намеренно — он отдал бы «свежий» статус расчёту за
+      совсем другой период. Полная постраничная предзагрузка всего
+      обязательного периода (docs/method.md §5, 4 запроса по 15 суток)
+      остаётся следующей задачей: повторный расчёт по тому же периоду
+      перезапрашивает архив, дублей записей при этом не возникает
+      (дедупликация по (source_id, provider_record_id, source_version)).
     # --- FN-42: горизонт и признак события как ДАННЫЕ, не как код. ---
     forecast_horizon_hours: null
     forecast_horizon_note: >-
@@ -431,6 +456,23 @@ space_weather:
       # (main-prompt.md §4 «связанные сигналы одного события дают один
       # вклад»).
       - SEP
+    archive_request_lookback_hours: 24
+    archive_request_lookback_note: >-
+      FN-41, свойство ПОЛУЧЕНИЯ, а не интерпретации. На сколько часов назад от
+      начала расчётного интервала шлюз src/sources/donki.py расширяет
+      запрашиваемый (и потому доказанно прочитанный) интервал ВРЕМЕНИ СОБЫТИЯ.
+      Нужно потому, что этот продукт событийный и open_ended: уведомление
+      выпускается в момент НАЧАЛА явления, момент окончания не публикуется
+      вовсе (src/sources/archive_probe.py). Если явление, объявленное
+      незадолго до окна, не попадёт в прочитанный интервал, домен его просто
+      не увидит и окно получит NO_EVENT_DETECTED — то есть пробел знания
+      превратится в благоприятный вывод, что запрещено (main-prompt.md §2).
+      С этим запасом такое явление попадает в прочитанный интервал и даёт
+      честное INSUFFICIENT_DATA («продолжалось ли оно — неизвестно»,
+      archive_assessment.unresolved_open_events). Это НЕ горизонт прогноза
+      вперёд и НЕ предположение о длительности события: вопрос обязательного
+      горизонта (6 ч против 24 ч) этим значением не решается и остаётся
+      открытым (forecast_horizon_hours выше).
     replay_eligible_for_historical_forecast: true
     replay_eligible_note: >-
       Подтверждено на реальных сохранённых ответах (245 уведомлений,
@@ -447,11 +489,29 @@ space_weather:
       с придуманным временем события.
     enabled: true
     implementation_note: >-
-      Парсинг и нормализация в RecordInput — src/sources/archive_probe.py
-      (parse_donki_notifications, donki_notification_to_record_input).
-      Полноценный fetch_and_store-шлюз (постраничная загрузка всего периода,
-      квоты, повтор) — задача этапа 3; эта задача (FN-23) доказывает
-      пригодность источника, не реализует загрузку всего архива в хранилище.
+      Четыре слоя, каждый в своём модуле (main-prompt.md §8). Парсинг и
+      нормализация в RecordInput — src/sources/archive_probe.py
+      (parse_donki_notifications, donki_notification_to_record_input), FN-23.
+      Запись в хранилище, карта доказанно прочитанных интервалов и строгая
+      выборка по as_of — provider-agnostic адаптер
+      src/sources/archive_ingest.py (FN-42: ingest_donki_notifications,
+      assemble_historical_forecast_input). Интерпретация — provider-agnostic
+      src/domain/spaceweather/archive_assessment.py (FN-42: EVENT_PRESENT /
+      NO_EVENT_DETECTED / INSUFFICIENT_DATA; никаких веток по имени
+      источника, событийные типы и горизонт берутся из полей
+      event_message_types/forecast_horizon_hours ЭТОЙ записи реестра).
+      Сетевой шлюз поверх всего этого — src/sources/donki.py
+      (fetch_and_store_window, FN-41 этап 3): реальный HTTP через
+      src/sources/http.py (раздельные таймауты, ограниченные повторы,
+      отдельная обработка 429), статус в реестре источников и маскирование
+      ключа API во всех сообщениях, логах и URL записей. Собственного
+      парсера, собственной записи в хранилище и собственной интерпретации у
+      шлюза нет — это был бы второй, расходящийся с реестром коннектор к
+      тому же источнику. Вопрос, достаточно ли DONKI без числового прогноза
+      NOAA, постановкой FN-41 оставлен открытым и в коде не зафиксирован:
+      перечень линий исторических режимов —
+      src/api/service.py::HISTORICAL_ARCHIVE_SOURCE_IDS, и обе линии
+      проходят через один и тот же интерфейс.
 
   - id: noaa-swpc-forecast-discussion-archive
     name: "NOAA SWPC Forecast Discussion — архив NCEI"

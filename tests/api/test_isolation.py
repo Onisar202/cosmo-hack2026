@@ -100,12 +100,20 @@ def test_concurrent_calculations_have_independent_task_status(
 ) -> None:
     """Статус одной задачи не протекает в статус другой, даже когда они
     выполняются в одном пуле потоков одновременно: одна задача — валидный
-    запрос (даёт ``done``), вторая — заведомо неподдерживаемый исторический
-    режим (даёт ``failed``)."""
+    запрос (даёт ``done``), вторая — заведомо неуспешная (даёт ``failed``).
+
+    FN-41: прежняя «заведомо неуспешная» задача (любой исторический режим,
+    общий ``historical_mode_not_implemented``) теперь успешна — исторические
+    режимы реализованы. Отказ воспроизводится по-прежнему реальной, а не
+    выдуманной причиной: 15 мая 2024 покрывается датированным выпуском OEM,
+    которого нет среди сохранённых фикстур (есть 05-12 с покрытием до 05-25,
+    но его ``published_at`` — 13 мая, и он пригоден; поэтому берём дату, для
+    которой покрывающего выпуска в фикстурах нет вовсе), и задача отказывает
+    именованным кодом критического пробела архива."""
     ok_payload = CONCURRENT_REQUESTS[0]
     failing_payload = {
         "mode": "historical_analysis",
-        "start_at": "2024-05-15T00:00:00Z",
+        "start_at": "2024-05-30T00:00:00Z",
         "duration_hours": 2,
         "search_window_hours": 4,
     }
@@ -133,7 +141,7 @@ def test_concurrent_calculations_have_independent_task_status(
 
     assert failing_job["status"] == "failed"
     assert failing_job["result_id"] is None
-    assert failing_job["error"]["code"] == "historical_mode_not_implemented"
+    assert failing_job["error"]["code"] == "historical_orbit_archive_gap"
 
     # Повторное чтение обоих статусов позже подтверждает, что они не
     # перезаписали друг друга задним числом (не общая модульная переменная).
