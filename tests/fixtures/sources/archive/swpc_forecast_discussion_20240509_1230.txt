@@ -1,0 +1,81 @@
+:Product: 05091230forecast_discussion.txt
+:Issued: 2024 May 09 1230 UTC
+# Prepared by the U.S. Dept. of Commerce, NOAA, Space Weather Prediction Center
+#
+Solar Activity
+
+.24 hr Summary...
+
+Solar activity was at high levels with background flux at or near M1.0.
+Region 3664 (S19W31, Fkc/beta-gamma-delta) continued to grow and
+eventually merged with Region 3668 (S15W21). This new combined spot
+group will maintain the 3664 region designation, and is now over 1,500
+millionths in size. AR 3664 produced many M-class flares and two X-class
+flares in the past 24-36 hours. Within that activity, three halo CMEs
+were associated with expected arrivals on late 10 to early 11 May. A
+fourth halo CME associated with the X2.2/3B flare is visible in STEREO
+imagery. LASCO coronagraph imagery has yet to update to further analyze
+this event.
+
+Region 3663 (N26W77, Fkc/beta-gamma) exhibited signs of decay as it
+approached the western limb, and appears to be losing its delta
+configuration. However, this region continued to produce optical flares,
+radio bursts, and an isolated M-class flare. The remaining spotted
+active regions were stable and inactive.
+
+Other activity included an approximately 35° long filament that erupted,
+centered near E27N18, with an associated CME, mostly moving in a
+northeasterly direction. Analysis and modeling of this event determined
+a possible Earth-directed component with similar timing to the halo CMEs
+mentioned above.
+
+.Forecast...
+Solar activity is expected to persist at high to very high levels over
+09-11 May, with M-class flares (R1-R2/Minor-Moderate) expected and
+X-class flares (R3/Strong) likely, due to the continued flare potential
+of Region 3663 and especially Region 3664.
+
+Energetic Particle
+
+.24 hr Summary...
+The greater than 2 MeV electron flux was at normal to moderate levels
+and the greater than 10 MeV proton flux was steady at background levels.
+
+.Forecast...
+The greater than 2 MeV electron flux is expected to continue at normal
+to moderate levels over 09-11 May. There is a chance for the greater
+than 10 MeV proton flux to reach S1 (Minor) storm levels over 09-11 May
+due to the flare potential of Regions 3663 and 3664.
+
+Solar Wind
+
+.24 hr Summary...
+The solar wind environment reflected near-background conditions, with
+the exception of slightly elevated solar wind speeds, likely attributed
+to residual CH HSS influence. Total field strength was steady near 3
+nT, the Bz component had no significant southward deflections, Phi
+remained in a positive orientation, and solar wind speeds averaged near
+470 km/s.
+
+.Forecast...
+Possible enhancements in the solar wind environment are likely on 09
+May, following the anticipated glancing effects of a CME that departed
+the Sun on 06 May. Late on 10 May and into 11 May, stronger enhancements
+are likely as the two CMEs that departed the Sun on 08 May are
+anticipated to arrive at Earth.
+
+Geospace
+
+.24 hr Summary...
+The geomagnetic field was at quiet levels.
+
+.Forecast...
+Mid to late day on 09 May, unsettled to active conditions are possible
+as glancing effects from a CME that departed the Sun on 06 May are
+anticipated to influence Earth. By late on 10 May, the two halo CMEs
+from 8 May are anticipated to arrive at Earth, increasing the
+geomagnetic response to G1 (Minor) storm levels. Early on 11 May,
+conditions are likely to reach G3 (Strong) storm levels as the bulk of
+four CMEs moves past Earth. While confidence in timing is fairly high,
+confidence in magnitude/strength of the geomagnetic response to the CME
+arrival is low to moderate.

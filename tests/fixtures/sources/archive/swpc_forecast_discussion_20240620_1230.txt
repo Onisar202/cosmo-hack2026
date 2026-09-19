@@ -1,0 +1,63 @@
+:Product: 06201230forecast_discussion.txt
+:Issued: 2024 Jun 20 1230 UTC
+# Prepared by the U.S. Dept. of Commerce, NOAA, Space Weather Prediction Center
+#
+Solar Activity
+
+.24 hr Summary...
+Solar activity returned to low levels. Region 3712 (S24W46,
+Ekc/Beta-Gamma-Delta) continued to indicate separation in the
+intermediate and trailer spots, but maintained a weak BGD configuration.
+Region 3713 (S14W33, Ekc/Beta-Gamma-Delta) exhibited additional growth
+in its intermediate and leader spots and gained a delta configuration,
+but was mostly quiet. Region 3716 (N10W39, Eki/Beta-Gamma) had overall
+growth in areal coverage, yet only contributed low level C-class flares
+as well. Region 3718 (N15E06, Cso/Beta) exhibited decay and was quiet.
+Regions 3719 (S13E61, Cao/Beta) and 3720 (S05E70, Dao/Beta) were
+numbered this period, with Region 3719 producing a C7 flare at 20/0936
+UTC as it rotated further onto the visible disk.
+
+No Earth-directed CMEs were observed in available satellite imagery.
+
+.Forecast...
+M-class flares (R1-R2/Minor-Moderate) are likely over 20-22 Jun, with a
+slight chance for X-class flares (R3 or greater), due primarily to the
+flare potential of Regions 3712, 3713 and 3716.
+
+Energetic Particles
+
+.24 hr Summary...
+The greater than 2 MeV electron flux was at normal to moderate levels
+and the greater than 10 MeV proton flux was at background levels.
+
+.Forecast...
+The greater than 2 MeV electron flux is expected to be at normal to
+moderate levels through 22 Jun. There is a slight chance for the greater
+than 10 MeV proton flux to reach up to S1 (Minor) levels on 20-22 Jun.
+
+Solar Wind
+
+.24 hr Summary...
+The solar wind environment was indicative of persistent yet weakening CH
+HSS influence. Total field averaged near 4 nT, the Bz component varied
+between +/- 5 nT, and wind speeds continued to gradually decrease to
+near 490 km/s by the end of the period. The phi angle was in a mostly
+positive orientation.
+
+.Forecast...
+Further decreases in solar wind enhancements are expected on 20 Jun. A
+negative polarity coronal hole is likely to move into a geoeffective
+position on 21 and 22 Jun, increasing the chances for additional
+enhancements in the solar wind environment.
+
+Geospace
+
+.24 hr Summary...
+The geomagnetic field was at quiet to unsettled levels in response to a
+mildly disturbed solar wind environment.
+
+.Forecast...
+Mostly quiet conditions are expected on 20 Jun as CH HSS effects
+diminish. Unsettled conditions are expected on 21 and 22 Jun, with
+active levels possible on 22 Jun, with the arrival of the aforementioned
+CH HSS.

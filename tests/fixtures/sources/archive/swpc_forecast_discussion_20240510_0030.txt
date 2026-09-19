@@ -1,0 +1,74 @@
+:Product: 05100030forecast_discussion.txt
+:Issued: 2024 May 10 0035 UTC
+# Prepared by the U.S. Dept. of Commerce, NOAA, Space Weather Prediction Center
+#
+Solar Activity
+
+.24 hr Summary...
+Solar activity was at high levels with background flux at or near M1.0.
+Region 3664 (S19W34, Fkc/beta-gamma-delta) continued to exhibit growth
+and produced two R3 (Strong) and eight R1 (Minor) events. The largest
+events, an X2.2 flare 09/0913 UTC and an X1.1 at 09/1744 UTC, were
+accompanied by Type-II and IV radio sweeps, and complex radio burst
+signatures were observed across discrete frequencies. A halo CME
+associated with the X2.2 flare at 09/0913 UTC from Region 3664 is
+Earth-directed with arrival likely on 11 May. Another halo CME,
+associated with the X1.1 flare at 09/1744 UTC, is undergoing modeling as
+of the time of this writing.
+
+At present, four halo CMEs (associated with flare activity from Region
+3664 over 08-09 May) and a CME associated with a filament eruption (from
+08 May) are expected to arrive beginning late on 10 May with the bulk of
+geomagnetic impacts predicted on 11 May. The aforementioned CME
+associated with the X1.1 flare at 09/1744 UTC will most likely add to
+the total count, but remains in analysis as of now.
+
+.Forecast...
+Solar activity is expected to persist at high to very high levels over
+10-12 May, with M-class flares (R1-R2/Minor-Moderate) expected and
+X-class flares (R3/Strong) likely, due to the flare potential of Region
+3664.
+
+Energetic Particle
+
+.24 hr Summary...
+The greater than 10 MeV proton flux became slightly enhanced after
+09/0600 UTC, following strong flare activity from Region 3664, but
+remained below 1 pfu. The greater than 2 MeV electron flux was at normal
+to moderate levels.
+
+.Forecast...
+There is a chance for the greater than 10 MeV proton flux to reach S1
+(Minor) storm levels over 10-12 May due to the location and flare
+potential of Region 3664. The greater than 2 MeV electron flux is
+expected to be at normal to moderate levels over 10-12 May.
+
+Solar Wind
+
+.24 hr Summary...
+Nominal solar wind conditions prevailed throughout much of the period
+with a minor perturbation observed in the magnetic field after 09/1730
+UTC. Solar wind speeds decreased from initial readings near 450 km/s to
+between 400-425 km/, total field strength ranged 1-7 nT, and the Bz
+component varied +3/-5 nT. The phi angle was positive.
+
+.Forecast...
+A weakly enhanced solar wind environment associated with CME activity is
+expected through most of 10 May. A stronger disturbance is expected in
+the early hours of 11 May through much of 12 May due to the anticipated
+arrival of a series of halo CMEs associated with activity from Region
+3664 over 08-09 May.
+
+Geospace
+
+.24 hr Summary...
+The geomagnetic field was quiet.
+
+.Forecast...
+Periods of active conditions and G1 (Minor) storming are likely on 10
+May with the possible early arrival of a series of CMEs (from 08-09
+May). The bulk of the incoming CME(s) is expected to arrive early on 11
+May with periods of G1-G2 (Minor-Moderate) geomagnetic storming
+expected, and periods of G3-G4 (Strong-Severe) storms likely. Periods of
+G1-G2 (Minor-Moderate) storms are likely on 12 May due to an enhanced
+solar wind environment following the passage of the 08-09 May CMEs.
