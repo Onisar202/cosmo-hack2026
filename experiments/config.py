@@ -141,6 +141,16 @@ def load_scenarios(path: Path) -> list[Scenario]:
                 "(contracts/request.schema.json search_window_hours)"
             )
 
+        if as_of > window_a_start:
+            raise ScenarioConfigError(
+                f"scenario {name!r}: as_of={as_of.isoformat()} is after "
+                f"window_a_start={window_a_start.isoformat()} — a cutoff after the "
+                "earliest window's start turns a strict forecast into a retrospective "
+                "analysis mislabeled as historical_forecast (same rule as "
+                "src.api.schemas.CalculationRequest, contracts/README.md "
+                "«Три режима и as_of»)"
+            )
+
         expected_event_raw = entry.get("expected_event", None)
         if expected_event_raw is not None and not isinstance(expected_event_raw, bool):
             raise ScenarioConfigError(

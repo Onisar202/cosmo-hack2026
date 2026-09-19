@@ -1,17 +1,26 @@
-"""Determinism (FN-43): running the same scenario twice yields identical
-artifacts — full equality, no modulo, since result_id/computed_at/record_id
-are all made deterministic (experiments/determinism.py,
-experiments/production.py, experiments/run.py module docstrings).
+"""Determinism (FN-43): running the same scenario twice, given the same
+``run_started_at``, yields identical artifacts — full equality, no modulo,
+since result_id/record_id/every record's fetched_at are all made
+deterministic (experiments/determinism.py, experiments/production.py,
+experiments/run.py module docstrings). ``computed_at`` is the one
+deliberate exception (FN-46 round 7 review, point 2): it is the real
+``run_started_at`` a caller supplies, so these tests pass the SAME explicit
+value to both runs being compared — proving every OTHER field is
+deterministic — rather than letting ``run_scenario`` sample the wall clock
+twice and then having to mask the field back out.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from experiments.config import Scenario
 from experiments.run import run_scenario
 
 from .conftest import scenario_by_name
+
+_RUN_STARTED_AT = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
 
 
 def test_running_the_same_scenario_twice_yields_byte_identical_artifacts(
@@ -21,8 +30,8 @@ def test_running_the_same_scenario_twice_yields_byte_identical_artifacts(
     out_a = tmp_path / "run_a"
     out_b = tmp_path / "run_b"
 
-    metrics_a = run_scenario(scenario, out_dir=out_a)
-    metrics_b = run_scenario(scenario, out_dir=out_b)
+    metrics_a = run_scenario(scenario, out_dir=out_a, run_started_at=_RUN_STARTED_AT)
+    metrics_b = run_scenario(scenario, out_dir=out_b, run_started_at=_RUN_STARTED_AT)
 
     assert metrics_a == metrics_b
 
@@ -47,8 +56,8 @@ def test_running_the_missing_data_scenario_twice_yields_byte_identical_artifacts
     out_a = tmp_path / "run_a"
     out_b = tmp_path / "run_b"
 
-    run_scenario(scenario, out_dir=out_a)
-    run_scenario(scenario, out_dir=out_b)
+    run_scenario(scenario, out_dir=out_a, run_started_at=_RUN_STARTED_AT)
+    run_scenario(scenario, out_dir=out_b, run_started_at=_RUN_STARTED_AT)
 
     dir_a = out_a / scenario.name
     dir_b = out_b / scenario.name

@@ -82,8 +82,8 @@
       "properties": {
         "source": {
           "type": "string",
-          "enum": ["celestrak", "space-track"],
-          "description": "Текущие элементы — CelesTrak; исторические — Space-Track GP_HISTORY."
+          "enum": ["celestrak", "space-track", "nasa-iss-oem-history"],
+          "description": "Текущие элементы — CelesTrak; исторические — Space-Track GP_HISTORY (задокументирован, не реализован) либо NASA TOPO CCSDS OEM (nasa-iss-oem-history, src/sources/orbit_history.py, актуальный исторический путь)."
         },
         "norad_id": { "type": "string", "minLength": 1 },
         "elements_epoch": { "$ref": "#/$defs/utcDateTime" },

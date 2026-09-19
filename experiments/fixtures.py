@@ -18,13 +18,26 @@ checkout — no network call happens anywhere in this stand.
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src.sources import archive_probe, orbit_history
 
+UTC = timezone.utc
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE_DIR = REPO_ROOT / "tests" / "fixtures" / "sources" / "archive"
 OEM_DIR = REPO_ROOT / "tests" / "fixtures" / "orbit" / "history"
+MMOD_META_PATH = (
+    REPO_ROOT
+    / "src"
+    / "sources"
+    / "data"
+    / "mmod"
+    / "nasa_meo_leo_forecast_2024"
+    / "ntrs-citation-20230015158.meta.json"
+)
 
 #: The four real DONKI notification pages covering the whole mandatory
 #: period 2024-05-01..2024-06-30 (tests/fixtures/sources/archive/README.md).
@@ -99,13 +112,61 @@ def load_all_oem_releases() -> list[tuple[orbit_history.OemRelease, bytes]]:
     return [load_oem_release(release_date) for release_date in OEM_RELEASE_DATES]
 
 
+def _read_meta_timestamp(meta_path: Path, *, key: str) -> datetime:
+    """Reads and parses one ISO 8601 timestamp field from a ``*.meta.json``
+    provenance sidecar (FN-46 round 7 review, point 2) — the REAL moment
+    this repository's bundled copy of a source document was retrieved, as
+    recorded when the fixture was captured (``tests/fixtures/.../README.md``
+    "около 2026-09-18..19"), never a scenario's ``as_of`` (main-prompt.md
+    §1: ``fetched_at`` is "when WE received it", not a stand-in for a
+    different one of the four times)."""
+    raw = str(json.loads(meta_path.read_text(encoding="utf-8"))[key])
+    text = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    return datetime.fromisoformat(text).astimezone(UTC)
+
+
+def donki_fetched_at() -> datetime:
+    """The real ``fetched_at`` of the LAST of the four DONKI archive pages
+    (all four retrieved within the same ~16s window,
+    ``tests/fixtures/sources/archive/*.meta.json``) — by that moment every
+    notification this stand reads had genuinely been retrieved."""
+    return max(
+        _read_meta_timestamp(
+            ARCHIVE_DIR / f"{filename.removesuffix('.json')}.meta.json", key="fetched_at"
+        )
+        for filename in DONKI_FILES
+    )
+
+
+def oem_release_fetched_at(release_date: str) -> datetime:
+    """The real ``fetched_at`` of one specific OEM release's ``.txt`` object
+    (``tests/fixtures/orbit/history/nasa_iss_oem_<release_date>.meta.json``)."""
+    return _read_meta_timestamp(
+        OEM_DIR / f"nasa_iss_oem_{release_date}.meta.json", key="fetched_at"
+    )
+
+
+def mmod_fetched_at() -> datetime:
+    """The real ``captured_at`` of the NTRS metadata sidecar backing the
+    bundled NASA MEO document (``src/sources/mmod.py``
+    ``PUBLICATION_EVIDENCE_PATH``) — this document has no live per-run
+    fetch (it is a gate-scope bundled file, see that module's docstring),
+    so the moment its provenance sidecar was captured and checksummed is
+    the closest honest analogue to ``fetched_at`` for it."""
+    return _read_meta_timestamp(MMOD_META_PATH, key="captured_at")
+
+
 __all__ = [
     "ARCHIVE_DIR",
     "DONKI_FILES",
     "DONKI_SOURCE_URL",
+    "MMOD_META_PATH",
     "OEM_DIR",
     "OEM_RELEASE_DATES",
+    "donki_fetched_at",
     "load_all_oem_releases",
     "load_donki_notifications",
     "load_oem_release",
+    "mmod_fetched_at",
+    "oem_release_fetched_at",
 ]
