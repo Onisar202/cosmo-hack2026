@@ -58,21 +58,36 @@ def production_flags_event(production_result: dict[str, Any] | None) -> bool | N
     is above background — the real production-vs-baseline comparison the
     ticket asks for, computed from ``build.result`` itself rather than from
     ``experiments/donki_evidence.py``'s separate, informal probe.
+
+    **Partial coverage is NOT a negative result** (FN-46 round 1 re-review
+    of round 7's fix, point 2): a scenario where one window is
+    ``status="ok"``/background and the OTHER is ``status="missing_data"``
+    must not read as a confident ``False`` — the second window was never
+    actually checked. ``True`` as soon as ANY window flags the event
+    (regardless of the other windows' coverage); ``False`` only when EVERY
+    window's ``space_weather`` mechanism reached ``status="ok"`` and none
+    flagged it; ``None`` (N/A) for every other case, including a mix of
+    ``ok`` and uncovered windows.
     """
     if production_result is None:
         return None
-    any_classified = False
+    statuses: list[str] = []
     flagged = False
     for window in production_result["windows"]:
         for mechanism in window["mechanisms"]:
             if mechanism["mechanism"] != "space_weather":
                 continue
-            if mechanism["status"] != "ok":
-                continue
-            any_classified = True
-            if mechanism.get("max_level") not in (None, "background"):
+            statuses.append(mechanism["status"])
+            if mechanism["status"] == "ok" and mechanism.get("max_level") not in (
+                None,
+                "background",
+            ):
                 flagged = True
-    return flagged if any_classified else None
+    if flagged:
+        return True
+    if statuses and all(status == "ok" for status in statuses):
+        return False
+    return None
 
 
 @dataclass(frozen=True)
@@ -122,7 +137,7 @@ def compute_event_miss(
         baseline_missed=baseline_missed,
         note=(
             "production_missed: N/A (null) while the production method's own "
-            "space_weather mechanism never reaches status=\"ok\" here (no "
+            'space_weather mechanism never reaches status="ok" here (no '
             "archived quantitative pfu observation, pending FN-41/FN-42) — "
             "there is nothing for production to have missed or caught. "
             "evidence_missed: the DONKI evidence probe (archival, informal, "
@@ -171,7 +186,7 @@ def compute_false_warning(
         note=(
             "production_false_warning: N/A (null) while the production "
             "method's own space_weather mechanism never reaches "
-            "status=\"ok\" here (no archived quantitative pfu observation, "
+            'status="ok" here (no archived quantitative pfu observation, '
             "pending FN-41/FN-42) — there is nothing for production to have "
             "flagged. evidence_false_warning: the DONKI evidence probe "
             "(archival, informal, NOT a production classification) found a "

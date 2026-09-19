@@ -262,6 +262,47 @@ def test_production_flags_event_false_when_classified_windows_stay_background() 
     assert metrics.production_flags_event(result) is False
 
 
+def test_production_flags_event_is_none_for_mixed_ok_and_missing_data_background() -> None:
+    """FN-46 round 1 re-review of round 7's fix, point 2: one window
+    genuinely classified as background and the OTHER never checked
+    (status=missing_data) must not read as a confident False — the second
+    window's real state is unknown, not confirmed calm."""
+    result = _production_result(
+        [
+            _space_weather_window(status="ok", max_level="background"),
+            _space_weather_window(status="missing_data"),
+        ]
+    )
+    assert metrics.production_flags_event(result) is None
+
+
+def test_production_flags_event_is_none_for_mixed_ok_and_source_error() -> None:
+    result = _production_result(
+        [
+            _space_weather_window(status="ok", max_level="background"),
+            {
+                "window_id": "win-b",
+                "mechanisms": [
+                    {"mechanism": "space_weather", "status": "source_error", "max_level": None}
+                ],
+            },
+        ]
+    )
+    assert metrics.production_flags_event(result) is None
+
+
+def test_production_flags_event_true_even_with_an_uncovered_window() -> None:
+    """A flagged window wins regardless of the other window's coverage —
+    only the ALL-False case needs every window covered."""
+    result = _production_result(
+        [
+            _space_weather_window(status="ok", max_level="S2"),
+            _space_weather_window(status="missing_data"),
+        ]
+    )
+    assert metrics.production_flags_event(result) is True
+
+
 # --- coverage --------------------------------------------------------------
 
 

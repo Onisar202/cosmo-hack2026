@@ -73,9 +73,16 @@ def _write_json(path: Path, data: Any) -> None:
     path.write_text(text + "\n", encoding="utf-8")
 
 
+def _atomic_rename(src: Path, dst: Path) -> None:
+    """Thin wrapper around ``Path.rename`` so a test can inject a failure at
+    one specific rename step without monkeypatching ``pathlib`` globally."""
+    src.rename(dst)
+
+
 def _replace_scenario_dir(final_dir: Path, built_dir: Path) -> None:
     """Atomically swaps a fully-built ``built_dir`` into ``final_dir``'s
-    place (FN-46 round 7 review, point 5).
+    place (FN-46 round 7 review, point 5; round 1 re-review of that fix,
+    point 3).
 
     Previously ``run_scenario`` wrote straight into ``out_dir /
     scenario.name``, reusing whatever was already there: re-running a
@@ -85,15 +92,28 @@ def _replace_scenario_dir(final_dir: Path, built_dir: Path) -> None:
     recent run. Building into a sibling temp directory first and renaming
     it into place only after every artifact was written successfully means
     ``final_dir`` is, at every observable moment, either the complete
-    previous build or the complete new one — never a mix. The brief
-    make-it-empty gap between removing the old ``final_dir`` and renaming
-    the new one in is unavoidable without OS-level directory-swap support,
-    but it can never produce a MIXED directory (the failure mode this fixes)."""
+    previous build or the complete new one — never a mix.
+
+    The first fix moved the previous ``final_dir`` aside and deleted it
+    BEFORE renaming ``built_dir`` into place: if that second rename failed
+    or the process died in between, the old good result was already gone
+    and the new one never arrived — a genuine data loss window, not just a
+    brief "empty" gap. The previous directory is now kept under its
+    ``.stale-`` name until the new one is confirmed in place, and restored
+    on any failure of that final rename; it is only deleted after success.
+    """
+    stale_dir: Path | None = None
     if final_dir.exists():
         stale_dir = final_dir.parent / f".{final_dir.name}.stale-{uuid.uuid4().hex}"
-        final_dir.rename(stale_dir)
+        _atomic_rename(final_dir, stale_dir)
+    try:
+        _atomic_rename(built_dir, final_dir)
+    except BaseException:
+        if stale_dir is not None:
+            _atomic_rename(stale_dir, final_dir)
+        raise
+    if stale_dir is not None:
         shutil.rmtree(stale_dir)
-    built_dir.rename(final_dir)
 
 
 def run_scenario(scenario: Scenario, *, out_dir: Path, run_started_at: datetime) -> dict[str, Any]:
@@ -112,10 +132,14 @@ def run_scenario(scenario: Scenario, *, out_dir: Path, run_started_at: datetime)
         metrics_dict = _build_scenario_artifacts(
             scenario, scenario_dir=build_dir, run_started_at=run_started_at
         )
+        _replace_scenario_dir(final_dir, build_dir)
     except BaseException:
+        # Cleans up build_dir whether _build_scenario_artifacts failed (it
+        # still exists under its temp name) or _replace_scenario_dir failed
+        # after already renaming it away (this is then a no-op — nothing
+        # left at build_dir's path, ignore_errors handles that).
         shutil.rmtree(build_dir, ignore_errors=True)
         raise
-    _replace_scenario_dir(final_dir, build_dir)
     return metrics_dict
 
 

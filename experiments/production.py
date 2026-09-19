@@ -263,9 +263,7 @@ def _space_weather_mechanism(
 def _evidence_warning(
     window_id: str, evidence: list[donki_evidence.DonkiEvidenceEntry]
 ) -> dict[str, Any]:
-    entries_text = "; ".join(
-        f"{entry.message_id} ({entry.message_type})" for entry in evidence
-    )
+    entries_text = "; ".join(f"{entry.message_id} ({entry.message_type})" for entry in evidence)
     return {
         "code": "donki-archive-evidence",
         "severity": "info",
@@ -312,25 +310,36 @@ def _request_dict(scenario: Scenario) -> dict[str, Any]:
 def _source_status(
     *,
     orbit_record_id: str | None,
+    orbit_fetched_at: datetime,
     mmod_record_ids: list[str],
+    mmod_fetched_at: datetime,
     donki_record_ids: list[str],
-    as_of: datetime,
+    donki_fetched_at: datetime,
 ) -> list[dict[str, Any]]:
     """Archival, offline "source status": this stand never makes a live
     network call, so every source here is reported as successfully read
-    from its bundled/fixture file at ``as_of`` (the deterministic moment
-    this scenario's forecast is evaluated at) — never frozen/quota-limited/
-    erroring, since a local file read cannot fail those ways here."""
+    from its bundled/fixture file — never frozen/quota-limited/erroring,
+    since a local file read cannot fail those ways here.
+
+    ``last_success_at`` is each source's own REAL retrieval time (round 1
+    re-review of FN-46 round 7's fix, point 1): the round 7 fix corrected
+    every stored RECORD's ``fetched_at`` but missed this block, which still
+    reported ``scenario.as_of`` here — an artifact could claim files were
+    retrieved in 2024 while the very same records' ``fetched_at`` said
+    2026. All three callers pass the same real values used for the
+    records themselves (:func:`experiments.fixtures.oem_release_fetched_at`/
+    ``donki_fetched_at``/``mmod_fetched_at``), never ``as_of``.
+    """
     entries = []
-    for source_id, used in (
-        (orbit_history.SOURCE_ID, orbit_record_id is not None),
-        (mmod_source.SOURCE_ID, bool(mmod_record_ids)),
-        ("nasa-donki-notifications", bool(donki_record_ids)),
+    for source_id, used, fetched_at in (
+        (orbit_history.SOURCE_ID, orbit_record_id is not None, orbit_fetched_at),
+        (mmod_source.SOURCE_ID, bool(mmod_record_ids), mmod_fetched_at),
+        ("nasa-donki-notifications", bool(donki_record_ids), donki_fetched_at),
     ):
         entries.append(
             {
                 "source_id": source_id,
-                "last_success_at": _iso(as_of) if used else None,
+                "last_success_at": _iso(fetched_at) if used else None,
                 "last_error_at": None,
                 "last_error_message": None,
                 "frozen": False,
@@ -385,10 +394,11 @@ def build_production_result(
 
     release = selection.release
     raw_bytes = next(raw for rel, raw in releases_with_bytes if rel is release)
+    orbit_fetched_at = fixtures.oem_release_fetched_at(release.release_date)
     orbit_record = orbit_history.build_oem_orbital_elements_record(
         release,
         raw_bytes=raw_bytes,
-        fetched_at=fixtures.oem_release_fetched_at(release.release_date),
+        fetched_at=orbit_fetched_at,
         quality="reconstructed" if selection.is_reconstruction else "nominal",
     )
     orbit_record_id = insert_record(conn, raw_store, orbit_record)
@@ -411,12 +421,13 @@ def build_production_result(
     }
 
     notifications = fixtures.load_donki_notifications()
+    donki_fetched_at = fixtures.donki_fetched_at()
     donki_record_ids = donki_evidence.ensure_donki_records(
         conn,
         raw_store,
         notifications=notifications,
         source_url=fixtures.DONKI_SOURCE_URL,
-        fetched_at=fixtures.donki_fetched_at(),
+        fetched_at=donki_fetched_at,
     )
 
     warnings: list[dict[str, Any]] = []
@@ -543,9 +554,11 @@ def build_production_result(
         "recommendation": recommendation,
         "source_status": _source_status(
             orbit_record_id=orbit_record_id,
+            orbit_fetched_at=orbit_fetched_at,
             mmod_record_ids=mmod_record_ids,
+            mmod_fetched_at=mmod_fetched_at,
             donki_record_ids=donki_record_ids,
-            as_of=scenario.as_of,
+            donki_fetched_at=donki_fetched_at,
         ),
     }
     return ProductionBuild(result=result, failure=None, evidence_by_window=evidence_by_window)
