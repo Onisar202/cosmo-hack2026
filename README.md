@@ -94,6 +94,8 @@ tests/api/test_isolation.py::test_concurrent_calculations_do_not_mix_parameters_
 tests/api/test_isolation.py::test_concurrent_calculations_have_independent_task_status PASSED
 tests/api/test_isolation.py::test_recompute_with_same_parameters_creates_a_new_immutable_result PASSED
 tests/api/test_isolation.py::test_orbit_fetch_status_snapshot_is_not_mutated_by_a_later_concurrent_attempt PASSED
+tests/api/test_isolation.py::test_orbit_fetch_success_after_a_prior_failure_does_not_inherit_the_old_error PASSED
+tests/api/test_isolation.py::test_concurrent_swpc_success_and_failure_do_not_contaminate_each_others_result PASSED
 tests/api/test_requests.py::test_create_calculation_returns_202_pending PASSED
 tests/api/test_requests.py::test_get_calculation_status_unknown_task_is_404 PASSED
 tests/api/test_requests.py::test_get_result_unknown_id_is_404 PASSED
@@ -224,7 +226,7 @@ tests/test_health.py::test_health_returns_200_ok PASSED
 tests/test_health.py::test_health_time_is_utc_aware PASSED
 tests/test_health.py::test_settings_requires_app_env PASSED
 tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
-133 passed, 1 skipped
+135 passed, 1 skipped
 ```
 
 `test_live_smoke` пропускается намеренно: детерминированные тесты парсера
@@ -473,12 +475,23 @@ main-prompt.md §9 п.7, backend-prompt.md §2): каждая фоновая з�
 модульных переменных — параметры и промежуточные данные передаются явно по
 вызовам. Файл/схема хранилища создаются один раз при старте приложения
 (`ensure_store_ready`), чтобы первый набор конкурентных запросов не гонялся
-за созданием файла БД. `result.source_status` собирается из снимка статуса,
-возвращённого ИМЕННО этой попыткой обращения к источнику
-(`OrbitFetchResult.status`/`FetchOutcome.status`), а не отдельным более
-поздним чтением общего реестра — иначе конкурентный запрос мог бы застать и
-сохранить в своём результате чужой, позже случившийся исход
-(`test_orbit_fetch_status_snapshot_is_not_mutated_by_a_later_concurrent_attempt`).
+за созданием файла БД. `result.source_status` собирается из статуса,
+построенного из СОБСТВЕННОГО исхода именно этой попытки обращения к
+источнику (`OrbitFetchResult.status`/внутренний `_swpc_attempt_status`) — не
+из общего реестра ни поздним повторным чтением, ни через возвращаемое
+значение `registry.record_success`/`record_error`: тот само по себе строит
+объект из ТЕКУЩЕГО общего состояния (`dataclasses.replace`) и не стирает
+поля ошибки, унаследованные от чужой конкурентной попытки на том же
+`source_id` — значит даже «снимок в момент вызова» мог быть загрязнён.
+Общий реестр остаётся источником только для `/sources/status`/
+`/sources/refresh` (глобальный, не привязанный к одному расчёту статус) и
+для исходов `skipped_*` (когда сама попытка не делала живого обращения и
+показывать нечего, кроме последнего известного состояния источника). См.
+`test_orbit_fetch_status_snapshot_is_not_mutated_by_a_later_concurrent_attempt`,
+`test_orbit_fetch_success_after_a_prior_failure_does_not_inherit_the_old_error`,
+`test_concurrent_swpc_success_and_failure_do_not_contaminate_each_others_result`
+(последний — синхронизированный через `threading.Barrier`, чтобы обе
+попытки гарантированно пересеклись по времени).
 
 **Прослеживаемость и защита контракта.** Каждое предупреждение с
 `fetch_attempt_id` доказуемо: тот же id попадает в структурированную запись
@@ -491,9 +504,15 @@ main-prompt.md §9 п.7, backend-prompt.md §2): каждая фоновая з�
 приводится к модулю, main-prompt.md §2 «пропуск не заменяется нулём», тот же
 принцип к знаку) останавливает сохранение явной ошибкой, а не уходит
 клиенту как «корректный» результат. Текст любого НЕПРЕДВИДЕННОГО исключения
-(в отличие от curated `CalculationError`) не возвращается клиенту как есть —
-он мог бы раскрыть путь к БД или другую внутреннюю деталь; клиент получает
-нейтральное сообщение с `task_id`, полный текст — только в лог сервера.
+(в отличие от curated `CalculationError`/`SwpcFormatError`/`OrbitSourceError`
+и т.п. — их текст уже осознанно информативен и без секретов) не
+возвращается клиенту как есть и не пишется в лог как есть: он мог бы
+раскрыть путь к БД, URL с ключом в query-строке или другую внутреннюю
+деталь (.ai/backend-prompt.md §4 «маскирование на уровне логгера, а не на
+уровне дисциплины»). Единая функция `sanitize_unexpected_error` заменяет
+такой текст на имя класса исключения — и в ответе клиенту (с `task_id` для
+сопоставления), и в структурированном логе, и в общем реестре статусов
+источников.
 
 ## Структура проекта
 

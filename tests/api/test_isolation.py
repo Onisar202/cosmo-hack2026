@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,9 +17,11 @@ from fastapi.testclient import TestClient
 
 from src.api.service import fetch_and_store_orbit
 from src.sources import orbit as orbit_source
+from src.sources import swpc as swpc_source
+from src.sources.http import HttpFetchResult, SourceTimeoutError
 from src.sources.status import SourceStatusRegistry
 from src.store import RawOriginalStore, connect
-from tests.api.conftest import orbit_tle_bytes, wait_for_job
+from tests.api.conftest import orbit_tle_bytes, swpc_sample_bytes, wait_for_job
 
 # Разные duration_hours/search_window_hours на каждый конкурентный запрос —
 # если параметры где-то перепутаются между потоками (например через модульную
@@ -202,3 +205,99 @@ def test_orbit_fetch_status_snapshot_is_not_mutated_by_a_later_concurrent_attemp
     assert result.status.last_error_message is None
 
     conn.close()
+
+
+def test_orbit_fetch_success_after_a_prior_failure_does_not_inherit_the_old_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """round 2 ревью PR #19: ``registry.record_success()`` сам по себе
+    строит объект из ТЕКУЩЕГО состояния реестра (``dataclasses.replace``) и
+    не стирает ``last_error_*`` — значит снимок, взятый ИЗ ЕГО возвращаемого
+    значения (как это временно делал round 1), всё ещё мог унаследовать
+    чужую (или более раннюю собственную) ошибку. Этот тест — детерминированное
+    (не зависящее от таймингов потоков) воспроизведение того же дефекта:
+    ошибка на источнике, затем успешная попытка — успех обязан быть чистым.
+    """
+    monkeypatch.setattr(orbit_source, "fetch_current_tle", lambda **_kwargs: orbit_tle_bytes())
+
+    conn = connect(tmp_path / "store.sqlite3")
+    raw_store = RawOriginalStore(tmp_path / "raw")
+    registry = SourceStatusRegistry()
+
+    t0 = datetime(2025, 12, 31, 0, 0, 0, tzinfo=timezone.utc)
+    registry.record_error(
+        orbit_source.SOURCE_ID_CURRENT,
+        at=t0,
+        message="prior unrelated failure (e.g. a different concurrent request)",
+        quota_limited=False,
+    )
+
+    t1 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    result = fetch_and_store_orbit(conn, raw_store, registry, now=t1)
+
+    assert result.outcome == "stored"
+    assert result.status.last_success_at == t1
+    assert result.status.last_error_at is None
+    assert result.status.last_error_message is None
+
+    conn.close()
+
+
+def test_concurrent_swpc_success_and_failure_do_not_contaminate_each_others_result(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Синхронизированный конкурентный тест (round 2 ревью PR #19): два
+    запроса одновременно обращаются к NOAA SWPC — один успешно, другой с
+    отказом, — используя ``threading.Barrier`` так, чтобы обе попытки
+    гарантированно пересеклись во времени внутри общего
+    ``SourceStatusRegistry``. Ни один из двух сохранённых результатов не
+    должен унаследовать исход другого."""
+    barrier = threading.Barrier(2, timeout=5)
+    call_index_lock = threading.Lock()
+    call_index = {"n": 0}
+    swpc_bytes = swpc_sample_bytes()
+
+    def sometimes_failing_fetch(url: str, **_kwargs: Any) -> HttpFetchResult:
+        with call_index_lock:
+            idx = call_index["n"]
+            call_index["n"] += 1
+        # Обе попытки ждут друг друга здесь — их обращения к общему реестру
+        # статусов реально пересекаются по времени, а не выполняются строго
+        # последовательно.
+        barrier.wait()
+        if idx == 0:
+            raise SourceTimeoutError(f"simulated timeout for {url}")
+        return HttpFetchResult(
+            status_code=200, body=swpc_bytes, url=url, elapsed_seconds=0.001
+        )
+
+    monkeypatch.setattr(swpc_source, "fetch", sometimes_failing_fetch)
+
+    first = app_client.post("/api/calculations", json=CONCURRENT_REQUESTS[0])
+    second = app_client.post("/api/calculations", json=CONCURRENT_REQUESTS[1])
+
+    first_job = wait_for_job(app_client, first.json()["task_id"])
+    second_job = wait_for_job(app_client, second.json()["task_id"])
+    assert first_job["status"] == "done", first_job
+    assert second_job["status"] == "done", second_job
+
+    results = [
+        app_client.get(f"/api/results/{first_job['result_id']}").json(),
+        app_client.get(f"/api/results/{second_job['result_id']}").json(),
+    ]
+    swpc_statuses = [
+        next(s for s in r["source_status"] if s["source_id"] == "noaa-swpc-proton-flux")
+        for r in results
+    ]
+
+    # Ровно один результат несёт ошибку своей собственной попытки, ровно
+    # один — чистый успех своей собственной попытки; ни один не смешивает
+    # оба исхода одновременно (что и произошло бы при утечке чужого статуса).
+    error_statuses = [s for s in swpc_statuses if s["last_error_message"] is not None]
+    clean_success_statuses = [
+        s
+        for s in swpc_statuses
+        if s["last_error_message"] is None and s["last_success_at"] is not None
+    ]
+    assert len(error_statuses) == 1, swpc_statuses
+    assert len(clean_success_statuses) == 1, swpc_statuses

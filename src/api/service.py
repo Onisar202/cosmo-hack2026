@@ -92,13 +92,60 @@ class OrbitFetchResult:
     record_id: str | None
     parsed: orbit.ParsedTle | None
     source_version: str | None
-    # Снимок статуса источника, возвращённый ИМЕННО этим вызовом
-    # registry.record_success/record_error — не более поздний
-    # registry.get(). Используется для сборки result.source_status (см.
-    # _build_current_result): чтение реестра ПОЗЖЕ, после других обращений
-    # (propagate, swpc-запрос), рискует застать состояние, уже перезаписанное
-    # другим конкурентным расчётом с тем же source_id — round 1 ревью PR #19.
+    # Статус ИМЕННО ЭТОЙ попытки, построенный из её собственного исхода —
+    # не из общего реестра. round 1 ревью PR #19 останавливал повторное
+    # чтение реестра ПОЗЖЕ по функции, но `registry.record_success()` сам по
+    # себе строит объект из ТЕКУЩЕГО общего состояния
+    # (`dataclasses.replace(current, last_success_at=at)`) и не стирает
+    # `last_error_*`, унаследованные от чужой, более ранней/конкурентной
+    # ошибки на том же source_id — так успешная попытка могла сохранить в
+    # своём результате чужой отказ. См. _attempt_success_status/
+    # _attempt_error_status (round 2 ревью PR #19).
     status: SourceStatus
+
+
+def sanitize_unexpected_error(exc: Exception) -> str:
+    """Текст ЛЮБОГО непредвиденного исключения не логируется и не
+    показывается как есть — он мог бы содержать секрет (URL с ключом в
+    query-строке, путь к файлу и т.п., .ai/backend-prompt.md §4
+    «маскирование на уровне логгера, а не на уровне дисциплины»). Только
+    тип исключения — этого достаточно, чтобы отличить один класс сбоя от
+    другого при разборе инцидента, не рискуя утечкой содержимого
+    (round 2 ревью PR #19). Не применяется к curated ``CalculationError``/
+    ``SwpcFormatError``/``OrbitSourceError`` и т.п. — их текст уже
+    осознанно информативен и не содержит секретов (main-prompt.md §12
+    «ошибка понятна»)."""
+    return f"unexpected {type(exc).__name__} (see server log for correlation by task_id)"
+
+
+def _attempt_success_status(source_id: str, *, at: datetime, frozen: bool) -> SourceStatus:
+    """Статус источника, каким его увидела ИМЕННО эта успешная попытка —
+    без полей ошибки, унаследованных от чужого, ранее записанного в общий
+    реестр состояния (round 2 ревью PR #19)."""
+    return SourceStatus(
+        source_id=source_id,
+        last_success_at=at,
+        last_error_at=None,
+        last_error_message=None,
+        frozen=frozen,
+        quota_limited=False,
+    )
+
+
+def _attempt_error_status(
+    source_id: str, *, at: datetime, message: str, quota_limited: bool, frozen: bool
+) -> SourceStatus:
+    """Статус источника, каким его увидела ИМЕННО эта неудачная попытка —
+    без поля успеха, унаследованного от чужого состояния (round 2 ревью
+    PR #19)."""
+    return SourceStatus(
+        source_id=source_id,
+        last_success_at=None,
+        last_error_at=at,
+        last_error_message=message,
+        frozen=frozen,
+        quota_limited=quota_limited,
+    )
 
 
 def _log(
@@ -195,7 +242,12 @@ def fetch_and_store_orbit(
         # и тот же результат fetch (приёмка FN-26 «два конкурентных запроса
         # не смешивают ... данные»).
         record_id = insert_record(conn, raw_store, record)
-    status = registry.record_success(orbit.SOURCE_ID_CURRENT, at=now)
+    # Обновляет общий реестр (для /sources/status, /sources/refresh) — его
+    # возвращаемое значение НЕ используется как статус этой попытки (см.
+    # OrbitFetchResult.status docstring, round 2 ревью PR #19).
+    registry.record_success(orbit.SOURCE_ID_CURRENT, at=now)
+    frozen = registry.get(orbit.SOURCE_ID_CURRENT).frozen
+    status = _attempt_success_status(orbit.SOURCE_ID_CURRENT, at=now, frozen=frozen)
     return OrbitFetchResult("stored", None, record_id, parsed, record.source_version, status)
 
 
@@ -209,8 +261,19 @@ def _orbit_fetch_failed(
     exc: Exception,
     quota_limited: bool,
 ) -> OrbitFetchResult:
-    status = registry.record_error(
+    # Обновляет общий реестр — его возвращаемое значение НЕ используется как
+    # статус этой попытки (см. OrbitFetchResult.status docstring, round 2
+    # ревью PR #19).
+    registry.record_error(
         orbit.SOURCE_ID_CURRENT, at=now, message=str(exc), quota_limited=quota_limited
+    )
+    frozen = registry.get(orbit.SOURCE_ID_CURRENT).frozen
+    status = _attempt_error_status(
+        orbit.SOURCE_ID_CURRENT,
+        at=now,
+        message=str(exc),
+        quota_limited=quota_limited,
+        frozen=frozen,
     )
     cached = get_latest_record(
         conn, source_id=orbit.SOURCE_ID_CURRENT, record_kind="orbital_elements"
@@ -235,6 +298,50 @@ def _orbit_fetch_failed(
         cached["source_version"],
         status,
     )
+
+
+def _swpc_attempt_status(
+    outcome: swpc_source.FetchOutcome | None,
+    *,
+    registry: SourceStatusRegistry,
+    now: datetime,
+    unexpected_error: str | None,
+) -> SourceStatus:
+    """Статус источника, каким его увидела ИМЕННО эта попытка — не
+    ``FetchOutcome.status`` (round 2 ревью PR #19). ``src/sources/swpc.py``
+    вне объёма этой задачи (FN-22, уже сдана) и не меняется:
+    ``FetchOutcome.status`` там — тоже снимок общего реестра, возвращаемый
+    ``registry.record_success``/``record_error`` (``dataclasses.replace`` от
+    ТЕКУЩЕГО состояния), а значит подвержен той же гонке, что и
+    ``OrbitFetchResult.status`` до этой правки — статус строится заново
+    здесь из собственного исхода этого вызова, реестр используется только
+    как приёмник обновления (для ``/sources/status``).
+
+    Исключение — исходы ``skipped_*``: сеть в этой попытке вообще не
+    затрагивалась (TTL/заморозка/отключение/квотная пауза), у неё нет
+    собственного наблюдения — самое честное, что можно показать, это
+    последнее известное состояние источника из общего реестра.
+    """
+    frozen = registry.get(swpc_source.SOURCE_ID).frozen
+    if outcome is None:
+        return _attempt_error_status(
+            swpc_source.SOURCE_ID,
+            at=now,
+            message=unexpected_error or "unexpected error",
+            quota_limited=False,
+            frozen=frozen,
+        )
+    if outcome.outcome == "stored":
+        return _attempt_success_status(swpc_source.SOURCE_ID, at=now, frozen=frozen)
+    if outcome.outcome.startswith("error_"):
+        return _attempt_error_status(
+            swpc_source.SOURCE_ID,
+            at=now,
+            message=outcome.message or outcome.outcome,
+            quota_limited=(outcome.outcome == "error_quota"),
+            frozen=frozen,
+        )
+    return registry.get(swpc_source.SOURCE_ID)
 
 
 def _not_implemented_mechanism(mechanism: Literal["space_weather", "mmod"]) -> dict[str, Any]:
@@ -445,19 +552,23 @@ def _build_current_result(
         swpc_outcome = swpc_source.fetch_and_store(
             conn, raw_store, config=swpc_cfg, registry=registry, now=now
         )
-        swpc_status = swpc_outcome.status
     except Exception as exc:  # noqa: BLE001 — отказ одного источника не должен
         # обрушивать расчёт целиком (.ai/main-prompt.md §5, приёмка FN-26
         # «при отказе одного источника остальные доступны»); неожиданная
         # ошибка коннектора фиксируется как статус источника, а не падение API.
-        # Сообщение об ошибке сохраняется в переменной здесь: Python удаляет
-        # имя, связанное через "except ... as exc", сразу после блока —
-        # использовать `exc` дальше по функции было бы NameError.
-        swpc_unexpected_error = str(exc)
-        swpc_status = registry.record_error(
+        # Сообщение маскируется (см. sanitize_unexpected_error) прежде чем
+        # попасть и в общий реестр (виден любому вызову /sources/status), и в
+        # эту переменную — непредвиденное исключение могло бы содержать URL с
+        # ключом или другую внутреннюю деталь (round 2 ревью PR #19).
+        swpc_unexpected_error = sanitize_unexpected_error(exc)
+        registry.record_error(
             swpc_source.SOURCE_ID, at=now, message=swpc_unexpected_error, quota_limited=False
         )
         swpc_outcome = None
+
+    swpc_status = _swpc_attempt_status(
+        swpc_outcome, registry=registry, now=now, unexpected_error=swpc_unexpected_error
+    )
 
     _log(
         "swpc_fetch",
@@ -491,13 +602,13 @@ def _build_current_result(
         _window("win-b", request.search_end_at, request.duration_hours),
     ]
 
-    # Снимки статуса, взятые НЕПОСРЕДСТВЕННО из этого вызова (orbit_fetch.status,
-    # swpc_status), а не отдельным более поздним registry.get(source_id):
-    # между этой точкой и фактическим обращением к источнику могли успеть
-    # отработать другие конкурентные расчёты с тем же source_id, и поздний
-    # повторный запрос к общему реестру мог бы застать УЖЕ ИХ статус, а не
-    # тот, что реально увидела эта попытка (round 1 ревью PR #19, приёмка
-    # FN-26 «два конкурентных запроса не смешивают статусы»).
+    # Статусы, построенные из СОБСТВЕННОГО исхода именно этой попытки
+    # (orbit_fetch.status, swpc_status) — не из общего реестра ни поздним
+    # повторным registry.get() (round 1 ревью), ни через возвращаемое
+    # значение record_success/record_error, которое само строится из
+    # текущего общего состояния и может унаследовать поля чужой,
+    # конкурентной попытки (round 2 ревью PR #19, приёмка FN-26 «два
+    # конкурентных запроса не смешивают статусы»).
     source_status = [
         _status_dict(orbit_fetch.status, config_enabled=True),
         _status_dict(swpc_status, config_enabled=_swpc_config_enabled()),
@@ -660,9 +771,15 @@ def refresh_sources(
             )
             _log("swpc_refresh", outcome=swpc_outcome.outcome)
             swpc_enabled = swpc_cfg.enabled
-        except Exception as exc:  # noqa: BLE001 — см. _build_current_result
+        except Exception as exc:  # noqa: BLE001 — см. _build_current_result;
+            # сообщение маскируется тем же способом (round 2 ревью PR #19) —
+            # оно попадёт в общий реестр, видимый любому вызову
+            # /sources/status.
             registry.record_error(
-                swpc_source.SOURCE_ID, at=moment, message=str(exc), quota_limited=False
+                swpc_source.SOURCE_ID,
+                at=moment,
+                message=sanitize_unexpected_error(exc),
+                quota_limited=False,
             )
             swpc_enabled = True
 
@@ -693,4 +810,5 @@ __all__ = [
     "get_all_source_status",
     "refresh_sources",
     "run_calculation",
+    "sanitize_unexpected_error",
 ]

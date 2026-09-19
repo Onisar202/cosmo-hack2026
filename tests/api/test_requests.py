@@ -385,9 +385,12 @@ def test_unexpected_internal_error_returns_sanitized_message_not_raw_exception_t
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Текст непредвиденного исключения не должен уходить клиенту как есть —
-    он может раскрыть внутренние детали (путь к БД, URL с учётными данными
-    и т.п.). Клиент получает нейтральное сообщение с ``task_id``; полный
-    текст — только в лог сервера (round 1 ревью PR #19)."""
+    он может раскрыть внутренние детали (путь к БД, URL с ключом в
+    query-строке и т.п.). round 1 ревью закрыл утечку в ответ клиенту;
+    round 2 указал, что немаскированный текст всё ещё уходил в лог сервера
+    (main-prompt.md §4 «маскирование на уровне логгера, а не на уровне
+    дисциплины») — секрет обязан отсутствовать И в ответе, И в логе, лог
+    несёт только тип исключения и task_id для сопоставления."""
 
     def failing_run_calculation(*_args: Any, **_kwargs: Any) -> str:
         raise RuntimeError("boom: leaking /var/secret/db-credentials.txt")
@@ -405,5 +408,7 @@ def test_unexpected_internal_error_returns_sanitized_message_not_raw_exception_t
     assert task_id in job["error"]["message"]
 
     logs = capsys.readouterr().err
-    assert "db-credentials" in logs
+    assert "secret" not in logs
+    assert "db-credentials" not in logs
+    assert "RuntimeError" in logs  # тип исключения виден для разбора инцидента
     assert task_id in logs

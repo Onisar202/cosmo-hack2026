@@ -25,7 +25,13 @@ from src.api.schemas import (
     TaskCreatedResponse,
     TaskStatusResponse,
 )
-from src.api.service import ApiError, CalculationError, get_all_source_status, refresh_sources
+from src.api.service import (
+    ApiError,
+    CalculationError,
+    get_all_source_status,
+    refresh_sources,
+    sanitize_unexpected_error,
+)
 from src.api.service import run_calculation as _run_calculation
 from src.store import connect as connect_store
 from src.store import get_result as store_get_result
@@ -62,16 +68,20 @@ def _run_job(task_id: str, payload: CalculationRequest, state: Any) -> None:
         # остаться незамеченной вызывающей стороной — она сохраняется как
         # понятный статус задачи (приёмка FN-26 «статус ошибки понятен»).
         # В отличие от CalculationError, текст ЛЮБОГО непредвиденного
-        # исключения не отдаётся клиенту как есть: он мог бы содержать путь к
-        # файлу БД, детали окружения или другую внутреннюю информацию
-        # (.ai/backend-prompt.md §4 «никаких секретов в логах», тот же
-        # принцип применён здесь к ответу API — round 1 ревью PR #19).
-        # Полный текст уходит только в структурированный лог со сквозным
-        # task_id, клиенту — нейтральное сообщение с тем же task_id для
-        # сопоставления с логом сервера.
+        # исключения не отдаётся клиенту как есть и не пишется в лог как
+        # есть: он мог бы содержать путь к файлу БД, URL с ключом в
+        # query-строке или другую внутреннюю информацию
+        # (.ai/backend-prompt.md §4 «никаких секретов в логах... маскирование
+        # на уровне логгера, а не на уровне дисциплины»). round 1 ревью
+        # закрыл только утечку в ответ клиенту; round 2 указал, что
+        # немаскированный текст всё ещё уходил в лог — здесь используется та
+        # же маскирующая функция, что и для непредвиденных ошибок
+        # src/sources/swpc.py в src/api/service.py, чтобы обе точки не
+        # разошлись в поведении.
+        sanitized = sanitize_unexpected_error(exc)
         print(
             json.dumps(
-                {"event": "job_failed_unexpected", "task_id": task_id, "error": str(exc)},
+                {"event": "job_failed_unexpected", "task_id": task_id, "error": sanitized},
                 ensure_ascii=False,
             ),
             file=sys.stderr,
