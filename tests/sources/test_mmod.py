@@ -54,24 +54,17 @@ def raw_store(tmp_path: Path) -> RawOriginalStore:
 
 
 def test_bundled_file_matches_verified_checksum() -> None:
-    """Бандловая производственная копия (``src/sources/data/``) обязана
-    оставаться байт-в-байт тем же файлом, что проверен и задокументирован в
-    README fixture — расхождение означало бы, что кто-то подменил один
-    экземпляр, не тронув другой."""
+    """Единственная копия файла в репозитории (``src/sources/data/`` — не
+    ``tests/``/``data/``, оба исключены ``.dockerignore``, см. docstring
+    ``src/sources/mmod.py::DEFAULT_DATA_PATH``) обязана оставаться
+    байт-в-байт тем же файлом, что проверен и задокументирован в README
+    fixture (``tests/fixtures/mmod/nasa_meo_leo_forecast_2024/README.md``,
+    хранящем только происхождение/контрольную сумму, не второй экземпляр
+    файла — round 1 ревью PR #31, «diff слишком большой» из-за дублирования
+    строки в двух копиях)."""
     import hashlib
 
     assert hashlib.sha256(REAL_FILE_BYTES).hexdigest() == REAL_FILE_SHA256
-
-
-def test_default_data_path_is_the_real_fixture_copy() -> None:
-    fixture_copy = (
-        Path(__file__).resolve().parent.parent
-        / "fixtures"
-        / "mmod"
-        / "nasa_meo_leo_forecast_2024"
-        / "flux_data.txt"
-    )
-    assert fixture_copy.read_bytes() == REAL_FILE_BYTES
 
 
 def test_fetch_reads_the_bundled_file() -> None:
