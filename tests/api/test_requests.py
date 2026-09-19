@@ -58,9 +58,20 @@ def test_get_result_unknown_id_is_404(app_client: TestClient) -> None:
     assert response.json()["error"]["code"] == "result_not_found"
 
 
-def test_current_mode_full_flow_returns_real_orbit_and_not_implemented_mechanisms(
+def test_current_mode_full_flow_returns_real_orbit_and_stale_space_weather(
     app_client: TestClient,
 ) -> None:
+    """FN-38: пространственная фикстура потока протонов (2024-05-10) реально
+    устарела относительно wall-clock ``now`` этого теста (``app_client`` не
+    позволяет подставить ``now`` — расчёт идёт через полный HTTP-стек), это
+    честно даёт ``status = "stale_data"`` для space_weather, а не
+    ``not_implemented`` — само по себе доказательство приёмки FN-38 п.3
+    («устаревание источника даёт явный статус, а не подмену нулём»),
+    достигнутое реальным прохождением через production API (приёмка п.2).
+    Настоящий счастливый путь ``status = "ok"`` с классификацией по шкале S
+    проверяется отдельно ниже
+    (``test_goes_classification_reaches_ok_status_through_run_calculation``)
+    с явным ``now`` рядом с моментом фикстуры."""
     create = app_client.post("/api/calculations", json=CURRENT_REQUEST)
     assert create.status_code == 202
     task_id = create.json()["task_id"]
@@ -90,7 +101,8 @@ def test_current_mode_full_flow_returns_real_orbit_and_not_implemented_mechanism
     assert body["orbit"]["is_reconstructed"] is True  # фикстура давно устарела
 
     # Manifest — только фактически использованная запись (орбита); поток
-    # протонов получен, но не использован (интерпретация not_implemented).
+    # протонов получен, но не использован (наблюдение критически устарело
+    # относительно wall-clock "now" — status=stale_data ниже).
     assert len(body["data_manifest"]) == 1
     assert body["data_manifest"][0]["record_id"] == body["orbit"]["record_id"]
     assert body["data_manifest"][0]["record_kind"] == "orbital_elements"
@@ -99,11 +111,20 @@ def test_current_mode_full_flow_returns_real_orbit_and_not_implemented_mechanism
     for window in body["windows"]:
         mechanisms = {m["mechanism"]: m for m in window["mechanisms"]}
         assert set(mechanisms) == {"space_weather", "mmod"}
-        for assessment in mechanisms.values():
-            assert assessment["status"] == "not_implemented"
-            assert assessment["max_level"] is None
-            assert assessment["exceedance_hours_by_level"] is None
-            assert assessment["record_ids"] == []
+
+        space_weather = mechanisms["space_weather"]
+        assert space_weather["status"] == "stale_data"
+        assert space_weather["max_level"] is None
+        assert space_weather["exceedance_hours_by_level"] is None
+        assert space_weather["record_ids"] == []
+        assert space_weather["critical_gap"] is True
+
+        mmod = mechanisms["mmod"]
+        assert mmod["status"] == "not_implemented"
+        assert mmod["max_level"] is None
+        assert mmod["exceedance_hours_by_level"] is None
+        assert mmod["record_ids"] == []
+
         assert window["excluded_from_comparison"] is True
         assert window["exclusion_reason"]
 
@@ -206,7 +227,11 @@ def test_swpc_source_failure_does_not_fail_the_job(
     app_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """При отказе одного источника (поток протонов) остальные — орбита,
-    результат в целом — остаются доступны (приёмка FN-26)."""
+    результат в целом — остаются доступны (приёмка FN-26). FN-38, приёмка
+    п.3: таймаут этой самой попытки, при отсутствии ранее сохранённых
+    отсчётов (свежее хранилище ``app_client``), даёт явный
+    ``status = "source_error"`` для space_weather в каждом окне — не
+    благоприятную оценку и не подмену нулём."""
 
     def failing_fetch(url: str, **_kwargs: Any) -> None:
         raise SourceTimeoutError(f"simulated timeout for {url}")
@@ -227,6 +252,15 @@ def test_swpc_source_failure_does_not_fail_the_job(
     )
     assert swpc_status["last_error_message"] is not None
     assert any(w["mechanism"] == "space_weather" for w in result["warnings"])
+
+    for window in result["windows"]:
+        space_weather = next(
+            m for m in window["mechanisms"] if m["mechanism"] == "space_weather"
+        )
+        assert space_weather["status"] == "source_error"
+        assert space_weather["max_level"] is None
+        assert space_weather["exceedance_hours_by_level"] is None
+        assert space_weather["critical_gap"] is True
 
 
 @pytest.mark.parametrize(
@@ -391,9 +425,13 @@ def test_noaa_3day_forecast_is_used_in_windows_and_manifest_when_it_overlaps(
     сохранена (это уже проверяет test_current_mode_full_flow_…), но и
     использована результатом (main-prompt.md §3 «манифест собирается
     фактически использованными записями»). ``mechanisms[*].status`` при
-    этом остаётся ``not_implemented`` — комбинирование с наблюдением GOES
-    в один уровень всё ещё не реализовано (main-prompt.md §2: частичный
-    прогресс не выдаётся за готовую оценку)."""
+    этом — ``stale_data`` (FN-38): наблюдение GOES pfu (фикстура датирована
+    2024-05-10) критически устарело относительно ``now`` этого сценария
+    (2025-01-06), поэтому линия наблюдения не даёт ``max_level``/
+    ``exceedance_hours_by_level`` — но суточная вероятность внешнего
+    прогноза всё равно доходит до notes/record_ids этой же
+    mechanismAssessment (main-prompt.md §2: частичная готовность одной линии
+    не подменяет и не блокирует другую)."""
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("STORE_DB_PATH", str(tmp_path / "store.sqlite3"))
     monkeypatch.setenv("STORE_RAW_DIR", str(tmp_path / "raw"))
@@ -451,7 +489,7 @@ def test_noaa_3day_forecast_is_used_in_windows_and_manifest_when_it_overlaps(
 
     win_a = next(w for w in result["windows"] if w["window_id"] == "win-a")
     space_weather = next(m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather")
-    assert space_weather["status"] == "not_implemented"
+    assert space_weather["status"] == "stale_data"
     assert space_weather["max_level"] is None
     assert space_weather["record_ids"]  # реально использованная запись прогноза
     assert any("20%" in note for note in space_weather["notes"])
@@ -468,6 +506,105 @@ def test_noaa_3day_forecast_is_used_in_windows_and_manifest_when_it_overlaps(
         s for s in result["source_status"] if s["source_id"] == noaa_3day_source.SOURCE_ID
     )
     assert forecast_status["last_success_at"] is not None
+
+    get_settings.cache_clear()
+
+
+def test_goes_classification_reaches_ok_status_through_run_calculation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FN-38, приёмка п.2 и п.5: наблюдение GOES pfu, полученное реальным
+    производственным коннектором (``src.sources.swpc.fetch_and_store``, тот
+    же управляемый шлюз, что и в проде — HTTP-транспорт подменён фикстурой,
+    остальное не заглушено) и сохранённое неизменяемым хранилищем, доходит
+    до классификации по шкале S NOAA и до ``result.windows[*].mechanisms``
+    — не только через доменный юнит-тест
+    (``tests/domain/spaceweather/test_goes_classification.py``), вызывающий
+    ``assess_goes_classification`` напрямую с придуманными отсчётами.
+
+    Фикстура ``integral-protons-1-day.sample.json`` (тот же файл, что и в
+    ``test_current_mode_full_flow_...``) несёт реальную последовательность
+    отсчётов >=10 MeV с 12:00 по 12:25 UTC 2024-05-10: 4.271 (фон),
+    9.845 (фон, на грани порога S1), 15.62 (S1), 22.18 (S1, degraded —
+    yaw_flip), -100000 (отброшен парсером в value=None — пропуск), 31.44
+    (S1). ``now`` зафиксирован сразу после последнего отсчёта — иначе (как
+    в остальных тестах этого файла, где ``now`` — реальное wall-clock время)
+    эта же фикстура читалась бы как критически устаревшая (``stale_data``,
+    см. ``test_current_mode_full_flow_...`` выше)."""
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("STORE_DB_PATH", str(tmp_path / "store.sqlite3"))
+    monkeypatch.setenv("STORE_RAW_DIR", str(tmp_path / "raw"))
+    get_settings.cache_clear()
+
+    monkeypatch.setattr(orbit_source, "fetch_current_tle", lambda **_kwargs: orbit_tle_bytes())
+    monkeypatch.setattr(
+        swpc_source,
+        "fetch",
+        lambda url, **_kwargs: HttpFetchResult(
+            status_code=200, body=swpc_sample_bytes(), url=url, elapsed_seconds=0.001
+        ),
+    )
+
+    settings = get_settings()
+    ensure_store_ready(settings)
+    raw_store = RawOriginalStore(settings.store_raw_dir)
+    registry = SourceStatusRegistry()
+
+    request = CalculationRequest(
+        mode="current",
+        start_at=datetime(2024, 5, 10, 12, 0, tzinfo=timezone.utc),
+        duration_hours=1,
+        search_window_hours=4,
+    )
+    result_id = _run_calculation(
+        request,
+        settings=settings,
+        raw_store=raw_store,
+        registry=registry,
+        # 1 минута после последнего отсчёта фикстуры (12:25) — источник
+        # заведомо свежий (< critical_staleness_seconds=3600s из
+        # sources.yaml), но окно 12:00-13:00 всё равно покрыто наблюдением
+        # только частично (реальность: наблюдение не может знать будущее).
+        now=datetime(2024, 5, 10, 12, 26, tzinfo=timezone.utc),
+    )
+
+    conn = connect_store(settings.store_db_path)
+    try:
+        result = store_get_result(conn, result_id)
+    finally:
+        conn.close()
+    assert result is not None
+
+    win_a = next(w for w in result["windows"] if w["window_id"] == "win-a")
+    space_weather = next(m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather")
+    assert space_weather["status"] == "ok"
+    assert space_weather["max_level"] == "S1"  # 15.62/22.18/31.44 pfu >= 10, < 100
+    assert space_weather["exceedance_hours_by_level"]["S1"] > 0
+    assert space_weather["exceedance_hours_by_level"]["S2"] == 0.0
+    assert space_weather["exceedance_hours_by_level"]["S3"] == 0.0
+    # Окно длиннее покрытого наблюдением отрезка (1ч окно, ~21 минута
+    # валидного наблюдения от 12:00 до "now") — частичное покрытие остаётся
+    # видимым, а не подменяется полным (main-prompt.md §2).
+    assert 0.0 < space_weather["coverage_fraction"] < 1.0
+    assert space_weather["critical_gap"] is True
+    assert space_weather["record_ids"]
+
+    # Записи наблюдения GOES, реально использованные классификацией,
+    # доходят до манифеста результата (main-prompt.md §3).
+    goes_manifest_entries = [
+        m for m in result["data_manifest"] if m["source_id"] == swpc_source.SOURCE_ID
+    ]
+    assert goes_manifest_entries
+    assert {m["record_id"] for m in goes_manifest_entries} == set(space_weather["record_ids"])
+    assert all(m["record_kind"] == "observation" for m in goes_manifest_entries)
+
+    # win-b (16:00-17:00) целиком в будущем относительно "now"=12:26 —
+    # наблюдение по определению не покрывает ещё не наступившее время.
+    win_b = next(w for w in result["windows"] if w["window_id"] == "win-b")
+    space_weather_b = next(m for m in win_b["mechanisms"] if m["mechanism"] == "space_weather")
+    assert space_weather_b["status"] == "missing_data"
+    assert space_weather_b["max_level"] is None
+    assert space_weather_b["critical_gap"] is True
 
     get_settings.cache_clear()
 

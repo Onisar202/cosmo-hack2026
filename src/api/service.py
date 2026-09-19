@@ -56,12 +56,26 @@ from src.domain.spaceweather.external_forecast import (
     assess_external_forecast,
     external_forecast_days_from_records,
 )
+from src.domain.spaceweather.goes_classification import (
+    GoesClassificationAssessment,
+    GoesPfuSample,
+    assess_goes_classification,
+    goes_samples_from_records,
+    to_mechanism_assessment_dict,
+)
 from src.domain.windows import WindowCandidate, excluded_windows, recommend
 from src.sources import noaa_3day_forecast as noaa_3day_source
 from src.sources import orbit
 from src.sources import swpc as swpc_source
 from src.sources.status import SourceStatus, SourceStatusRegistry, effective_status
-from src.store import RawOriginalStore, get_latest_record, insert_record, select_as_of, store_result
+from src.store import (
+    RawOriginalStore,
+    get_latest_record,
+    insert_record,
+    select_as_of,
+    select_records_by_source,
+    store_result,
+)
 from src.store.schema import connect as connect_store
 
 OrbitOutcome = Literal[
@@ -383,42 +397,13 @@ def _noaa_3day_attempt_status(
     return registry.get(noaa_3day_source.SOURCE_ID)
 
 
-def _not_implemented_mechanism(
-    mechanism: Literal["space_weather", "mmod"],
-    *,
-    extra_notes: list[str] | None = None,
-    extra_record_ids: list[str] | None = None,
-) -> dict[str, Any]:
+def _not_implemented_mechanism(mechanism: Literal["mmod"]) -> dict[str, Any]:
     """Заглушка ``mechanismAssessment`` для механизма без готовой пороговой
-    интерпретации (main-prompt.md §11: комбинирование наблюдения и внешнего
-    прогноза в один уровень/exceedance ещё не реализовано).
-
-    ``extra_notes``/``extra_record_ids`` (FN-31) — реальные, уже полученные
-    входные данные, которые ЭТА версия сервиса умеет показать без готовой
-    пороговой логики: суточная вероятность S1+ NOAA 3-Day Forecast для
-    конкретного окна (``assess_external_forecast``). ``status`` остаётся
-    ``not_implemented``, а ``critical_gap``/``coverage_fraction`` — ``True``/
-    ``0.0`` как и раньше: они описывают полноту данных ДЛЯ ГОТОВОЙ ОЦЕНКИ
-    механизма в целом (наблюдение + внешний прогноз главной формулой §11), а
-    не полноту одной лишь линии внешнего прогноза — наблюдение GOES pfu всё
-    ещё не входит ни в один расчёт уровня (main-prompt.md §2: не подменять
-    частичный прогресс благоприятной/готовой на вид оценкой). ``notes`` и
-    ``record_ids`` контрактом не ограничены статусом ``not_implemented``
-    (contracts/result.schema.json → mechanismAssessment), поэтому реальная
-    информация, полученная и сохранённая этим сервисом, доходит до клиента
-    уже сейчас — О4 «от предупреждения — к значению и первоисточнику».
+    интерпретации (main-prompt.md §11) — сейчас только MMOD (Механизм 2,
+    зона 2): ``src/domain/mmod`` ещё не реализован. Механизм 1
+    (``space_weather``) с FN-38 больше не использует эту заглушку — см.
+    :func:`_space_weather_mechanism`.
     """
-    label = (
-        "космической погоды (main-prompt.md §11, Механизм 1)"
-        if mechanism == "space_weather"
-        else "MMOD (main-prompt.md §11, Механизм 2)"
-    )
-    notes = [
-        f"Интерпретация механизма {label} не реализована в этой версии "
-        "сервиса — оценка не имитируется готовым значением."
-    ]
-    if extra_notes:
-        notes.extend(extra_notes)
     return {
         "mechanism": mechanism,
         "status": "not_implemented",
@@ -426,9 +411,43 @@ def _not_implemented_mechanism(
         "exceedance_hours_by_level": None,
         "coverage_fraction": 0.0,
         "critical_gap": True,
-        "notes": notes,
-        "record_ids": list(extra_record_ids) if extra_record_ids else [],
+        "notes": [
+            "Интерпретация механизма MMOD (main-prompt.md §11, Механизм 2) не "
+            "реализована в этой версии сервиса — оценка не имитируется готовым "
+            "значением."
+        ],
+        "record_ids": [],
     }
+
+
+def _space_weather_mechanism(
+    goes_assessment: GoesClassificationAssessment,
+    *,
+    forecast_notes: list[str],
+    forecast_record_ids: list[str],
+) -> dict[str, Any]:
+    """Собирает единую ``mechanismAssessment`` (``mechanism = "space_weather"``)
+    из двух раздельных, независимо полученных линий Механизма 1 (FN-38):
+
+    - наблюдение GOES pfu (:func:`assess_goes_classification`) — несёт
+      ``status``/``max_level``/``exceedance_hours_by_level``/
+      ``coverage_fraction``/``critical_gap``, единственный источник этих
+      полей (main-prompt.md §11 — уровни шкалы S считаются только по
+      наблюдению, суточная вероятность внешнего прогноза не даёт
+      длительности превышения, см. ``external_forecast.py``);
+    - суточная вероятность S1+ NOAA 3-Day Forecast (FN-31,
+      ``assess_external_forecast``) — только ``notes``/``record_ids``,
+      добавочно, без влияния на статус/уровень/пробел этого механизма.
+
+    Контракт допускает ровно одну ``mechanismAssessment`` на механизм на
+    окно (contracts/result.schema.json), поэтому обе линии одного и того же
+    Механизма 1 обязаны сойтись в один объект здесь, а не остаться каждая
+    в своей заглушке, как до FN-38.
+    """
+    payload = to_mechanism_assessment_dict(goes_assessment)
+    payload["notes"] = [*payload["notes"], *forecast_notes]
+    payload["record_ids"] = sorted(set(payload["record_ids"]) | set(forecast_record_ids))
+    return payload
 
 
 def _status_dict(status: SourceStatus, *, config_enabled: bool) -> dict[str, Any]:
@@ -476,13 +495,26 @@ def _noaa_3day_config_enabled() -> bool:
         return True
 
 
+def _swpc_critical_staleness_seconds() -> float:
+    """Порог критического устаревания наблюдения GOES pfu из ``sources.yaml``
+    (main-prompt.md §7 «пороги ... в конфиге, а не в коде»). Отдельная
+    функция (не переиспользует локальную ``swpc_cfg`` из
+    :func:`_build_current_result`), потому что та переменная не определена,
+    если ``load_source_config()`` упал внутри try/except выше — вызывающая
+    сторона всё равно должна знать порог, чтобы оценить свежесть УЖЕ
+    сохранённых записей."""
+    try:
+        return swpc_source.load_source_config().critical_staleness_seconds
+    except Exception:  # noqa: BLE001 — см. _swpc_config_enabled выше.
+        return 3600.0
+
+
 def _window(
     window_id: str,
     start_at: datetime,
     duration_hours: float,
     *,
-    space_weather_notes: list[str] | None = None,
-    space_weather_record_ids: list[str] | None = None,
+    space_weather: dict[str, Any],
 ) -> dict[str, Any]:
     """Строит окно без ``excluded_from_comparison``/``exclusion_reason`` —
     эти два поля решает правило доминирования v2 (FN-34,
@@ -496,11 +528,7 @@ def _window(
         "end_at": iso_utc(end_at),
         "duration_hours": duration_hours,
         "mechanisms": [
-            _not_implemented_mechanism(
-                "space_weather",
-                extra_notes=space_weather_notes,
-                extra_record_ids=space_weather_record_ids,
-            ),
+            space_weather,
             _not_implemented_mechanism("mmod"),
         ],
         "lighting": {"requested": False, "status": "not_requested", "note": None},
@@ -692,12 +720,13 @@ def _build_current_result(
         fetch_attempt_id=swpc_attempt_id,
         **log_ctx,
     )
-    if swpc_outcome is None or swpc_outcome.outcome.startswith("error_"):
+    swpc_source_unavailable = swpc_outcome is None or swpc_outcome.outcome.startswith("error_")
+    if swpc_source_unavailable:
         failure_detail = swpc_outcome.message if swpc_outcome is not None else swpc_unexpected_error
         message = (
-            f"Получение потока протонов не удалось: {failure_detail}. "
-            "Интерпретация механизма пока не реализована в любом случае, но "
-            "провенанс отказа источника сохранён отдельно от оценки."
+            f"Получение потока протонов не удалось: {failure_detail}. Ранее "
+            "сохранённые отсчёты (если есть) всё равно используются ниже — отказ "
+            "этой попытки не означает отсутствие любых данных для классификации."
         )
         outcome_code = swpc_outcome.outcome if swpc_outcome is not None else "error_unexpected"
         warnings.append(
@@ -710,6 +739,47 @@ def _build_current_result(
                 "fetch_attempt_id": swpc_attempt_id,
                 "window_id": None,
             }
+        )
+
+    # Классификация наблюдения GOES pfu по шкале S NOAA (FN-38, S2-03).
+    # published_at этой линии всегда null (см. src/sources/swpc.py) — select_as_of
+    # никогда бы не вернул ни одной записи для неё, поэтому здесь
+    # select_records_by_source (без фильтра по published_at/replay_eligible);
+    # сама функция классификации оценивает полноту/устаревание по observed_at
+    # каждой записи (main-prompt.md §1).
+    goes_records: list[dict[str, Any]] = []
+    goes_samples: list[GoesPfuSample] = []
+    try:
+        goes_records = select_records_by_source(
+            conn, source_id=swpc_source.SOURCE_ID, record_kind="observation"
+        )
+        goes_samples = goes_samples_from_records(goes_records)
+    except Exception as exc:  # noqa: BLE001 — повреждённая сохранённая запись не
+        # должна обрушивать расчёт целиком; окна ниже просто не увидят
+        # наблюдения (main-prompt.md §2 — не благоприятная замена, отсутствие
+        # данных остаётся видимым через notes/critical_gap ниже).
+        _log(
+            "goes_classification_selection_failed",
+            error=sanitize_unexpected_error(exc),
+            **log_ctx,
+        )
+        goes_records = []
+        goes_samples = []
+
+    goes_records_by_id = {str(r["record_id"]): r for r in goes_records}
+    goes_critical_staleness_seconds = _swpc_critical_staleness_seconds()
+
+    def _window_goes_assessment(
+        start_at: datetime, duration_hours: float
+    ) -> GoesClassificationAssessment:
+        end_at = start_at + timedelta(hours=duration_hours)
+        return assess_goes_classification(
+            goes_samples,
+            window_start=start_at,
+            window_end=end_at,
+            now=now,
+            critical_staleness_seconds=goes_critical_staleness_seconds,
+            source_currently_unavailable=swpc_source_unavailable,
         )
 
     # NOAA 3-Day Forecast (S1+) — FN-31: отдельная от наблюдения выше линия
@@ -804,34 +874,59 @@ def _build_current_result(
         )
         return list(assessment.notes), list(assessment.record_ids)
 
-    win_a_notes, win_a_record_ids = _window_forecast_assessment(
+    win_a_forecast_notes, win_a_forecast_record_ids = _window_forecast_assessment(
         request.start_at, request.duration_hours
     )
-    win_b_notes, win_b_record_ids = _window_forecast_assessment(
+    win_b_forecast_notes, win_b_forecast_record_ids = _window_forecast_assessment(
         request.search_end_at, request.duration_hours
+    )
+
+    win_a_goes = _window_goes_assessment(request.start_at, request.duration_hours)
+    win_b_goes = _window_goes_assessment(request.search_end_at, request.duration_hours)
+
+    win_a_space_weather = _space_weather_mechanism(
+        win_a_goes,
+        forecast_notes=win_a_forecast_notes,
+        forecast_record_ids=win_a_forecast_record_ids,
+    )
+    win_b_space_weather = _space_weather_mechanism(
+        win_b_goes,
+        forecast_notes=win_b_forecast_notes,
+        forecast_record_ids=win_b_forecast_record_ids,
     )
 
     windows = [
         _window(
             "win-a", request.start_at, request.duration_hours,
-            space_weather_notes=win_a_notes, space_weather_record_ids=win_a_record_ids,
+            space_weather=win_a_space_weather,
         ),
         _window(
             "win-b", request.search_end_at, request.duration_hours,
-            space_weather_notes=win_b_notes, space_weather_record_ids=win_b_record_ids,
+            space_weather=win_b_space_weather,
         ),
     ]
     recommendation = _apply_window_dominance(windows)
 
-    forecast_manifest_entries = [
-        {
-            "record_id": record_id,
-            "source_id": noaa_3day_source.SOURCE_ID,
-            "source_version": forecast_records_by_id[record_id]["source_version"],
-            "record_kind": "forecast",
-        }
-        for record_id in sorted(set(win_a_record_ids) | set(win_b_record_ids))
-    ]
+    # Манифест механизма 1: объединяет обе его линии (наблюдение GOES pfu и
+    # суточный прогноз NOAA 3-Day) — источник каждой конкретной записи
+    # определяется по тому, в каком из двух словарей найден её record_id,
+    # id обеих линий — независимо генерируемые UUID хранилища, пересечься
+    # не могут.
+    space_weather_used_ids = sorted(
+        set(win_a_space_weather["record_ids"]) | set(win_b_space_weather["record_ids"])
+    )
+    extra_manifest_entries = []
+    for record_id in space_weather_used_ids:
+        source_record = goes_records_by_id.get(record_id) or forecast_records_by_id.get(record_id)
+        assert source_record is not None, f"record {record_id!r} used but not selected above"
+        extra_manifest_entries.append(
+            {
+                "record_id": record_id,
+                "source_id": source_record["source_id"],
+                "source_version": source_record["source_version"],
+                "record_kind": source_record["record_kind"],
+            }
+        )
 
     # Статусы, построенные из СОБСТВЕННОГО исхода именно этой попытки
     # (orbit_fetch.status, swpc_status, noaa_3day_status) — не из общего
@@ -847,18 +942,21 @@ def _build_current_result(
     ]
 
     limitations = [
-        "Интерпретация обоих обязательных механизмов воздействия (космическая "
-        "погода, MMOD) не реализована в этой версии сервиса — этот эндпоинт "
-        "получает и сохраняет реальные исходные данные (орбитальные элементы "
-        "МКС, при доступности источника — поток протонов, и суточную "
-        "вероятность S1+ NOAA 3-Day Forecast), но не вычисляет уровень риска.",
-        "Суточная вероятность S1+ NOAA 3-Day Forecast (FN-31) показана в "
-        "notes/record_ids каждого окна как есть, без деления по часам, "
-        "умножения на длительность окна или суммирования через полночь — но "
-        "не создаёт оценку уровня механизма: комбинирование с наблюдением "
-        "GOES pfu (пороги S1/S2/S3, main-prompt.md §11) ещё не реализовано, "
-        "поэтому mechanisms[*].status для space_weather остаётся "
-        "not_implemented.",
+        "Интерпретация Механизма 2 (MMOD) не реализована в этой версии "
+        "сервиса — src/domain/mmod ещё не существует, mechanisms[*].status "
+        "для mmod остаётся not_implemented.",
+        "Механизм 1 (космическая погода) объединяет две независимо "
+        "получаемые линии в одну mechanismAssessment (FN-38): наблюдение "
+        "GOES pfu по шкале S NOAA (main-prompt.md §11) даёт status/max_level/"
+        "exceedance_hours_by_level/coverage_fraction/critical_gap; суточная "
+        "вероятность S1+ NOAA 3-Day Forecast (FN-31) добавляется только в "
+        "notes/record_ids как есть, без деления по часам, умножения на "
+        "длительность окна или суммирования через полночь, и не называется "
+        "вероятностью ВКД.",
+        "Наблюдение GOES pfu не покрывает будущее: coverage_fraction/"
+        "critical_gap механизма space_weather отражают только уже прошедшую "
+        "(или самую недавнюю известную) относительно момента расчёта часть "
+        "окна, а не весь горизонт окна ВКД.",
         "Траектория станции рассчитана по SGP4 на предоставленных элементах "
         "(см. orbit.elements_age_hours/is_reconstructed).",
     ]
@@ -883,7 +981,7 @@ def _build_current_result(
                 "source_version": orbit_fetch.source_version,
                 "record_kind": "orbital_elements",
             },
-            *forecast_manifest_entries,
+            *extra_manifest_entries,
         ],
         "orbit": {
             "source": "celestrak",

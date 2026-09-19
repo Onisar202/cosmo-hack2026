@@ -345,6 +345,37 @@ def get_latest_record(
     return payload
 
 
+def select_records_by_source(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    record_kind: str,
+    limit: int = 2000,
+) -> list[dict[str, Any]]:
+    """Возвращает до ``limit`` последних (по ``observed_at``) записей данного
+    источника и вида, без фильтра по ``published_at``/``replay_eligible``.
+
+    Отдельная от :func:`select_as_of` функция: та обслуживает строгий
+    historical replay и требует известный, не позже отсечения
+    ``published_at`` — источники без времени публикации (например
+    ``noaa-swpc-proton-flux``, см. ``src/sources/swpc.py``) никогда не
+    прошли бы её фильтр ни при каком ``as_of``. Здесь вызывающая сторона
+    сама оценивает полноту/устаревание по ``observed_at`` каждой записи
+    (например :func:`src.domain.spaceweather.goes_classification.assess_goes_classification`)
+    — не то же самое, что «пригодно для replay».
+    """
+    rows = conn.execute(
+        """
+        SELECT payload_json FROM source_records
+        WHERE source_id = ? AND record_kind = ?
+        ORDER BY observed_at DESC
+        LIMIT ?
+        """,
+        (source_id, record_kind, limit),
+    ).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
 def select_as_of(
     conn: sqlite3.Connection,
     as_of: datetime,

@@ -254,6 +254,27 @@ space_weather:
       # «спокойно» (main-prompt.md §2, приёмка FN-22).
       critical_staleness_seconds: 3600
     enabled: true
+    classification_thresholds: >-
+      FN-38: уровни S1/S2/S3 шкалы S NOAA для этого измерения (>=10 MeV,
+      pfu) — S1: value_pfu >= 10; S2: value_pfu >= 100; S3: value_pfu >=
+      1000; ниже 10 — фон. Таблица зафиксирована постановкой (main-prompt.md
+      §11, «Механизм 1. Радиационная обстановка», шкала S NOAA) и не
+      подбирается по данным этой сессии; реализация классификации —
+      src/domain/spaceweather/goes_classification.py
+      (THRESHOLDS_PFU/classify_level), пороги там дублируют эту запись, а не
+      заменяют её собой (main-prompt.md §7 «пороги ... в конфиге, а не в
+      коде» — здесь единственный источник истины о происхождении значений).
+    implementation_note: >-
+      Получение и нормализация (FN-22) — src/sources/swpc.py. Интерпретация
+      для окна ВКД (FN-38) — src/domain/spaceweather/goes_classification.py.
+      Подключено к src/api/service.py: получается в каждом mode=current
+      расчёте и в /api/sources/refresh; сохранённые отсчёты выбираются
+      через src/store/records.py::select_records_by_source (published_at у
+      этой линии всегда null — select_as_of им не подходит) и передаются в
+      assess_goes_classification для каждого окна — mechanisms[*].status
+      для space_weather несёт реальный исход (ok/missing_data/stale_data/
+      source_error), а не not_implemented; использованные записи — в
+      data_manifest.
 
   # --- Строгий прогноз из прошлого по космопогоде — задача FN-23 (S1-05). --
   # Доказательство пригодности архива, не готовый production-коннектор (см.

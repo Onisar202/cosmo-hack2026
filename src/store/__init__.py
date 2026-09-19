@@ -17,6 +17,7 @@ from src.store.records import (
     get_record,
     insert_record,
     select_as_of,
+    select_records_by_source,
 )
 from src.store.results import (
     ManifestVerificationError,
@@ -40,5 +41,6 @@ __all__ = [
     "insert_record",
     "list_results",
     "select_as_of",
+    "select_records_by_source",
     "store_result",
 ]

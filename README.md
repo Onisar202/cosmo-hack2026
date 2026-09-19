@@ -123,7 +123,7 @@ tests/api/test_isolation.py::test_concurrent_swpc_success_and_failure_do_not_con
 tests/api/test_requests.py::test_create_calculation_returns_202_pending PASSED
 tests/api/test_requests.py::test_get_calculation_status_unknown_task_is_404 PASSED
 tests/api/test_requests.py::test_get_result_unknown_id_is_404 PASSED
-tests/api/test_requests.py::test_current_mode_full_flow_returns_real_orbit_and_not_implemented_mechanisms PASSED
+tests/api/test_requests.py::test_current_mode_full_flow_returns_real_orbit_and_stale_space_weather PASSED
 tests/api/test_requests.py::test_historical_modes_fail_with_clear_not_implemented[historical_analysis] PASSED
 tests/api/test_requests.py::test_historical_modes_fail_with_clear_not_implemented[historical_forecast] PASSED
 tests/api/test_requests.py::test_orbit_source_failure_fails_the_job_not_a_fake_success PASSED
@@ -402,11 +402,34 @@ NOAA SWPC, интегральный поток протонов `>=10 МэВ` (�
 исходные прогнозные дни, их пересечение с окном и явная оговорка «не
 вероятность ВКД» доходят до `mechanisms[*].notes`/`record_ids` (для
 `space_weather`) и до `result.data_manifest`, когда прогноз пересекается с
-окном. `mechanisms[*].status` при этом остаётся `not_implemented` —
-контракт не ограничивает `notes`/`record_ids` статусом, но полноценная
-пороговая оценка требует ещё не реализованной интерпретации самого
-наблюдения GOES (main-prompt.md §11). Тест сквозного пути —
+окном. С FN-38 (см. ниже) `mechanisms[*].status` для `space_weather` несёт
+реальный исход (`ok`/`missing_data`/`stale_data`/`source_error`) — уровень/
+`exceedance_hours_by_level` при этом берёт только линия наблюдения GOES pfu,
+суточная вероятность остаётся вспомогательной (только `notes`/
+`record_ids`). Тест сквозного пути —
 `tests/api/test_requests.py::test_noaa_3day_forecast_is_used_in_windows_and_manifest_when_it_overlaps`.
+
+**Наблюдение GOES pfu подключено как классификатор Механизма 1 (FN-38,
+S2-03)** — закрывает разрыв, выявленный при подготовке FN-37:
+`src/domain/spaceweather/goes_classification.py` классифицирует уже
+сохранённые отсчёты `noaa-swpc-proton-flux` (`src/sources/swpc.py`, FN-22)
+по шкале S NOAA (пороги — `.ai/main-prompt.md` §11, зеркалированы в
+`sources.yaml` → `noaa-swpc-proton-flux` → `classification_thresholds` для
+прослеживаемости происхождения). `src/api/service.py` выбирает записи через
+новую `src/store/records.py::select_records_by_source` (`published_at` этой
+линии всегда `null` — `select_as_of` ей не подходит), считает
+покрытие/`exceedance_hours_by_level`/`critical_gap` для каждого окна и
+объединяет результат с заметками суточного прогноза в одну
+`mechanismAssessment`. Наблюдение принципиально не покрывает будущее:
+`coverage_fraction` считается только по отрезку окна до момента расчёта.
+missing/stale/429/timeout дают явный `status` (`missing_data`/`stale_data`/
+`source_error`) без подстановки нуля или фонового уровня. Тесты: доменные
+границы S0/S1/S2/S3 и недоступность источника —
+`tests/domain/spaceweather/test_goes_classification.py`; реальный проход
+через продакшен-API (не только доменный юнит-тест) —
+`tests/api/test_requests.py::test_goes_classification_reaches_ok_status_through_run_calculation`
+(happy path) и `test_swpc_source_failure_does_not_fail_the_job`
+(`source_error`).
 
 **Известное ограничение этой сессии.** Сетевой доступ к
 `services.swpc.noaa.gov`/`www.ngdc.noaa.gov` был заблокирован
@@ -567,24 +590,25 @@ shapes для S1-07»; тонкие роутеры — `src/api/routes.py`, вс
   принудительное обновление и статусы источников (`celestrak-gp`,
   `noaa-swpc-proton-flux`, `noaa-swpc-3day-forecast` — FN-31).
 
-**Объём этой задачи — API и хранение, не интерпретация механизмов.**
-`src/domain/spaceweather` реализует пока только `external_forecast.py`
-(FN-31: сопоставление суточной вероятности S1+ NOAA 3-Day с окном ВКД, без
-собственного уровня/порога); `src/domain/mmod` реализует
-геометро-кинематическую часть Механизма 2 (экранирование Землёй,
-относительная скорость встречи, `effective_flux_ratio` — задача FN-32,
-`docs/mechanisms.md` §11), но ещё не подключён к этому API/пайплайну окон
-(интерпретация `ratio_to_background`/порогов 1.2/2 остаётся заблокирована,
-см. §11.3, и не имеет назначенной задачи). Ни одна из двух линий пока не
-даёт полноценный уровень механизма — main-prompt.md §11 требует
-комбинировать наблюдение (GOES pfu) и внешний прогноз (NOAA S1+) в единую
-пороговую оценку, а интерпретация самого наблюдения ещё не реализована —
-поэтому в `mode=current` каждое окно по-прежнему несёт
-`mechanisms[*].status = "not_implemented"` для обоих обязательных
-механизмов — контракт прямо предусматривает это значение для «механизм ещё
-не реализован (или не подключён), не имитируется готовым»
-(`contracts/result.schema.json`, демонстрация —
-`contracts/fixtures/incomplete.json`). При этом:
+**Механизм 1 (космическая погода) реализован и подключён (FN-38, S2-03);
+Механизм 2 (MMOD) — ещё нет.** `src/domain/spaceweather` несёт две линии:
+`external_forecast.py` (FN-31: сопоставление суточной вероятности S1+ NOAA
+3-Day с окном ВКД, без собственного уровня/порога) и
+`goes_classification.py` (FN-38: классификация наблюдения GOES pfu по
+шкале S NOAA — единственный источник `max_level`/
+`exceedance_hours_by_level`/`coverage_fraction`/`critical_gap` для этого
+механизма). `src/domain/mmod` реализует геометро-кинематическую часть
+Механизма 2 (экранирование Землёй, относительная скорость встречи,
+`effective_flux_ratio` — задача FN-32, `docs/mechanisms.md` §11), но ещё не
+подключён к этому API/пайплайну окон (интерпретация
+`ratio_to_background`/порогов 1.2/2 остаётся заблокирована, см. §11.3, и не
+имеет назначенной задачи) — поэтому в `mode=current` каждое окно
+по-прежнему несёт `mechanisms[*].status = "not_implemented"` для `mmod`
+(контракт прямо предусматривает это значение для «механизм ещё не
+реализован (или не подключён), не имитируется готовым»,
+`contracts/result.schema.json`, демонстрация —
+`contracts/fixtures/incomplete.json`), а для `space_weather` — реальный
+исход `ok`/`missing_data`/`stale_data`/`source_error`. При этом:
 
 - орбитальные элементы МКС реально получены с CelesTrak, сохранены в
   хранилище и участвуют в расчёте (SGP4-распространение по сетке текущего
@@ -593,26 +617,38 @@ shapes для S1-07»; тонкие роутеры — `src/api/routes.py`, вс
   `result.data_manifest` содержит эту фактически использованную запись
   (main-prompt.md §3 «манифест собирается фактически использованными
   записями»);
-  поток протонов NOAA SWPC при доступности тоже получается и сохраняется
-  (виден в `source_status`), но не входит в манифест: ни одна интерпретация
-  наблюдения пока его не использует;
-- **суточная вероятность S1+ NOAA 3-Day Forecast (FN-31), напротив, уже
-  используется**, а не только получается: для каждого окна
+- **наблюдение GOES pfu (FN-38) классифицируется по шкале S NOAA и входит
+  в манифест, когда фактически использовано**: для каждого окна
+  `assess_goes_classification` берёт уже сохранённые отсчёты
+  `noaa-swpc-proton-flux` (выборка — новая
+  `src/store/records.py::select_records_by_source`, без фильтра по
+  `published_at`, которого у этой линии нет вовсе), строит покрытие/
+  `exceedance_hours_by_level`/`critical_gap` за отрезок окна до момента
+  расчёта (наблюдение не покрывает будущее) и попадает в
+  `mechanisms[*].record_ids`/`result.data_manifest`, когда `status = "ok"`;
+  устаревание/отказ источника/пустое окно (в т.ч. окно целиком в будущем)
+  дают явный `missing_data`/`stale_data`/`source_error` без подстановки
+  фонового уровня — main-prompt.md §2, приёмка FN-38 п.3;
+- **суточная вероятность S1+ NOAA 3-Day Forecast (FN-31)** остаётся
+  вспомогательной линией того же механизма: для каждого окна
   `assess_external_forecast` сопоставляет реально сохранённые (через
   `select_as_of`) прогнозные дни с границами окна, и результат — исходные
   дни, их пересечение с окном, явная оговорка «не вероятность ВКД» —
-  попадает в `mechanisms[*].notes`/`record_ids` окна (для `space_weather`)
-  и в `result.data_manifest`, хотя `status` остаётся `not_implemented`
-  (contracts/result.schema.json не ограничивает `notes`/`record_ids`
-  статусом — О4 «видно, что прогнозировалось» реализуется уже сейчас, без
-  готовой пороговой логики);
-- `recommendation.status = "all_windows_excluded"` всегда для `current` в
-  этой версии — оба окна исключены критическим пробелом по обоим
-  механизмам (main-prompt.md §11, правило предпочтения окон, п.1), а не
-  потому что «в окне спокойно»; с FN-34 (S2-04) это уже не отдельная
+  добавляется в те же `mechanisms[*].notes`/`record_ids` окна (для
+  `space_weather`) и в `result.data_manifest`, но не влияет на
+  `status`/`max_level`/`exceedance_hours_by_level`/`critical_gap` — их даёт
+  только линия наблюдения выше (contracts/result.schema.json не
+  ограничивает `notes`/`record_ids` статусом — О4 «видно, что
+  прогнозировалось» реализуется независимо от готовности пороговой линии);
+- `recommendation.status = "all_windows_excluded"` для `current` в этой
+  версии сохраняется на практике для любого реалистичного окна ВКД (≥1ч):
+  MMOD несёт критический пробел безусловно (`not_implemented`), а
+  Механизм 1 почти всегда тоже — наблюдение GOES pfu не может покрыть
+  будущую часть окна (main-prompt.md §11, правило предпочтения окон, п.1),
+  а не потому что «в окне спокойно»; с FN-34 (S2-04) это не отдельная
   захардкоженная константа, а вывод общего правила доминирования v2
-  (`src/domain/windows`), готового подключить настоящие оценки механизмов
-  зон 2/3 без изменений в `src/api/service.py`;
+  (`src/domain/windows`), готового подключить настоящие оценки MMOD зоны 2
+  без изменений в `src/api/service.py`;
 - отказ источника потока протонов не роняет расчёт и не подменяется
   благоприятной оценкой (main-prompt.md §2, приёмка FN-26 «при отказе
   одного источника остальные доступны») — он остаётся виден в
