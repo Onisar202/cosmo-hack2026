@@ -811,18 +811,19 @@ source_id, relevant_message_types)` — обязательный (без умо�
 отчёта из покрытия целиком — окно внутри него получает `INSUFFICIENT_DATA`
 через обычный `critical_gap`, а не тихо остаётся «полностью прочитанным».
 
-**Покрытие для уже пройденного `as_of` закреплено навсегда, за конкретным
-расчётом** (round 4/6 ревью PR #37). Production orchestration копит отчёты о
-загрузке по мере того, как архив дозагружается — по любому поводу, не
-обязательно ради конкретного `as_of`. Без дополнительной меры карта покрытия
-для уже вычисленного в прошлом `historical_forecast` могла бы задним числом
-стать полнее и превратить `INSUFFICIENT_DATA` в `NO_EVENT_DETECTED` — то
-есть результат уже случившегося строгого прогноза из прошлого незаметно
-менялся бы от того, что произошло (было догружено) СЕГОДНЯ (main-prompt.md
-§3: «сохранённый результат неизменяем»). Поэтому склейка для входа
-`assess_archive_window` идёт не напрямую через `merged_ingested_intervals`
-(его докстринг явно предупреждает об этом), а через единственную
-задокументированную точку сборки:
+**Вход для уже пройденного `as_of` закреплён навсегда одним снимком — записи
+И покрытие вместе, за конкретным расчётом** (round 4/6/7 ревью PR #37).
+Production orchestration копит и записи, и отчёты о загрузке по мере того,
+как архив дозагружается — по любому поводу, не обязательно ради конкретного
+`as_of`. Без дополнительной меры вход уже вычисленного в прошлом
+`historical_forecast` мог бы задним числом стать полнее и изменить оценку —
+то есть результат уже случившегося строгого прогноза из прошлого незаметно
+менялся бы от того, что произошло (было загружено) СЕГОДНЯ (main-prompt.md
+§3: «сохранённый результат неизменяем»). Поэтому вход для
+`assess_archive_window` идёт не напрямую через `select_as_of`/
+`merged_ingested_intervals` (докстринг `merged_ingested_intervals` явно
+предупреждает об этом), а через единственную задокументированную точку
+сборки:
 
 ```python
 from src.sources.archive_ingest import assemble_historical_forecast_input
@@ -830,7 +831,7 @@ from src.sources.archive_ingest import assemble_historical_forecast_input
 inputs = assemble_historical_forecast_input(
     conn, reports, computation_id=computation_id, as_of=as_of, strategy=strategy,
 )
-# {source_id: HistoricalForecastInput(records=..., ingested_intervals=...)}
+# {source_id: HistoricalForecastInput(snapshot_id=..., records=..., ingested_intervals=...)}
 ```
 
 `computation_id` — обязательный идентификатор КОНКРЕТНОГО расчёта (будущий
@@ -838,33 +839,56 @@ inputs = assemble_historical_forecast_input(
 который вызывающая сторона генерирует заново для каждого независимого
 расчёта). Он существует, чтобы независимые расчёты с одним и тем же `as_of`
 не делили закреплённое состояние между собой (round 6 ревью PR #37,
-finding 3, ⚠️): без него первый же вызов для пары (`source_id`, `as_of`) — в
+finding 3): без него первый же вызов для пары (`source_id`, `as_of`) — в
 том числе случайный или несвязанный с этим конкретным `historical_forecast`
-— необратимо решал бы, какое покрытие увидят ВСЕ последующие независимые
+— необратимо решал бы, какой вход увидят ВСЕ последующие независимые
 расчёты с тем же `as_of`, включая те, что могли бы честно увидеть более
 полный архив. Повторный вызов с ТЕМ ЖЕ `computation_id` — идемпотентный
-повтор/ретрай одного и того же расчёта и обязан вернуть тот же результат;
-`tests/sources/test_archive_ingest.py::test_two_independent_computation_ids_do_not_share_a_pinned_cutoff`
+повтор/ретрай одного и того же расчёта и обязан вернуть тот же
+`HistoricalForecastInput`, включая тот же `snapshot_id` —
+`tests/sources/test_archive_ingest.py::test_two_independent_computation_ids_do_not_share_a_pinned_snapshot`
 проверяет независимость двух расчётов.
 
 Внутри, для каждого продукта стратегии, `assemble_historical_forecast_input`
-вызывает `src/sources/archive_ingest.py::pin_and_merge_ingested_intervals`
-(`src/store/coverage.py::pin_coverage_cutoff`, таблица
-`archive_coverage_cutoffs`, только `INSERT OR IGNORE`, ключ —
-`(computation_id, source_id, as_of)`). Первый вызов для этого ключа
-закрепляет предел по максимальному `fetched_at` среди уже накопленных на
-этот момент отчётов — **даже если на этот момент отчётов нет вовсе**
-(round 6 ревью PR #37, finding 1: пустое покрытие закрепляется сигнальным
-значением раньше любого реального `fetched_at`, а не остаётся незакреплённым
-до первой содержательной загрузки —
-`tests/sources/test_archive_ingest.py::test_pinning_with_no_coverage_yet_freezes_it_against_a_later_load`).
-Любой последующий вызов с тем же ключом возвращает то же самое закреплённое
-значение. Фильтрация отчётов по этому пределу идёт **до** склейки, а не
-после: склейка берёт `max(fetched_at)` обеих половин соседних интервалов
-(см. выше), и фильтрация уже склеенного результата вычеркнула бы целиком и
-ту часть, что была честно загружена до отсечения —
-`tests/sources/test_archive_ingest.py::test_a_relevantly_intersecting_late_load_does_not_leak_into_a_pinned_historical_result`
-проверяет это на реальных фикстурах, лежащих на стыке двух окон загрузки.
+вычисляет ТЕКУЩИХ кандидатов (`select_as_of` + `merged_ingested_intervals`) и
+закрепляет их ОБОИХ ОДНИМ вызовом
+`src/store/forecast_snapshot.py::seal_forecast_input_snapshot` (таблицы
+`archive_forecast_snapshots`/`..._records`/`..._intervals`, только
+`INSERT OR IGNORE`, ключ — `(computation_id, source_id, as_of)`). Более ранняя
+редакция (round 4/6) закрепляла только предел `fetched_at` для карты
+покрытия — набор ЗАПИСЕЙ при этом выбирался заново при каждом вызове и мог
+тихо вырасти между двумя вызовами одного расчёта (round 7 ревью PR #37,
+finding 2, 🚨: архив пополнился записью с `published_at <= as_of`, но её
+загрузили позже первого вызова —
+`tests/sources/test_archive_ingest.py::test_assemble_historical_forecast_input_also_freezes_the_record_set_not_only_coverage`
+воспроизводит и закрывает это). Здесь снимок — дословно сохранённое
+СОДЕРЖИМОЕ (`record_id` и интервалы), а не скаляр для сравнения: первый
+вызов для ключа сохраняет ровно то, что ему передали — **даже пустой вход**
+(round 6 ревью PR #37, finding 1 —
+`tests/sources/test_archive_ingest.py::test_assemble_historical_forecast_input_freezes_even_when_nothing_has_loaded_yet`),
+любой последующий читает сохранённое обратно целиком и ничего не
+пересчитывает и не сравнивает заново — структурно неспособен унаследовать
+баг «фильтрация после склейки» предыдущих раундов
+(`tests/sources/test_archive_ingest.py::test_assemble_historical_forecast_input_stitches_a_load_boundary_and_freezes_it`
+проверяет стык двух окон загрузки на реальных фикстурах).
+
+`snapshot_id` — собственный, сервером сгенерированный идентификатор именно
+этого снимка (round 7 ревью PR #37, finding 3, ⚠️), не совпадающий и не
+обязанный совпадать с `computation_id`. `src/store/forecast_snapshot.py::read_sealed_snapshot(conn, snapshot_id)`
+восстанавливает закреплённые `record_id` и интервалы **только** по нему —
+без `computation_id`/`source_id`/`as_of` — ровно то, что понадобится, чтобы
+сохранить `snapshot_id` в `data_manifest` результата и восстановить
+использованный вход из выгрузки, не полагаясь на будущее совпадение
+`computation_id` с `result_id` production orchestration
+(`tests/sources/test_archive_ingest.py::test_snapshot_id_alone_reconstructs_the_sealed_input_independent_of_computation_id`).
+
+Открыто (не решено этим PR — оркестрация `historical_forecast` не входит в
+целевые файлы тикета FN-42): реальное подключение `assemble_historical_forecast_input`
+к `src/api/service.py` и выбор `computation_id` там (например, `result_id`
+самой production orchestration, которой в этом PR ещё нет). До этого
+подключения `assess_archive_window` синтаксически по-прежнему принимает
+любые записи/интервалы — контракт этого раздела документирует единственный
+ПРАВИЛЬНЫЙ способ их получить, а не запрещает код-level остальные.
 
 **3. Выборка входа прогноза.**
 
