@@ -46,6 +46,24 @@ class Settings(BaseSettings):
     # .ai/main-prompt.md §11 «Траектория»).
     orbit_max_confirmed_age_hours: float = 24.0
 
+    # Production deployment (FN-45): источники и UI могут оказаться на разных
+    # origin (площадка ещё не выбрана) — без этого браузер молча блокирует
+    # запросы UI к API политикой same-origin, и это не видно на localhost, где
+    # UI ходит через relative `/api` за тем же nginx-прокси (docker/nginx.conf.template).
+    # Пусто по умолчанию: middleware не добавляется вовсе (см. src/api/app.py),
+    # а не добавляется с пустым allow-list — иначе поведение FastAPI/Starlette
+    # для пустого списка происхождений (реально запрещает всё) сложно отличить
+    # от «CORS не настроен» на ревью и в логах.
+    cors_allowed_origins: str = ""
+
+    def cors_origins(self) -> list[str]:
+        """Список разрешённых origin из `CORS_ALLOWED_ORIGINS` (через запятую).
+
+        Пустые элементы (лишние запятые/пробелы) отбрасываются, а не
+        превращаются в разрешение origin `""`.
+        """
+        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
+
 
 @lru_cache
 def get_settings() -> Settings:
