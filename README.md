@@ -432,13 +432,16 @@ egress-прокси песочницы (`403` на каждый проверен
   набора — см. `sources.yaml`), поэтому хранилище всегда вычисляет
   `replay_eligible=false` для этих записей — текущие элементы не могут
   быть тихо использованы для строгого `historical_forecast`.
-- **Исторический режим.** `fetch_elements_for_request` поддерживает только
-  `mode="current"`: для `historical_analysis`/`historical_forecast`
-  поднимается `HistoricalElementsUnsupportedError` до какого-либо сетевого
-  обращения — коннектор Space-Track `GP_HISTORY` появится отдельной
-  задачей (см. `sources.yaml`, продукт `space-track-gp-history`); до тех
-  пор современные элементы не подставляются вместо исторических
-  (.ai/main-prompt.md §11 «Траектория»).
+- **Исторический режим CelesTrak-путём.** `fetch_elements_for_request`
+  поддерживает только `mode="current"`: для `historical_analysis`/
+  `historical_forecast` поднимается `HistoricalElementsUnsupportedError` до
+  какого-либо сетевого обращения — Space-Track `GP_HISTORY` остаётся
+  задокументированным, но не реализованным опциональным источником (нет
+  учётной записи команды, см. `sources.yaml`, продукт
+  `space-track-gp-history`); современные элементы CelesTrak не
+  подставляются вместо исторических ни при каких обстоятельствах
+  (.ai/main-prompt.md §11 «Траектория»). Актуальный исторический путь —
+  NASA OEM ниже.
 - **Расчёт (`src/domain/orbit/propagate.py`).** Чистые функции без сети и
   без хранилища: `load_elements`/`propagate` оборачивают SGP4, принимают
   элементы и явную сетку моментов времени аргументами (не читают "сейчас").
@@ -453,10 +456,86 @@ egress-прокси песочницы (`403` на каждый проверен
   Hujsak & Kelso, "Revisiting Spacetrack Report #3", 2006; см.
   `tests/fixtures/orbit/README.md`) — не с расчётом, повторяющим
   собственную реализацию (.ai/main-prompt.md §9, п.5).
-- **Реестр источников `sources.yaml`.** Продукт `celestrak-gp` (этот
-  коннектор) и `space-track-gp-history` (ещё не реализован) — с URL,
+- **Реестр источников `sources.yaml`.** Продукты `celestrak-gp` (текущий),
+  `space-track-gp-history` (задокументирован, не реализован) и
+  `nasa-iss-oem-history` (исторический, реализован — см. ниже) — с URL,
   единицами, охватом, частотой обновления, наличием `published_at` и
   пригодностью для строгого replay (.ai/main-prompt.md §7, §10).
+
+### Исторические элементы: NASA TOPO CCSDS OEM (`src/sources/orbit_history.py`, `src/domain/orbit/interpolate.py`, FN-33)
+
+Основной путь `historical_analysis`/`historical_forecast` (решение владельца
+задачи, зафиксированное в `sources.yaml`, продукт `nasa-iss-oem-history`):
+публичный, не требующий ключа бакет NASA JSC/FOD/TOPO
+(`iss-coords/<дата>/ISS_OEM/ISS.OEM_J2K_EPH.txt`, CCSDS OEM 2.0 KVN) —
+готовые векторы состояния (позиция км + скорость км/с в `REF_FRAME=EME2000`)
+на неравномерной сетке узлов, не GP/TLE. Space-Track `GP_HISTORY` остаётся
+опциональным, не реализованным источником (см. выше); OEM не подменяет его,
+а полностью занимает его роль в этой версии сервиса.
+
+- **Получение и разбор (`src/sources/orbit_history.py`).** `parse_oem`
+  разбирает заголовок, единственный блок `META`, векторы состояния (строки
+  `COMMENT` — масса/сопротивление, узлы, таблица манёвров — пропускаются, не
+  парсятся); `parse_s3_listing` разбирает S3 `ListBucketResult` листинга
+  выпуска (`xml.etree.ElementTree`, без новой зависимости).
+  `verify_fetch_integrity` перепроверяет `*.meta.json` (заголовки исходного
+  HTTP-ответа) против листинга и фактических байтов файла (sha256 тела,
+  `ETag`/MD5, `Last-Modified`) — то, что
+  `tests/fixtures/orbit/history/README.md` документирует как проверенное
+  вручную, здесь исполняемый тест
+  (`tests/orbit/test_orbit_history.py::test_verify_fetch_integrity_passes_for_real_fixtures`).
+- **Время честности — суть задачи.** `published_at` — S3 `LastModified`
+  датированного `.txt`-объекта из листинга, **никогда** заголовок
+  `CREATION_DATE` (момент, когда баллистик создал файл — может
+  предшествовать появлению файла в архиве на срок до нескольких суток;
+  реальный случай — выпуск `2024-05-12`: `CREATION_DATE=2024-05-10T18:51:53Z`,
+  `LastModified=2024-05-13T03:06:46Z`) и **никогда** имя датированной папки.
+  Ограничение доказательства зафиксировано явно и программно
+  (`orbit_history.PUBLICATION_EVIDENCE_NOTE`, записывается в
+  `spatial_context` каждой записи): S3 `LastModified` доказывает время ЭТОЙ
+  ВЕРСИИ объекта в бакете, а не аудированную историю публичной
+  доступности/ACL бакета — формулировка «доказан точный момент публичного
+  открытия» нигде не используется.
+- **Два раздельных пути отбора** (main-prompt.md §1 «Последующие наблюдения
+  — отдельная ветка кода»), оба в `src/sources/orbit_history.py`, вызываются
+  через `src/sources/orbit.py::select_oem_elements_for_request` (актуальная
+  точка входа для исторических режимов):
+  - `select_release_for_forecast` — `historical_forecast`:
+    `published_at <= as_of` И интервал `[USEABLE_START_TIME,
+    USEABLE_STOP_TIME]` выпуска покрывает расчётный интервал целиком; среди
+    пригодных — максимальный `published_at`. Ни при каких обстоятельствах
+    не берётся более поздний или не покрывающий выпуск, и не современные
+    элементы CelesTrak.
+  - `select_release_for_analysis` — `historical_analysis`, НЕ фильтруется по
+    `as_of`: предпочитается выпуск, созданный вскоре после интересующего
+    момента (ближе к фактической траектории). Запись по этому пути всегда
+    несёт `quality="reconstructed"`.
+  - Если пригодного выпуска нет, `select_oem_elements_for_request` поднимает
+    `HistoricalElementsUnsupportedError` — критический пробел архива, а не
+    повод подставить более позднюю или современную геометрию.
+- **Интерполяция, не SGP4 (`src/domain/orbit/interpolate.py`).** OEM не даёт
+  среднеэлементного набора — `interpolate_state` восстанавливает
+  положение/скорость между узлами кубической интерполяцией Эрмита по каждой
+  оси (`INTERPOLATION_METHOD = "hermite-cubic-per-axis-v1"` — версионировано
+  для `algorithm_version`, .ai/main-prompt.md §3), используя заданную в узле
+  скорость как производную; узел несёт готовую производную, поэтому метод не
+  требует оценки конечными разностями и не нуждается в новой зависимости
+  (`scipy` не входит в `pyproject.toml`). Экстраполяция запрещена: запрос
+  времени вне охваченного узлами интервала поднимает `InterpolationError`, а
+  не подставляет ближайшее значение молча.
+- **Точность интерполяции.** `tests/orbit/test_orbit_history.py` держит вне
+  входа реальный узел плотного ~2-секундного участка манёвра
+  (`2024-05-24T14:16`, `nasa_iss_oem_2024-05-12.txt`) и сверяет интерполянт
+  с этим НЕ переданным на вход значением — не с повторным расчётом той же
+  формулой (.ai/main-prompt.md §9, п.5).
+- **Система координат** — `EME2000`, совпадает с системой радиантов MMOD
+  (`src/domain/mmod`) — преобразование в TEME для этого источника не
+  требуется (TEME — только у SGP4/TLE-пути выше).
+- **Область задачи.** Гейт/проба (main-prompt.md §11, по аналогии с
+  `src/sources/archive_probe.py`): парсинг и отбор работают над 4 реальными
+  сохранёнными выпусками (`tests/fixtures/orbit/history/`, см. её README);
+  production-шлюз с периодическим refresh/TTL и постраничной загрузкой
+  полного архива в хранилище — задача следующего этапа.
 
 ## API (`src/api/`)
 

@@ -166,8 +166,8 @@
         },
         "format": {
           "type": "string",
-          "enum": ["TLE", "GP_OMM"],
-          "description": "Формат представления элементов."
+          "enum": ["TLE", "GP_OMM", "OEM"],
+          "description": "Формат представления элементов. OEM (FN-33) — CCSDS OEM 2.0 KVN, NASA TOPO; epoch для OEM — CREATION_DATE выпуска (момент, на который баллистик выпустил эту прогнозную траекторию), а не published_at (см. src/sources/orbit_history.py)."
         },
         "coordinate_system": {
           "type": "string",
