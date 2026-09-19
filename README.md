@@ -876,7 +876,7 @@ curl -fsS http://localhost:8000/api/results/<result_id>   # тот же резу
   предупреждение в `source_status`, никогда молчаливый «успех» (см. раздел
   «API» выше).
 
-### Сквозная проверка этапа
+### Сквозная проверка этапа 1
 
 ```bash
 uv sync --locked --all-groups   # если ещё не выполнялось — тесты запускаются с хоста, не из контейнера
@@ -912,33 +912,77 @@ STAGE1_WEB_BASE_URL=http://localhost:8080 npm run test:e2e
 принцип «интерфейс и выгрузка читают один и тот же сохранённый объект»,
 main-prompt.md §3).
 
+### Сквозная приёмка этапа 2 (FN-37)
+
+Детерминированная часть приёмки запускается в обычном backend quality gate
+и не требует сети или Docker:
+
+```bash
+uv run pytest tests/integration/test_stage2.py -v
+```
+
+`tests/integration/test_stage2.py` собирает настоящий production-путь
+`service → store → GET result → JSON/HTML export`. Только сетевые границы
+CelesTrak/NOAA заменяются сохранёнными ответами; NASA MEO читается из того
+же бандлового документа, что и production. Проверяются два новых времени,
+не зашитых в HTTP-фикстуры (`2024-05-05 23:10 UTC` и
+`2024-05-10 10:10 UTC`), изменение начала/длительности, два равных окна,
+оба механизма без пробелов, конфликт без искусственного победителя,
+критический пробел позднего окна, новый immutable `result_id` при
+пересчёте и равенство сохранённого результата JSON-выгрузке. HTML обязан
+содержать тот же `result_id`, окна, механизмы и использованные `record_id`.
+GOES-значения для управляемых конфликт/gap-сценариев создаются через
+production-нормализатор, но являются тестовыми 5/15/150 pfu и не выдаются
+за новые архивные наблюдения; настоящий сетевой current-путь проверяется
+отдельным live-прогоном ниже.
+
+Остальная матрица рисков не дублируется в одном огромном тесте, а входит в
+тот же обязательный прогон `uv run pytest`:
+
+| Проверка FN-37 | Доказательство |
+| --- | --- |
+| конфликт, равенство, доминирование, оба окна исключены | `tests/api/test_window_dominance_integration.py`, `tests/api/test_mmod_wiring.py` |
+| источник отключён/заморожен/429/timeout/устарел/восстановился | `tests/sources/test_swpc.py`, `tests/api/test_observed_flux_integration.py` |
+| два конкурентных запроса изолированы | `tests/api/test_isolation.py`, `tests/integration/test_stage1.py` |
+| суточная NOAA вероятность не стала почасовой | `tests/domain/spaceweather/test_external_forecast.py`, `tests/api/test_requests.py` |
+| MMOD без неподтверждённой нормировки | `tests/mmod/test_background.py`, `tests/sources/test_mmod.py` |
+| исторические элементы: gate FN-33 готов, full historical API остаётся этапом 3 | `tests/orbit/test_orbit_history.py`, `tests/fixtures/orbit/history/README.md` |
+| UI: оба механизма, конфликт, неполнота, смена параметров | `web/tests/uiStates.spec.ts`, `web/tests/stage1.spec.ts` |
+
+Live-путь остаётся отдельной проверкой поверх поднятого стека:
+
+```bash
+STAGE1_BASE_URL=http://localhost:8000 uv run pytest tests/integration/test_stage1.py -m integration -v
+cd web
+STAGE1_WEB_BASE_URL=http://localhost:8080 npm run test:e2e
+```
+
+Для текущей даты NASA MEO честно вернёт `missing_data`, потому что
+официальный документ покрывает только 2024 год; наблюдение GOES для
+будущего окна честно вернёт `beyond_horizon`. Live-тест требует увидеть обе
+реализованные карточки и запрещает прежний `not_implemented`, но не выдаёт
+эти ограничения покрытия за успешную оценку. Полный сценарий, где оба
+механизма имеют `status=ok`, воспроизводится детерминированной командой
+выше внутри периода документа.
+
 ### Известное ограничение окружения сборки
 
-В песочнице, где готовился этот PR, исходящая сеть разрешена только к
-пакетным реестрам (PyPI, npm) — не к Docker Hub и не к CelesTrak/NOAA SWPC
-(организационная политика egress-прокси блокирует оба класса хостов кодом
-403). Из-за этого в этой среде удалось проверить:
+На контрольном прогоне FN-37 19.09.2026 Docker Compose собрал оба образа,
+оба сервиса перешли в `healthy`, а контейнерный runtime имел доступ к
+CelesTrak и NOAA SWPC. `tests/integration/test_stage1.py` прошёл 5/5,
+включая `docker compose restart api` и чтение неизменённого результата
+после перезапуска. `web/tests/stage1.spec.ts` через nginx-контейнер прошёл
+2/2. В ходе прогона healthcheck web был исправлен с неоднозначного
+`localhost` на явный IPv4 loopback `127.0.0.1`: Alpine `wget` выбирал
+`::1`, который nginx в данной конфигурации не слушал.
 
-- `uv run ruff check .` / `uv run mypy src` / `uv run pytest` (без сети,
-  как и раньше) — зелёные (полный вывод — раздел «Проверки» выше);
-- `docker compose config` — `compose.yaml` валиден;
-- `tests/integration/test_stage1.py` и `web/tests/stage1.spec.ts` — против
-  сервиса, запущенного напрямую (`uv run python -m src.api.app` +
-  `npm run dev`, без Docker): health, изоляция и форма статусов источников
-  проходят; проверка `mode=current` корректно распознаёт недоступность
-  CelesTrak/NOAA SWPC как честный отказ (`job.status == "failed"`,
-  `test.skip`/`pytest.skip` с точной причиной, не имитация успеха) —
-  именно то поведение, которое main-prompt.md §2 требует от отказа
-  источника.
-
-Не проверено в этой среде (не удалось из-за политики egress, а не из-за
-ошибки в конфигурации) и остаётся сделать тому, кто воспроизводит запуск с
-обычным доступом в интернет: сборка образов `docker build`/`docker compose
-up --build` (нужен Docker Hub — `python:3.11-slim`, `node:22-slim`,
-`nginx:1.27-alpine`) и получение реального источника внутри собранного
-стека (нужны CelesTrak/NOAA SWPC). Приёмка FN-28 «другой участник
-воспроизводит запуск по README» подразумевает именно это — обычную сеть
-разработчика, которой здесь не было.
+Контрольный контейнерный current-результат
+`res-f8f4ecf3-b821-4260-88d7-b3e99f56d49a` содержал два окна и оба
+механизма и сохранился после restart API. Его `all_windows_excluded` —
+ожидаемый честный исход для текущей даты вне покрытия NASA MEO 2024 и
+будущего окна GOES-наблюдения, не доказательство благоприятной обстановки.
+Публичное развёртывание по-прежнему не проверено: согласованная площадка и
+публичный URL не предоставлены, localhost за доступ жюри не выдаётся.
 
 ### Доступ жюри
 
