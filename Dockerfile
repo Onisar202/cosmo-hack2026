@@ -60,11 +60,20 @@ RUN npm run build
 
 # ---------------------------------------------------------------------------
 # web: статика за nginx, реверс-прокси /api и /health на сервис api по
-# имени в compose-сети (docker/nginx.conf).
+# имени в compose-сети (docker/nginx.conf.template).
 # ---------------------------------------------------------------------------
 FROM nginx:1.27-alpine AS web
 
-COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+# .template в /etc/nginx/templates/ — встроенный docker-entrypoint базового
+# образа рендерит его в /etc/nginx/conf.d/default.conf через envsubst при
+# каждом старте контейнера (FN-45: reverse proxy target и server_name
+# настраиваются переменными окружения compose.yaml без пересборки образа).
+# ENV ниже — значения по умолчанию, совпадающие с прежним статическим
+# конфигом; compose.yaml может переопределить их без правки Dockerfile.
+ENV API_UPSTREAM=api:8000 \
+    NGINX_SERVER_NAME=_
+
+COPY docker/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=web-build /app/web/dist /usr/share/nginx/html
 
 EXPOSE 80

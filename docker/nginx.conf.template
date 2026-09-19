@@ -1,0 +1,46 @@
+# Конфигурация nginx для цели `web` (см. ../Dockerfile). Раздаёт собранную
+# статику web/dist и проксирует /api (и /health для ручной проверки) на
+# сервис api по DNS-имени compose-сети — фронтенд обращается к /api как к
+# относительному пути (web/src/api/client.ts: BASE_URL по умолчанию '/api'),
+# отдельный домен/порт API конфигурировать не нужно.
+#
+# `.template`: обрабатывается встроенным nginx docker-entrypoint (образ
+# nginx:1.27-alpine, base-стадии `web` не переопределяет ENTRYPOINT/CMD) —
+# `envsubst` подставляет `${API_UPSTREAM}`/`${NGINX_SERVER_NAME}` из
+# переменных окружения контейнера при каждом старте и пишет результат в
+# /etc/nginx/conf.d/default.conf, без пересборки образа (FN-45: «reverse
+# proxy... без пересборки исходников»). Значения по умолчанию заданы ENV в
+# Dockerfile — `docker compose up` без единой production-переменной
+# воспроизводит прежнее поведение (api:8000, server_name _).
+# Нельзя использовать `$host`/`$remote_addr`/`$proxy_add_x_forwarded_for`/
+# `$scheme` как переменные окружения контейнера — entrypoint подставляет
+# только реально заданные ENV, поэтому нижестоящие nginx-переменные проходят
+# через envsubst нетронутыми, пока таких ENV нет.
+
+server {
+    listen 80;
+    server_name ${NGINX_SERVER_NAME};
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location /api/ {
+        proxy_pass http://${API_UPSTREAM}/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Не часть публичного контракта API (contracts/README.md) — только для
+    # ручной проверки доступности бэкенда через тот же порт, что и UI.
+    location = /health {
+        proxy_pass http://${API_UPSTREAM}/health;
+    }
+
+    # SPA: неизвестные пути отдают index.html, маршрутизация — на стороне React.
+    location / {
+        try_files $uri /index.html;
+    }
+}
