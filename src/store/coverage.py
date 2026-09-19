@@ -35,34 +35,25 @@ main-prompt.md §3: «Сохранённый результат неизменя
 однажды закреплённое для пары (``source_id``, ``as_of``), никогда не
 перезаписывается — в том числе более ранним значением, если по ошибке
 переданный ``candidate_fetched_at`` окажется меньше уже закреплённого.
+
+Этот модуль намеренно останавливается на самом пределе ``fetched_at`` и не
+решает, КАК фильтровать или склеивать интервалы покрытия по этому пределу:
+склейка соседних окон загрузки (``merged_ingested_intervals``) — понятие
+``src/sources/``, а ``store/`` от ``sources/`` не зависит (main-prompt.md §8).
+Комбинация «закрепить предел → отфильтровать НЕ склеенные интервалы →
+склеить прошедшие фильтр» (в этом самом порядке — round 4 ревью PR #37:
+склейка ДО фильтрации схлопывает ``fetched_at`` соседних интервалов в
+``max()`` и совместно теряет уже доверенную раннюю часть) живёт в
+``src/sources/archive_ingest.py::pin_and_merge_ingested_intervals``, единственном
+месте, которому известны оба понятия.
 """
 
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Sequence
 from datetime import datetime
-from typing import Protocol, TypeVar
 
 from src.store.records import _iso_utc, _require_aware
-
-
-class _FetchedIntervalLike(Protocol):
-    """Структурный вид интервала покрытия, достаточный для фильтрации по
-    предельному ``fetched_at``.
-
-    Протокол, а не импорт ``src.sources.archive_ingest.IngestedInterval``:
-    ``store/`` не должен зависеть от ``sources/`` — та зависит от ``store/``,
-    а не наоборот (main-prompt.md §8), и это ровно тот же приём, которым
-    ``archive_assessment.py`` избегает импорта из ``sources/`` для
-    :class:`~src.domain.spaceweather.archive_assessment.ArchiveProductPolicy`.
-    """
-
-    @property
-    def fetched_at(self) -> datetime: ...
-
-
-_IntervalT = TypeVar("_IntervalT", bound=_FetchedIntervalLike)
 
 
 def pin_coverage_cutoff(
@@ -101,30 +92,4 @@ def pin_coverage_cutoff(
     return datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
 
 
-def pin_and_filter_ingested_intervals(
-    conn: sqlite3.Connection,
-    intervals: Sequence[_IntervalT],
-    *,
-    source_id: str,
-    as_of: datetime,
-) -> tuple[_IntervalT, ...]:
-    """Обёртка вокруг :func:`pin_coverage_cutoff` для прямого использования
-    перед ``assess_archive_window``: закрепляет предел по максимальному
-    ``fetched_at`` среди переданных интервалов и возвращает только те из
-    них, что не позже закреплённого предела.
-
-    Пустой вход ничего не закрепляет (закреплять пока нечего) и возвращает
-    пустой кортеж — первый содержательный вызов для этой пары
-    (``source_id``, ``as_of``) остаётся тем вызовом, который задаст предел,
-    когда покрытие впервые появится.
-    """
-    if not intervals:
-        return ()
-    candidate = max(interval.fetched_at for interval in intervals)
-    cutoff = pin_coverage_cutoff(
-        conn, source_id=source_id, as_of=as_of, candidate_fetched_at=candidate
-    )
-    return tuple(interval for interval in intervals if interval.fetched_at <= cutoff)
-
-
-__all__ = ["pin_and_filter_ingested_intervals", "pin_coverage_cutoff"]
+__all__ = ["pin_coverage_cutoff"]

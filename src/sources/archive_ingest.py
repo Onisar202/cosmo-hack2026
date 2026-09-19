@@ -67,6 +67,7 @@ from src.sources.archive_probe import (
     parse_swpc_forecast_discussion,
     swpc_forecast_discussion_to_record_input,
 )
+from src.store.coverage import pin_coverage_cutoff
 from src.store.records import (
     DuplicateKeyConflictError,
     RawOriginalStore,
@@ -586,6 +587,54 @@ def merged_ingested_intervals(
     return tuple(merged)
 
 
+def pin_and_merge_ingested_intervals(
+    conn: sqlite3.Connection,
+    reports: Iterable[ArchiveIngestReport],
+    *,
+    source_id: str,
+    as_of: datetime,
+    relevant_message_types: frozenset[str],
+) -> tuple[IngestedInterval, ...]:
+    """Склеивает покрытие для строгого ``historical_forecast``, закрепляя его
+    навсегда для пары (``source_id``, ``as_of``) — round 4 ревью PR #37.
+
+    Порядок операций важен и специально в этом порядке:
+
+    1. закрепить (или прочитать уже закреплённый) предел ``fetched_at`` через
+       :func:`src.store.coverage.pin_coverage_cutoff`;
+    2. отфильтровать по этому пределу **не склеенные** отчёты о загрузке —
+       у каждого свой собственный, ещё не тронутый ``interval.fetched_at``;
+    3. только затем склеить прошедшие фильтр отчёты :func:`merged_ingested_intervals`.
+
+    Если бы фильтрация шла ПОСЛЕ склейки, она сравнивала бы предел с
+    ``fetched_at`` уже склеенного интервала — а склейка двух соседних окон
+    берёт ``max(fetched_at)`` обеих половин (см. :func:`merged_ingested_intervals`).
+    Тогда поздняя догрузка соседнего окна поднимала бы ``fetched_at`` ВСЕГО
+    склеенного интервала выше предела и целиком вычёркивала бы его из
+    покрытия — включая ту часть, что была честно загружена ДО отсечения и
+    обязана остаться доверенной. Фильтрация до склейки такой потери не
+    допускает: она решает за каждый отчёт отдельно, по его собственному
+    времени загрузки.
+
+    Пустой вход не закрепляет предел (закреплять пока нечего) и возвращает
+    пустой кортеж — так же, как :func:`merged_ingested_intervals` на пустых
+    ``reports``.
+    """
+    same_source = tuple(report for report in reports if report.source_id == source_id)
+    if not same_source:
+        return ()
+    candidate = max(report.interval.fetched_at for report in same_source)
+    cutoff = pin_coverage_cutoff(
+        conn, source_id=source_id, as_of=as_of, candidate_fetched_at=candidate
+    )
+    within_cutoff = tuple(
+        report for report in same_source if report.interval.fetched_at <= cutoff
+    )
+    return merged_ingested_intervals(
+        within_cutoff, source_id=source_id, relevant_message_types=relevant_message_types
+    )
+
+
 def select_forecast_inputs(
     conn: sqlite3.Connection,
     *,
@@ -624,5 +673,6 @@ __all__ = [
     "ingest_swpc_forecast_discussion",
     "load_archive_product",
     "merged_ingested_intervals",
+    "pin_and_merge_ingested_intervals",
     "select_forecast_inputs",
 ]

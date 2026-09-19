@@ -37,9 +37,10 @@ from src.sources.archive_ingest import (
     ingest_swpc_forecast_discussion,
     load_archive_product,
     merged_ingested_intervals,
+    pin_and_merge_ingested_intervals,
     select_forecast_inputs,
 )
-from src.store import RawOriginalStore, get_original, get_record, pin_and_filter_ingested_intervals
+from src.store import RawOriginalStore, get_original, get_record
 
 UTC = timezone.utc
 ARCHIVE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "sources" / "archive"
@@ -402,18 +403,37 @@ def test_a_relevantly_intersecting_late_load_does_not_leak_into_a_pinned_histori
     (31 мая / 1 июня), и вторая половина стыка загружается ПОЗДНЕЕ, с бо́льшим
     ``fetched_at``, реально расширяя покрытие именно этого окна.
 
-    Без закрепления (``src/store/coverage.py::pin_and_filter_ingested_intervals``)
+    Без закрепления (``src/sources/archive_ingest.py::pin_and_merge_ingested_intervals``)
     вторая загрузка превратила бы уже установленный ``INSUFFICIENT_DATA``
     (пробел в 50% окна) в ``NO_EVENT_DETECTED`` — это и демонстрирует
-    контрольная проверка на «сыром», не закреплённом наборе интервалов ниже.
-    С закреплением результат для того же ``as_of`` остаётся прежним.
+    контрольная проверка на «сыром», не закреплённом наборе интервалов ниже
+    (обычный ``merged_ingested_intervals`` без закрепления). С закреплением
+    результат для того же ``as_of`` остаётся прежним — в том числе потому, что
+    фильтрация по закреплённому пределу идёт ДО склейки соседних окон
+    загрузки, а не после (см. докстринг ``pin_and_merge_ingested_intervals``):
+    иначе склейка подняла бы ``fetched_at`` всего интервала до значения
+    второй, поздней загрузки и вычеркнула бы целиком и рано загруженную
+    половину.
 
     ``donki_2024-06-01_2024-06-15.json`` реально содержит SEP-уведомления
     (11 шт., 8 и 12 июня — main-prompt.md §11 упоминает и это событие), но
     все они начинаются ПОСЛЕ конца окна и ПОСЛЕ ``as_of`` этого теста —
     выбраны дата окна и ``as_of`` так, чтобы не пересечься с механизмом
     «открытого конца» (round 3 ревью, отдельно протестирован выше) и
-    проверить именно закрепление предела ``fetched_at``, а не его."""
+    проверить именно закрепление предела ``fetched_at``, а не его.
+
+    Вход прогноза (``selected``) намеренно вычисляется ОДИН раз, до второй
+    загрузки, и переиспользуется в обеих оценках. Это не сокращение теста, а
+    изоляция проверяемого механизма: тот же файл легитимно содержит и
+    CME/FLR-уведомления начала июня с ``published_at <= as_of`` — их
+    появление в ``select_forecast_inputs`` после догрузки корректно и не
+    относится к утечке покрытия (main-prompt.md §1 ограничивает вход
+    прогноза `published_at`, не `fetched_at`; temporal leak по `published_at`
+    отдельно проверен тестом
+    ``test_adding_a_record_published_after_as_of_changes_neither_selection_nor_assessment``
+    выше). Смешивать эту легитимную догрузку записей с проверкой закрепления
+    предела `fetched_at` для КАРТЫ ПОКРЫТИЯ — значит проверять не то, что
+    сломал round 4 ревью."""
     as_of = datetime(2024, 6, 5, tzinfo=UTC)
     window_start = datetime(2024, 5, 31, 12, 0, tzinfo=UTC)
     window_end = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
@@ -432,13 +452,12 @@ def test_a_relevantly_intersecting_late_load_does_not_leak_into_a_pinned_histori
         interval_end=datetime(2024, 6, 1, tzinfo=UTC),
     )
     selected = select_forecast_inputs(db_conn, as_of=as_of, strategy=strategy)
-    pinned_before = pin_and_filter_ingested_intervals(
+    pinned_before = pin_and_merge_ingested_intervals(
         db_conn,
-        merged_ingested_intervals(
-            [first_report], source_id=DONKI_SOURCE_ID, relevant_message_types=relevant_types
-        ),
+        [first_report],
         source_id=DONKI_SOURCE_ID,
         as_of=as_of,
+        relevant_message_types=relevant_types,
     )
     before = assess_archive_window(
         selected[DONKI_SOURCE_ID],
@@ -472,9 +491,11 @@ def test_a_relevantly_intersecting_late_load_does_not_leak_into_a_pinned_histori
 
     # Контроль: БЕЗ закрепления эта поздняя загрузка деиствительно
     # превращает результат в NO_EVENT_DETECTED — то есть воспроизводит
-    # утечку, которую закрепление обязано предотвратить.
+    # утечку, которую закрепление обязано предотвратить. Вход прогноза —
+    # тот же ``selected``, что и у ``before``: единственное, что меняется
+    # здесь, — карта покрытия.
     unpinned_after = assess_archive_window(
-        select_forecast_inputs(db_conn, as_of=as_of, strategy=strategy)[DONKI_SOURCE_ID],
+        selected[DONKI_SOURCE_ID],
         policy=policy,
         ingested_intervals=_as_coverage_intervals(grown_intervals),
         window_start=window_start,
@@ -485,15 +506,19 @@ def test_a_relevantly_intersecting_late_load_does_not_leak_into_a_pinned_histori
     assert unpinned_after.coverage_fraction == 1.0
 
     # С закреплением (тот же source_id/as_of, что и у первого вызова —
-    # предел уже установлен по ``early_fetched_at``) поздний интервал
-    # исключается, и результат для ЭТОГО as_of остаётся прежним.
-    pinned_after = pin_and_filter_ingested_intervals(
-        db_conn, grown_intervals, source_id=DONKI_SOURCE_ID, as_of=as_of
+    # предел уже установлен по ``early_fetched_at``) поздний отчёт
+    # исключается ДО склейки, и результат для ЭТОГО as_of остаётся прежним.
+    pinned_after = pin_and_merge_ingested_intervals(
+        db_conn,
+        [first_report, second_report],
+        source_id=DONKI_SOURCE_ID,
+        as_of=as_of,
+        relevant_message_types=relevant_types,
     )
     assert pinned_after == pinned_before
 
     after = assess_archive_window(
-        select_forecast_inputs(db_conn, as_of=as_of, strategy=strategy)[DONKI_SOURCE_ID],
+        selected[DONKI_SOURCE_ID],
         policy=policy,
         ingested_intervals=_as_coverage_intervals(pinned_after),
         window_start=window_start,
