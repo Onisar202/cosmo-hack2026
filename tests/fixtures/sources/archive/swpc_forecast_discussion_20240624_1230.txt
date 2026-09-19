@@ -1,0 +1,61 @@
+:Product: 06241230forecast_discussion.txt
+:Issued: 2024 Jun 24 1230 UTC
+# Prepared by the U.S. Dept. of Commerce, NOAA, Space Weather Prediction Center
+#
+Solar Activity
+
+.24 hr Summary...
+Solar activity reached high levels with R1-R2 (Minor-Moderate) events
+observed. Region 3723 (S19E61, Dso/beta) produced an M9.3/1n flare at
+23/1301 UTC; the largest event of the period. Several eruptions
+originated from Region 3712 (S26, L=168) after 24/0130 UTC and the
+background x-ray flux increased to M-levels in the hours following.
+Region 3712, along with Regions 3713 (S14W81, Ekc/beta-gamma) and 3716
+(N09W88, Eao/beta), rotated out of full view on the W limb. Slight
+growth was observed in Region 3720 (S06E18, Dai/beta) and new spots were
+seen near the E limb at S20. The remaining regions were either stable or
+in decay.
+
+Other activity included a filament eruption near S50W09 at 24/0115 UTC,
+and another near N25W15 at 24/0147 UTC, although neither event produced
+Earth-directed CMEs. A large CME associated with flare activity from
+Region 3712, and first visible in LASCO C2 off the SW at 24/0248 UTC, is
+not expected to be Earth-directed.
+
+.Forecast...
+M-class flares (R1-R2/Minor-Moderate) are likely on 24-25 Jun, with a
+chance for M-class flares on 26 Jun. There is a slight chance for an
+isolated X-class flare (R3/Strong) on 24-25 Jun as Regions 3712, 3713,
+and 3716 transit the W limb.
+
+Energetic Particle
+
+.24 hr Summary...
+The greater than 2 MeV electron flux was at normal to moderate levels
+and the greater than 10 MeV proton flux was at background levels.
+
+.Forecast...
+The greater than 2 MeV electron flux is expected to be at normal to
+moderate levels over 24-26 Jun. There is a slight chance for the greater
+than 10 MeV proton flux to reach S1 (Minor) levels on 24 Jun.
+
+Solar Wind
+
+.24 hr Summary...
+Solar wind parameters gradually returned to background levels following
+possible CIR effects early in the period. Total field strength ranged
+from 2-8 nT, Bz varied between +8/-5 nT, and solar wind speeds decreased
+from 360 to 300 km/s. The phi angle was predominately negative
+throughout the period.
+
+.Forecast...
+Nominal solar wind conditions are expected to prevail on 24-26 Jun.
+
+Geospace
+
+.24 hr Summary...
+The geomagnetic field was quiet and unsettled due to possible CIR
+effects.
+
+.Forecast...
+Mostly quiet conditions are expected to prevail over 24-26 Jun.

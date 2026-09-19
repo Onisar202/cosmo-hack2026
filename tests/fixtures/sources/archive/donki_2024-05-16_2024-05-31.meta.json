@@ -1,0 +1,24 @@
+{
+  "request_url": "https://api.nasa.gov/DONKI/notifications?startDate=2024-05-16&endDate=2024-05-31&type=all",
+  "api_key": "DEMO_KEY",
+  "http_status": 200,
+  "status_line": "HTTP/1.1 200 OK",
+  "fetched_at": "2026-09-18T23:03:22.243Z",
+  "response_received_at": "2026-09-18T23:03:23.597Z",
+  "response_headers": {
+    "date": "Fri, 18 Sep 2026 23:03:23 GMT",
+    "last-modified": null,
+    "etag": null,
+    "content-type": "application/json",
+    "content-length": null,
+    "x-ratelimit-limit": "10",
+    "x-ratelimit-remaining": "8"
+  },
+  "body_file": "donki_2024-05-16_2024-05-31.json",
+  "body_size_bytes": 132911,
+  "body_sha256": "d405c04807f201450751eded9ae47a835f6947f704b14a9056016fa26b9302c3",
+  "body_is_valid_json": true,
+  "body_item_count": 42,
+  "client": "curl 8.18.0",
+  "note": "Тело сохранено байт-в-байт (curl -o, без форматирования). fetched_at — момент отправки запроса, UTC."
+}

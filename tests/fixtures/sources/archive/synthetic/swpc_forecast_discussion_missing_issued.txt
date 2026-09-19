@@ -1,0 +1,13 @@
+:Product: 00000000made_up_forecast_discussion.txt
+# Prepared by the U.S. Dept. of Commerce, NOAA, Space Weather Prediction Center
+#
+Solar Activity
+
+.24 hr Summary...
+This is a synthetic bulletin used only to test that a missing ':Issued:'
+line is rejected as an unknown-publication-time response, not silently
+accepted (see tests/fixtures/sources/archive/synthetic/README.md). It is
+not a real NOAA response.
+
+.Forecast...
+Not applicable — synthetic fixture.

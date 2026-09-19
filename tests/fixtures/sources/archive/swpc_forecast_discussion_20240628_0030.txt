@@ -1,0 +1,59 @@
+:Product: 06280030forecast_discussion.txt
+:Issued: 2024 Jun 28 0030 UTC
+# Prepared by the U.S. Dept. of Commerce, NOAA, Space Weather Prediction Center
+#
+Solar Activity
+
+.24 hr Summary...
+Solar activity was at low levels. Regions 3719 (S15W39, Cso/beta), 3723
+(S19E21, Dao/beta-gamma), 3727 (S18E32, Cso/beta) and 3729 (S03E52,
+Dai/beta) were responsible for all the C-class flares this period. The
+largest flare was a C4.8/Sf flare at 27/0428 UTC from Region 3729.
+Slight decay was observed in Region 3720 (S06W30, Dao/beta), while
+slight growth was observed in the intermediate spots of Region 3729.
+
+Due to the length and magnetic structure of Region 3723, the region was
+split into two, with the leader portion now Region 3730 (S18E09,
+Cao/beta). The remaining regions were stable and quiet. 
+
+A CME was observed off the SW limb beginning near 27/1730 UTC in LASCO
+C2 imagery. Modelling efforts determined a possible glancing influence
+late on 01 Jul.
+
+.Forecast...
+M-class flares (R1-R2/Minor-Moderate) are likely on 28-30 Jun due
+primarily to the flare potential of Regions 3723 and 3729.
+
+Energetic Particles
+
+.24 hr Summary...
+The greater than 2 MeV electron flux was at normal to moderate levels
+and the greater than 10 MeV proton flux was at background levels.
+
+.Forecast...
+The greater than 2 MeV electron flux is expected to be at normal to
+moderate levels on 28-30 Jun. The greater than 10 MeV proton flux is
+expected to be at background levels on 28-30 Jun.
+
+Solar Wind
+
+.24 hr Summary...
+Solar wind parameters became enhanced after 27/0330 UTC. Total field
+gradually increased to 13 nT while the Bz component was between +9/-8
+nT. Solar wind speed ranged from 315-365 km/s. Phi angle was mostly
+negative.
+
+.Forecast...
+Solar wind conditions are expected to continue to be enhanced through 27
+Jun. An additional enhancement from the large filament eruption observed
+late on 24 June is likely to arrive late on 28 Jun through 29 Jun.
+
+Geospace
+
+.24 hr Summary...
+The geomagnetic field was at quiet to unsettled levels.
+
+.Forecast...
+Unsettled to G1 (Minor) storming is likely late on 28 Jun through 29 Jun
+with the arrival of flanking effects from the 24 Jun CME. Mostly quiet
+conditions are expected on 30 Jun.
