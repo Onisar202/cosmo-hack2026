@@ -26,6 +26,7 @@ from src.store.results import (
     store_result,
 )
 from src.store.schema import connect
+from src.store.verification import select_verification_records
 
 __all__ = [
     "ChecksumMismatchError",
@@ -42,5 +43,6 @@ __all__ = [
     "list_results",
     "select_as_of",
     "select_observed_range",
+    "select_verification_records",
     "store_result",
 ]
