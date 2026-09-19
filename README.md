@@ -5,51 +5,67 @@
 метеороидную обстановку с окнами операции. Предметная постановка и
 критерии оценки — `.ai/main-prompt.md` (§11, §12).
 
-Этап FN-19 сдал каркас: слоистую структуру Python/FastAPI сервиса,
-health-проверку и воспроизводимые проверки качества кода. FN-20 добавил
-контракты (`contracts/`). FN-21 добавил неизменяемое хранилище оригиналов,
-версий записей источников и результатов расчёта (`src/store/`). FN-22
-добавляет коннектор космопогоды — NOAA SWPC, поток протонов >=10 МэВ
-(`src/sources/swpc.py`). FN-24 добавляет коннектор орбитальных элементов
-МКС с CelesTrak (`src/sources/orbit.py`) и первый расчётный модуль —
-распространение орбиты по SGP4 (`src/domain/orbit/propagate.py`). FN-23
-подтверждает пригодность архивов космопогоды для строгого прогноза из
-прошлого — NASA CCMC DONKI (основная линия, весь период
-01.05–30.06.2024) и NOAA SWPC Forecast Discussion из архива NCEI
-(дополнительная линия, с честно зафиксированным пробелом 15.05–16.06.2024)
-— и нормализует их в записи хранилища (`src/sources/archive_probe.py`,
-доказательства — `docs/method.md`). Все коннекторы и зонд регистрируют
-свои источники в общем реестре `sources.yaml`. FN-26 (S1-07) добавляет
-расчётный API (`src/api/`): запуск задания, статус, сохранённый результат,
-список результатов, статусы и принудительное обновление источников — с
-реестром задач в процессе и изоляцией конкурентных запросов.
-Интерпретация обоих обязательных механизмов воздействия (космическая
-погода, MMOD) и строгий исторический режим орбиты (Space-Track
-GP_HISTORY) ещё не реализованы — см. раздел «API» ниже. FN-27 (S1-08)
-добавляет базовый пользовательский путь на React (`web/`): форма
-режим/начало/длительность/период поиска/отсечение `as_of`, запуск расчёта
-через реальный API с отслеживанием статуса, орбитальная сводка,
-статусы источников с давностью, просмотр сохранённого результата и
-демонстрационная панель по всем четырём фикстурам контракта — см. `web/README.md`.
-FN-28 (S1-10) собирает текущие API/UI/SQLite в единое развёртывание (`Dockerfile`,
-`compose.yaml`) и добавляет сквозную проверку этапа — см. раздел
-«Развёртывание» ниже. FN-31 (S2-01, этап 2) добавляет отдельную линию
-внешнего прогноза космопогоды — NOAA SWPC «3-Day Forecast», суточная
-вероятность S1 и выше (`src/sources/noaa_3day_forecast.py`), и её
-доменную интерпретацию для окна ВКД
-(`src/domain/spaceweather/external_forecast.py`) — см. раздел «Внешний
-прогноз NOAA 3-Day S1+» ниже; включает известное ограничение сессии
-(парсер проверен на синтетических, не на реальных сохранённых фикстурах —
-подробности там же и в `docs/method.md` §7.5). FN-36 (S2-06, этап 2)
-реализует слой выгрузки (`src/export/`): машиночитаемый JSON и читаемый
-HTML строятся только из одного уже сохранённого результата — см. раздел
-«Выгрузка» ниже. FN-43 (S3-05, этап 3) добавляет стенд экспериментов Т5
-(`experiments/`) — сравнение production-метода (те же доменные/source-модули,
-что и `mode=current`, применённые к `mode=historical_forecast` напрямую, без
-`src/api/service.py`) с простым базовым методом на выраженном событии
-(10–11 мая 2024), контрольном спокойном периоде (16–27 июня 2024) и заранее
-доказанном архивном пробеле орбиты — см. раздел «Стенд экспериментов Т5
-(FN-43)» ниже и `docs/method.md` §9.
+## Материалы для проверки
+
+| Материал                       | Где смотреть                                                                              |
+| ------------------------------ | ----------------------------------------------------------------------------------------- |
+| Публичный сервис               | **URL будет добавлен после развёртывания. `localhost` не считается доступом для жюри**    |
+| Презентация и сценарий демо    | [`PRESENTATION.md`](PRESENTATION.md)                                                      |
+| Методика и временная честность | [`docs/method.md`](docs/method.md)                                                        |
+| Модель MMOD и ограничения      | [`docs/mechanisms.md`](docs/mechanisms.md)                                                |
+| Эксперимент и baseline         | [`experiments/`](experiments/) и [раздел ниже](#стенд-экспериментов-т5-experiments-fn-43) |
+| Контракты API и результата     | [`contracts/`](contracts/)                                                                |
+| Развёртывание и smoke          | [раздел «Развёртывание»](#развёртывание-fn-28s1-10-доведено-до-production-профиля-fn-45)  |
+
+## Что делает сервис
+
+- сравнивает два окна ВКД одинаковой длительности;
+- оценивает два независимых механизма: космическую погоду и MMOD;
+- использует текущую траекторию МКС; историческая траектория уже доступна
+  через архивный адаптер и подключается к production в FN-41;
+- сохраняет происхождение данных, версии, время публикации и ограничения;
+- применяет правило доминирования без необоснованного общего risk score;
+- показывает конфликт факторов и недостаточность данных вместо ложного
+  благоприятного вывода;
+- сохраняет immutable-результат и выгружает его в JSON и HTML.
+
+## Текущий статус
+
+| Часть                                                    | Статус                                             |
+| -------------------------------------------------------- | -------------------------------------------------- |
+| Текущий режим, два механизма, сравнение окон             | реализовано                                        |
+| Хранение, provenance, JSON/HTML export                   | реализовано                                        |
+| Архивные адаптеры и frozen snapshots                     | реализовано                                        |
+| Production `historical_analysis` / `historical_forecast` | **в работе: FN-41**                                |
+| `source_agreement` и минимальный historical gate         | **в работе: FN-47**                                |
+| Стенд event/control/missing-data                         | реализован; финальный production-прогон ждёт FN-41 |
+| Production-профиль и эксплуатационные скрипты            | готовы к развёртыванию                             |
+| Публичный URL и внешний smoke                            | **ещё не выполнены**                               |
+
+Исторические режимы пока нельзя представлять как готовую функцию
+production API: `src/api/service.py` честно возвращает
+`historical_mode_not_implemented`. После интеграции FN-41 нужно повторить
+эксперимент, сохранить итоговые JSON/HTML и проверить публичный URL с
+внешнего устройства.
+
+## Быстрый запуск через Docker
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+```
+
+Интерфейс: `http://127.0.0.1:8080`. API: `http://127.0.0.1:8000`.
+
+```bash
+curl http://127.0.0.1:8000/health
+docker compose ps
+```
+
+Для production-площадки используйте `scripts/preflight.sh`,
+`scripts/deploy.sh` и `scripts/smoke.sh`; параметры домена, портов и CORS
+задаются через `.env`. Подробности и честно зафиксированные ограничения
+приведены в разделе «Развёртывание».
 
 ## Стек
 
@@ -97,172 +113,48 @@ curl http://127.0.0.1:8000/health
 ```
 
 ```json
-{"status":"ok","service":"vkd-risk-service","app_env":"development","time":"2026-09-18T21:30:58.540824Z"}
+{
+  "status": "ok",
+  "service": "vkd-risk-service",
+  "app_env": "development",
+  "time": "2026-09-18T21:30:58.540824Z"
+}
 ```
 
 ## Проверки
 
-Те же проверки использует CI (`.github/workflows/ci.yml`).
+Те же backend/frontend-проверки запускает `.github/workflows/ci.yml`.
 
 ```bash
-uv run ruff check .    # линтер
-uv run mypy src         # проверка типов
-uv run pytest -v         # тесты (без сети)
+uv run ruff check .
+uv run mypy src tests
+uv run pytest
+
+cd web
+npm ci
+npm run lint
+npm run format:check
+npm run test
+npm run build
+npm run test:e2e:mock
 ```
 
-Результаты на чистом checkout (Python 3.11.15, зависимости из `uv.lock`):
+Последний полный локальный прогон на `main` от 19.09.2026:
 
-```text
-$ uv run ruff check .
-All checks passed!
+| Проверка                     | Результат                           |
+| ---------------------------- | ----------------------------------- |
+| Ruff                         | пройдена                            |
+| Mypy `src tests experiments` | пройдена, 110 source files          |
+| Pytest                       | 505 passed, 1 skipped, 5 deselected |
+| ESLint и Prettier            | пройдены                            |
+| Vitest                       | 21 passed                           |
+| Production build             | пройден                             |
+| Playwright с mock API        | 5 passed                            |
+| `docker compose config`      | валиден                             |
 
-$ uv run mypy src
-Success: no issues found in 25 source files
-
-$ uv run pytest -v
-tests/api/test_isolation.py::test_concurrent_calculations_do_not_mix_parameters_statuses_or_data PASSED
-tests/api/test_isolation.py::test_concurrent_calculations_have_independent_task_status PASSED
-tests/api/test_isolation.py::test_recompute_with_same_parameters_creates_a_new_immutable_result PASSED
-tests/api/test_isolation.py::test_orbit_fetch_status_snapshot_is_not_mutated_by_a_later_concurrent_attempt PASSED
-tests/api/test_isolation.py::test_orbit_fetch_success_after_a_prior_failure_does_not_inherit_the_old_error PASSED
-tests/api/test_isolation.py::test_concurrent_swpc_success_and_failure_do_not_contaminate_each_others_result PASSED
-tests/api/test_requests.py::test_create_calculation_returns_202_pending PASSED
-tests/api/test_requests.py::test_get_calculation_status_unknown_task_is_404 PASSED
-tests/api/test_requests.py::test_get_result_unknown_id_is_404 PASSED
-tests/api/test_requests.py::test_current_mode_full_flow_returns_real_orbit_and_honest_mechanism_gaps PASSED
-tests/api/test_requests.py::test_historical_modes_fail_with_clear_not_implemented[historical_analysis] PASSED
-tests/api/test_requests.py::test_historical_modes_fail_with_clear_not_implemented[historical_forecast] PASSED
-tests/api/test_requests.py::test_orbit_source_failure_fails_the_job_not_a_fake_success PASSED
-tests/api/test_requests.py::test_orbit_source_failure_falls_back_to_last_stored_record PASSED
-tests/api/test_requests.py::test_swpc_source_failure_does_not_fail_the_job PASSED
-tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides0] PASSED
-tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides1] PASSED
-tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides2] PASSED
-tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides3] PASSED
-tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides4] PASSED
-tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides5] PASSED
-tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides6] PASSED
-tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides7] PASSED
-tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides8] PASSED
-tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides9] PASSED
-tests/api/test_requests.py::test_invalid_requests_are_rejected_with_uniform_error_format[overrides10] PASSED
-tests/api/test_requests.py::test_list_results_and_sources_status PASSED
-tests/api/test_requests.py::test_refresh_sources_forces_a_fetch PASSED
-tests/api/test_requests.py::test_swpc_failure_warning_fetch_attempt_id_is_traceable_in_the_log PASSED
-tests/api/test_requests.py::test_negative_elements_age_is_clamped_to_non_negative_in_the_stored_result PASSED
-tests/api/test_requests.py::test_unexpected_internal_error_returns_sanitized_message_not_raw_exception_text PASSED
-tests/orbit/test_propagation.py::test_propagate_matches_independently_published_reference PASSED
-tests/orbit/test_propagation.py::test_load_elements_epoch_matches_independently_parsed_epoch PASSED
-tests/orbit/test_propagation.py::test_propagate_rejects_naive_datetime PASSED
-tests/orbit/test_propagation.py::test_propagate_surfaces_sgp4_error_as_status_not_silence PASSED
-tests/orbit/test_propagation.py::test_time_grid_is_configurable_and_respects_step PASSED
-tests/orbit/test_propagation.py::test_time_grid_default_horizon_is_32_hours PASSED
-tests/orbit/test_propagation.py::test_time_grid_max_hours_is_a_caller_parameter_not_a_constant PASSED
-tests/orbit/test_propagation.py::test_time_grid_requires_aware_start_and_positive_step PASSED
-tests/orbit/test_propagation.py::test_time_grid_always_covers_the_full_window_when_step_does_not_divide_it PASSED
-tests/orbit/test_propagation.py::test_time_grid_covers_window_when_step_is_longer_than_the_window PASSED
-tests/orbit/test_propagation.py::test_elements_age_hours_and_reconstruction_flag PASSED
-tests/orbit/test_propagation.py::test_parse_tle_response_accepts_real_recorded_response PASSED
-tests/orbit/test_propagation.py::test_parse_tle_response_rejects_corrupted_checksum PASSED
-tests/orbit/test_propagation.py::test_parse_tle_response_rejects_unexpected_norad_id PASSED
-tests/orbit/test_propagation.py::test_parse_tle_response_rejects_wrong_line_count PASSED
-tests/orbit/test_propagation.py::test_parse_tle_response_rejects_mismatched_line1_line2_norad_id PASSED
-tests/orbit/test_propagation.py::test_fetch_current_tle_returns_body_on_200 PASSED
-tests/orbit/test_propagation.py::test_fetch_current_tle_raises_quota_error_on_429 PASSED
-tests/orbit/test_propagation.py::test_fetch_current_tle_raises_source_error_on_non_200 PASSED
-tests/orbit/test_propagation.py::test_fetch_current_tle_raises_source_error_on_empty_200_body PASSED
-tests/orbit/test_propagation.py::test_fetch_current_tle_raises_source_error_on_timeout PASSED
-tests/orbit/test_propagation.py::test_require_supported_mode_allows_current PASSED
-tests/orbit/test_propagation.py::test_require_supported_mode_rejects_historical_modes[historical_analysis] PASSED
-tests/orbit/test_propagation.py::test_require_supported_mode_rejects_historical_modes[historical_forecast] PASSED
-tests/orbit/test_propagation.py::test_fetch_elements_for_request_rejects_historical_without_network_call[historical_analysis] PASSED
-tests/orbit/test_propagation.py::test_fetch_elements_for_request_rejects_historical_without_network_call[historical_forecast] PASSED
-tests/orbit/test_propagation.py::test_fetch_elements_for_request_current_mode_returns_parsed_elements PASSED
-tests/orbit/test_propagation.py::test_build_orbital_elements_record_is_never_replay_eligible PASSED
-tests/orbit/test_propagation.py::test_refined_elements_at_the_same_epoch_get_a_new_version_not_a_conflict PASSED
-tests/sources/test_swpc.py::test_parse_response_filters_to_target_energy_channel PASSED
-tests/sources/test_swpc.py::test_parse_response_keeps_plausible_flux_value PASSED
-tests/sources/test_swpc.py::test_parse_response_maps_negative_sentinel_to_none_not_zero PASSED
-tests/sources/test_swpc.py::test_parse_response_rejects_boolean_flux PASSED
-tests/sources/test_swpc.py::test_parse_response_rejects_string_flux PASSED
-tests/sources/test_swpc.py::test_parse_response_rejects_non_finite_flux[Infinity] PASSED
-tests/sources/test_swpc.py::test_parse_response_rejects_non_finite_flux[-Infinity] PASSED
-tests/sources/test_swpc.py::test_parse_response_rejects_non_finite_flux[NaN] PASSED
-tests/sources/test_swpc.py::test_parse_response_flags_yaw_flip_period_as_degraded PASSED
-tests/sources/test_swpc.py::test_parse_response_rejects_empty_array PASSED
-tests/sources/test_swpc.py::test_parse_response_rejects_empty_body PASSED
-tests/sources/test_swpc.py::test_parse_response_rejects_non_json_body PASSED
-tests/sources/test_swpc.py::test_parse_response_rejects_missing_target_channel PASSED
-tests/sources/test_swpc.py::test_parse_response_rejects_non_list_payload PASSED
-tests/sources/test_swpc.py::test_parse_response_accepts_time_tag_without_z_suffix_as_utc PASSED
-tests/sources/test_swpc.py::test_to_record_input_has_no_published_at_and_is_not_replay_eligible PASSED
-tests/sources/test_swpc.py::test_to_record_input_missing_value_has_no_unit PASSED
-tests/sources/test_swpc.py::test_to_record_input_degraded_quality_for_yaw_flip PASSED
-tests/sources/test_swpc.py::test_content_derived_source_version_allows_later_correction_as_new_row PASSED
-tests/sources/test_swpc.py::test_repeated_fetch_of_same_value_is_idempotent PASSED
-tests/sources/test_swpc.py::test_raw_bytes_are_canonical_per_entry_not_whole_rolling_response PASSED
-tests/sources/test_swpc.py::test_http_fetch_retries_transient_5xx_then_succeeds PASSED
-tests/sources/test_swpc.py::test_http_fetch_gives_up_after_max_retries PASSED
-tests/sources/test_swpc.py::test_http_fetch_429_is_not_retried_and_raises_quota_error PASSED
-tests/sources/test_swpc.py::test_http_fetch_429_retry_after_as_http_date_is_parsed_relative_to_now PASSED
-tests/sources/test_swpc.py::test_http_fetch_timeout_after_retries_raises_timeout_error PASSED
-tests/sources/test_swpc.py::test_http_fetch_does_not_retry_permanent_4xx PASSED
-tests/sources/test_swpc.py::test_fetch_and_store_success_stores_records_and_updates_status PASSED
-tests/sources/test_swpc.py::test_fetch_and_store_skips_network_within_ttl_then_refreshes_after PASSED
-tests/sources/test_swpc.py::test_fetch_and_store_force_bypasses_ttl PASSED
-tests/sources/test_swpc.py::test_fetch_and_store_frozen_never_touches_network_even_when_forced PASSED
-tests/sources/test_swpc.py::test_fetch_and_store_disabled_source_never_touches_network PASSED
-tests/sources/test_swpc.py::test_fetch_and_store_quota_429_gives_explicit_status_not_a_favorable_one PASSED
-tests/sources/test_swpc.py::test_fetch_and_store_respects_quota_cooldown_until_retry_after_expires PASSED
-tests/sources/test_swpc.py::test_fetch_and_store_timeout_gives_explicit_status PASSED
-tests/sources/test_swpc.py::test_fetch_and_store_unexpected_format_gives_explicit_status_not_favorable PASSED
-tests/sources/test_swpc.py::test_fetch_and_store_reports_error_when_every_sample_conflicts PASSED
-tests/sources/test_swpc.py::test_fetch_and_store_reports_error_on_partial_conflict_not_stored PASSED
-tests/sources/test_swpc.py::test_fetch_and_store_error_preserved_after_later_recovery PASSED
-tests/sources/test_swpc.py::test_staleness_seconds_is_none_without_any_success PASSED
-tests/sources/test_swpc.py::test_never_succeeded_source_counts_as_critically_stale PASSED
-tests/sources/test_swpc.py::test_is_critically_stale_true_past_threshold_false_before PASSED
-tests/sources/test_swpc.py::test_effective_status_disabled_config_forces_frozen_true PASSED
-tests/sources/test_swpc.py::test_load_source_config_reads_real_sources_yaml PASSED
-tests/sources/test_swpc.py::test_load_source_config_raises_for_unknown_source_id PASSED
-tests/sources/test_swpc.py::test_live_smoke SKIPPED (live-smoke: реа...)
-tests/store/test_as_of.py::test_publication_after_cutoff_is_excluded PASSED
-tests/store/test_as_of.py::test_records_without_published_at_never_selected PASSED
-tests/store/test_as_of.py::test_newer_publication_after_cutoff_does_not_leak_even_as_a_refinement PASSED
-tests/store/test_as_of.py::test_select_as_of_returns_latest_eligible_version_of_the_same_product PASSED
-tests/store/test_as_of.py::test_select_as_of_filters_by_source_id_and_record_kind PASSED
-tests/store/test_as_of.py::test_select_as_of_at_exact_cutoff_is_inclusive PASSED
-tests/store/test_versions.py::test_later_refinement_does_not_overwrite_old PASSED
-tests/store/test_versions.py::test_duplicate_insert_is_idempotent_and_no_double_impact PASSED
-tests/store/test_versions.py::test_missing_published_at_is_not_replay_eligible PASSED
-tests/store/test_versions.py::test_null_value_is_preserved_not_replaced_with_zero PASSED
-tests/store/test_versions.py::test_original_is_recoverable_by_record_id_with_matching_checksum PASSED
-tests/store/test_versions.py::test_checksum_mismatch_is_detected PASSED
-tests/store/test_versions.py::test_store_module_exposes_no_update_or_delete PASSED
-tests/store/test_versions.py::test_result_is_immutable_recompute_creates_new_result_id PASSED
-tests/store/test_versions.py::test_store_result_rejects_manifest_referencing_unknown_record PASSED
-tests/store/test_versions.py::test_different_results_parameters_are_isolated PASSED
-tests/store/test_versions.py::test_records_and_results_survive_restart PASSED
-tests/store/test_versions.py::test_record_input_rejects_naive_datetime PASSED
-tests/store/test_versions.py::test_record_input_rejects_empty_source_version PASSED
-tests/store/test_versions.py::test_duplicate_key_with_different_content_is_a_conflict_not_a_duplicate PASSED
-tests/store/test_versions.py::test_duplicate_key_with_identical_content_is_idempotent PASSED
-tests/store/test_versions.py::test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict[override0] PASSED
-tests/store/test_versions.py::test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict[override1] PASSED
-tests/store/test_versions.py::test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict[override2] PASSED
-tests/store/test_versions.py::test_duplicate_key_with_same_original_but_different_normalized_field_is_a_conflict[override3] PASSED
-tests/store/test_versions.py::test_published_at_offset_is_normalized_to_utc_before_comparison PASSED
-tests/test_health.py::test_health_returns_200_ok PASSED
-tests/test_health.py::test_health_time_is_utc_aware PASSED
-tests/test_health.py::test_settings_requires_app_env PASSED
-tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
-135 passed, 1 skipped
-```
-
-`test_live_smoke` пропускается намеренно: детерминированные тесты парсера
-гоняются на сохранённых реальных ответах (`tests/fixtures/sources/swpc/`,
-см. её README про их происхождение), а не на живой сети
-(.ai/main-prompt.md §9 «тесты детерминированы, live-smoke отдельно»).
+Live-проверки источников и развёрнутого стека выполняются отдельно, чтобы
+обычный CI оставался детерминированным. Перед сдачей нужно повторить полный
+прогон после FN-41/FN-47 и сохранить ссылку на зелёный CI.
 
 ## Хранилище (`src/store/`)
 
@@ -325,11 +217,12 @@ tests/test_health.py::test_settings_rejects_unknown_app_env PASSED
 
 ## Источники (`src/sources/`)
 
-Слой получения: коннекторы, парсеры, нормализация ответа источника в
-`RecordInput` для `src/store/` (.ai/main-prompt.md §8 — не интерпретирует
-данные и не считает физику). Первый и пока единственный коннектор —
-NOAA SWPC, интегральный поток протонов `>=10 МэВ` (Механизм 1
-«Радиационная обстановка», main-prompt.md §11).
+Слой получения содержит коннекторы, парсеры и нормализацию ответов источников
+в `RecordInput` для `src/store/` (.ai/main-prompt.md §8): он не
+интерпретирует данные и не считает физику. Основные линии включают NOAA SWPC,
+NASA DONKI, CelesTrak, исторический NASA ISS OEM и NASA MEO. Ниже подробно
+описан текущий поток протонов NOAA SWPC `>=10 МэВ` для механизма
+«Радиационная обстановка».
 
 - **`src/sources/http.py`** — общий HTTP-клиент для всех коннекторов:
   раздельные таймауты на соединение и на чтение, ограниченное число
@@ -538,7 +431,7 @@ egress-прокси песочницы (`403` на каждый проверен
   точка входа для исторических режимов):
   - `select_release_for_forecast` — `historical_forecast`:
     `published_at <= as_of` И интервал `[USEABLE_START_TIME,
-    USEABLE_STOP_TIME]` выпуска покрывает расчётный интервал целиком; среди
+USEABLE_STOP_TIME]` выпуска покрывает расчётный интервал целиком; среди
     пригодных — максимальный `published_at`. Ни при каких обстоятельствах
     не берётся более поздний или не покрывающий выпуск, и не современные
     элементы CelesTrak.
@@ -593,7 +486,7 @@ shapes для S1-07»; тонкие роутеры — `src/api/routes.py`, вс
 - **`GET /api/results/{result_id}`** / **`GET /api/results`** — сохранённый
   результат целиком или постранично урезанный список.
 - **`GET /api/results/{result_id}/export.json`** / **`GET
-  /api/results/{result_id}/export.html`** (FN-36, S2-06) — машиночитаемый
+/api/results/{result_id}/export.html`** (FN-36, S2-06) — машиночитаемый
   JSON и читаемый HTML из этого же сохранённого результата, см. раздел
   «Выгрузка» ниже.
 - **`POST /api/sources/refresh`** / **`GET /api/sources/status`** —
@@ -640,7 +533,7 @@ shapes для S1-07»; тонкие роутеры — `src/api/routes.py`, вс
   записями»);
   поток протонов NOAA SWPC при доступности тоже получается и сохраняется
   (виден в `source_status`) и **с FN-38 входит в манифест** (`record_kind:
-  "observation"`) ровно тогда, когда реально попал в покрытый сегмент хотя
+"observation"`) ровно тогда, когда реально попал в покрытый сегмент хотя
   бы одного окна — запись вне покрытия окна не создаёт видимость
   использования, которого не было;
 - **суточная вероятность S1+ NOAA 3-Day Forecast (FN-31) тоже используется**,
@@ -677,13 +570,12 @@ shapes для S1-07»; тонкие роутеры — `src/api/routes.py`, вс
   элементов — не пустым или придуманным результатом;
 - `mode ∈ {historical_analysis, historical_forecast}` внутри поддерживаемого
   периода (1 мая — 30 июня 2024) сейчас всегда завершается понятной ошибкой
-  задачи `historical_mode_not_implemented`: строгий исторический режим
-  требует исторических орбитальных элементов (Space-Track `GP_HISTORY`),
-  коннектор которых ещё не реализован (`src/sources/orbit.py`,
-  `sources.yaml`), а современные элементы CelesTrak не подставляются вместо
-  исторических ни при каких обстоятельствах (main-prompt.md §11
-  «Траектория») — это осознанный `not_implemented`-отказ задачи, а не
-  фиктивный успех;
+  задачи `historical_mode_not_implemented`: архивный адаптер NASA ISS OEM и
+  frozen snapshots уже реализованы, но production-оркестрация FN-41 ещё не
+  подключила их к `src/api/service.py`. Современные элементы CelesTrak не
+  подставляются вместо исторических ни при каких обстоятельствах
+  (main-prompt.md §11 «Траектория»). Это осознанный `not_implemented`-отказ,
+  а не фиктивный успех;
 - `lighting_constraint` в теле запроса отклоняется `422`: `src/domain/lighting`
   не реализован, а `contracts/result.schema.json` → `window.lighting.status`
   не имеет значения «не реализовано» (только
@@ -770,7 +662,7 @@ main-prompt.md §9 п.7, backend-prompt.md §2): каждая фоновая з�
   предупреждений/пояснений/рекомендации выводится ровно так, как хранится в
   результате (main-prompt.md §4, §12).
 - **Неизвестный `result_id`** — тот же `404 {"error": {"code":
-  "result_not_found", ...}}`, что и у `GET /api/results/{result_id}`: оба
+"result_not_found", ...}}`, что и у `GET /api/results/{result_id}`: оба
   формата выгрузки используют один и тот же вызов чтения хранилища.
 - **Повреждённый/невалидный сохранённый payload** (например будущий дрейф
   контракта без изменения уже записанных строк SQLite) не превращается в
@@ -799,16 +691,16 @@ main-prompt.md §9 п.7, backend-prompt.md §2): каждая фоновая з�
   `src/domain/mmod/background.py`, `src/domain/windows`) — теми же
   модулями, что и `mode="current"` в `src/api/service.py`, но НЕ вызывая
   этот модуль (его `mode != "current"` путь сейчас поднимает
-  `historical_mode_not_implemented`: FN-41/FN-42 — отдельные, ещё не
-  слитые задачи production-оркестрации и строгого архивного провайдера
-  космопогоды). `mechanisms[*space_weather]` в этом стенде честно всегда
+  `historical_mode_not_implemented`: архивный адаптер FN-42 уже слит, а
+  production-оркестрация FN-41 ещё не подключена). В текущем стенде
+  `mechanisms[*space_weather]` честно всегда
   `status="missing_data"` — в репозитории нет архивного количественного
   наблюдения потока протонов (только живой `noaa-swpc-proton-flux`,
   никогда не `replay_eligible`), а придумывать DONKI→шкала-S классификацию
   значило бы подменить отсутствующую интеграцию фиктивным успехом
   (main-prompt.md §2) — это прямо демонстрирует критерий О2 «без
   необоснованных заявлений» и даёт честный `recommendation.status =
-  "all_windows_excluded"` по правилу критического пробела
+"all_windows_excluded"` по правилу критического пробела
   (main-prompt.md §11, п.1). MMOD (`mmod`), напротив, реально `status="ok"`
   — годовой документ NASA MEO 2024 покрывает весь обязательный период.
 - **`experiments/donki_evidence.py`** — архивная evidence-проба DONKI (**не
@@ -832,10 +724,20 @@ main-prompt.md §9 п.7, backend-prompt.md §2): каждая фоновая з�
 uv run python -m experiments.run --config experiments/scenarios.yaml --out experiments/out
 ```
 
-Детерминировано (`result_id`/`computed_at`/`record_id` — не `uuid4()`/
-`datetime.now()`, см. `experiments/run.py`/`experiments/determinism.py`):
-повторный прогон даёт побайтово идентичные JSON-артефакты. Для каждого
-сценария (`experiments/out/<scenario>/`):
+В Windows-консоли с кодировкой cp1251 перед запуском задайте UTF-8, иначе
+печать символа `×` в итоговой таблице может завершить CLI с ошибкой уже после
+записи артефактов:
+
+```powershell
+$env:PYTHONIOENCODING = "utf-8"
+uv run python -m experiments.run --config experiments/scenarios.yaml --out experiments/out
+```
+
+Идентификаторы результата и записей детерминированы относительно входных
+данных. `computed_at` отражает фактическое время запуска, поэтому два обычных
+прогона не обязаны быть побайтово идентичны. Для строгого сравнения нужно
+передать одинаковый `run_started_at` либо нормализовать служебные временные
+поля. Для каждого сценария (`experiments/out/<scenario>/`):
 
 - `baseline_result.json` — свой вердикт базового метода по каждому окну,
   с трассировкой к использованному уведомлению DONKI;
@@ -879,6 +781,7 @@ docker/
 └── nginx.conf.template  # Реверс-прокси web -> api, envsubst по env (FN-45)
 scripts/        # Preflight/deploy/upgrade/rollback/backup/restore/smoke (FN-45,
                 # раздел «Развёртывание» → «Production-профиль»)
+PRESENTATION.md # 11 слайдов, заметки докладчика и сценарий screencast
 experiments/    # Стенд Т5 (FN-43): production.py/baseline.py/donki_evidence.py/metrics.py/
                 # run.py/config.py/fixtures.py/determinism.py, scenarios.yaml, out/ (артефакты)
 docs/
@@ -930,9 +833,10 @@ docker compose ps          # оба сервиса: healthy
 - health: `curl -fsS http://localhost:8000/health`
 
 Секретов на этом этапе нет (`APP_ENV`/`LOG_LEVEL`/пути хранилища заданы
-прямо в `compose.yaml` — main-prompt.md §7 «пороги, адреса — в конфиге»;
-переменные Space-Track появятся вместе с историческим коннектором и тогда
-же попадут в `.env.example`/секреты окружения, а не в `compose.yaml`).
+прямо в `compose.yaml` — main-prompt.md §7 «пороги, адреса — в конфиге»).
+Основной исторический путь NASA ISS OEM публичный и не требует ключа.
+Учётные данные понадобятся только при будущем подключении опционального
+Space-Track и должны попасть в секреты окружения, а не в `compose.yaml`.
 
 ### Постоянство: перезапуск не теряет результат
 
@@ -1029,15 +933,15 @@ production-нормализатор, но являются тестовыми 5/
 Остальная матрица рисков не дублируется в одном огромном тесте, а входит в
 тот же обязательный прогон `uv run pytest`:
 
-| Проверка FN-37 | Доказательство |
-| --- | --- |
-| конфликт, равенство, доминирование, оба окна исключены | `tests/api/test_window_dominance_integration.py`, `tests/api/test_mmod_wiring.py` |
-| источник отключён/заморожен/429/timeout/устарел/восстановился | `tests/sources/test_swpc.py`, `tests/api/test_observed_flux_integration.py` |
-| два конкурентных запроса изолированы | `tests/api/test_isolation.py`, `tests/integration/test_stage1.py` |
-| суточная NOAA вероятность не стала почасовой | `tests/domain/spaceweather/test_external_forecast.py`, `tests/api/test_requests.py` |
-| MMOD без неподтверждённой нормировки | `tests/mmod/test_background.py`, `tests/sources/test_mmod.py` |
-| исторические элементы: gate FN-33 готов, full historical API остаётся этапом 3 | `tests/orbit/test_orbit_history.py`, `tests/fixtures/orbit/history/README.md` |
-| UI: оба механизма, конфликт, неполнота, смена параметров | `web/tests/uiStates.spec.ts`, `web/tests/stage1.spec.ts` |
+| Проверка FN-37                                                                 | Доказательство                                                                      |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| конфликт, равенство, доминирование, оба окна исключены                         | `tests/api/test_window_dominance_integration.py`, `tests/api/test_mmod_wiring.py`   |
+| источник отключён/заморожен/429/timeout/устарел/восстановился                  | `tests/sources/test_swpc.py`, `tests/api/test_observed_flux_integration.py`         |
+| два конкурентных запроса изолированы                                           | `tests/api/test_isolation.py`, `tests/integration/test_stage1.py`                   |
+| суточная NOAA вероятность не стала почасовой                                   | `tests/domain/spaceweather/test_external_forecast.py`, `tests/api/test_requests.py` |
+| MMOD без неподтверждённой нормировки                                           | `tests/mmod/test_background.py`, `tests/sources/test_mmod.py`                       |
+| исторические элементы: gate FN-33 готов, full historical API остаётся этапом 3 | `tests/orbit/test_orbit_history.py`, `tests/fixtures/orbit/history/README.md`       |
+| UI: оба механизма, конфликт, неполнота, смена параметров                       | `web/tests/uiStates.spec.ts`, `web/tests/stage1.spec.ts`                            |
 
 Live-путь остаётся отдельной проверкой поверх поднятого стека:
 
@@ -1091,13 +995,13 @@ compose подхватывает `.env` рядом с `compose.yaml` автом�
 умолчанию воспроизводят локальный стек из раздела выше — ни одна из них не
 обязательна для `docker compose up`.
 
-| Переменная | По умолчанию | Что делает |
-| --- | --- | --- |
-| `API_PORT` | `8000` | порт API на хосте |
-| `WEB_PORT` | `8080` | порт UI (nginx) на хосте |
-| `CORS_ALLOWED_ORIGINS` | пусто | origin через запятую; пусто — `CORSMiddleware` не подключается вовсе (UI и API на одном origin через nginx-прокси, `src/config.py:Settings.cors_origins`, `src/api/app.py`). Нужна, только если UI обращается к API напрямую с другого домена |
-| `API_UPSTREAM` | `api:8000` | куда nginx проксирует `/api`/`/health` (`docker/nginx.conf.template`) |
-| `NGINX_SERVER_NAME` | `_` | `server_name` nginx — сюда подставляется публичный домен площадки |
+| Переменная             | По умолчанию | Что делает                                                                                                                                                                                                                                    |
+| ---------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `API_PORT`             | `8000`       | порт API на хосте                                                                                                                                                                                                                             |
+| `WEB_PORT`             | `8080`       | порт UI (nginx) на хосте                                                                                                                                                                                                                      |
+| `CORS_ALLOWED_ORIGINS` | пусто        | origin через запятую; пусто — `CORSMiddleware` не подключается вовсе (UI и API на одном origin через nginx-прокси, `src/config.py:Settings.cors_origins`, `src/api/app.py`). Нужна, только если UI обращается к API напрямую с другого домена |
+| `API_UPSTREAM`         | `api:8000`   | куда nginx проксирует `/api`/`/health` (`docker/nginx.conf.template`)                                                                                                                                                                         |
+| `NGINX_SERVER_NAME`    | `_`          | `server_name` nginx — сюда подставляется публичный домен площадки                                                                                                                                                                             |
 
 `API_UPSTREAM`/`NGINX_SERVER_NAME` рендерятся в `/etc/nginx/conf.d/default.conf`
 встроенным `docker-entrypoint` образа `nginx:1.27-alpine` (`envsubst` по
@@ -1204,24 +1108,25 @@ healthcheck проходят на чистом окружении`) нужен �
 
 Согласованной площадки и секретов для внешнего (публичного) развёртывания
 на этом этапе всё ещё нет — эта задача **готовит профиль**, а не покупает
-хостинг и не выполняет публичный acceptance (зависимость FN-41/FN-42,
-задача этой же итерации). Три разных утверждения, которые эта задача не
+хостинг и не выполняет публичный acceptance. Финальный smoke ждёт
+production historical orchestration FN-41 и готовую площадку. Три разных
+утверждения, которые эта задача не
 путает:
 
 - **local verified** — то, что реально запущено и проверено: `uv run
-  pytest`/`ruff`/`mypy` зелёные (включая эту задачу), `docker compose
-  config` валиден, `tests/integration/test_stage1.py` и
+pytest`/`ruff`/`mypy` зелёные (включая эту задачу), `docker compose
+config` валиден, `tests/integration/test_stage1.py` и
   `web/tests/stage1.spec.ts` проходили на контрольном прогоне FN-37
   (раздел выше) на прежней (докerfile/nginx.conf) версии профиля.
 - **deployment-ready** — то, что добавляет эта задача: production-профиль
   (переменные окружения площадки/CORS/reverse proxy, `scripts/`
   deploy/upgrade/rollback/backup/restore/smoke, preflight с понятной
   ошибкой) существует и готов к использованию, но живой `docker compose
-  build/up` на этом профиле не прогонялся в этой сессии (см. раздел выше)
+build/up` на этом профиле не прогонялся в этой сессии (см. раздел выше)
   — это открытый пункт для ревью/приёмки, не «сделано».
 - **publicly deployed** — **не выполнено**. `http://localhost:8080` не
   выдаётся за URL, доступный жюри: это адрес локального стека на машине
   того, кто его запустил. Публичный URL и независимая проверка — после
-  появления согласованной площадки (FN-41/FN-42); этой задачей остаётся
+  появления согласованной площадки и завершения FN-41; этой задачей остаётся
   **только** provision/env/DNS/TLS/smoke по инструкции выше — без правки
   бизнес-кода.
