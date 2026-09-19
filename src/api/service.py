@@ -6,18 +6,24 @@ HTTP-ответ. Вся логика — здесь.
 
 Исходное решение объёма задачи S1-07 (API и хранение, не интерпретация
 механизмов) оставляло оба обязательных механизма воздействия
-``status = "not_implemented"`` в каждом окне. FN-38 (S2-08) подключает
-``src/domain/spaceweather/observed_classifier.py`` — классификацию
-НАБЛЮДАЕМОГО потока протонов GOES по шкале S NOAA (не путать с уже
-подключённым FN-31 внешним суточным прогнозом-вероятностью, той же линией
-``space_weather``, но другой величиной): ``mechanisms[*space_weather]``
-теперь несёт ``status = "ok"`` (реальные уровень/exceedance), когда окно
-полностью покрыто пригодными отсчётами в пределах ожидаемого шага между
-измерениями, и явные ``missing_data``/``stale_data``/``source_error``/
-``beyond_horizon`` иначе (main-prompt.md §2 — отказ/пробел не подменяется
-благоприятной оценкой; см. ``_space_weather_status``). ``domain/mmod`` (FN-39)
-ещё не реализован — ``mmod`` остаётся ``not_implemented`` в каждом окне до
-отдельного закрытия его научного гейта.
+``status = "not_implemented"`` в каждом окне. С тех пор оба обязательных
+механизма подключены к реальной оценке:
+
+- FN-38 (S2-08) подключает ``src/domain/spaceweather/observed_classifier.py``
+  — классификацию НАБЛЮДАЕМОГО потока протонов GOES по шкале S NOAA (не
+  путать с уже подключённым FN-31 внешним суточным прогнозом-вероятностью,
+  той же линией ``space_weather``, но другой величиной):
+  ``mechanisms[*space_weather]`` несёт ``status = "ok"`` (реальные
+  уровень/exceedance), когда окно полностью покрыто пригодными отсчётами в
+  пределах ожидаемого шага между измерениями, и явные
+  ``missing_data``/``stale_data``/``source_error``/``beyond_horizon`` иначе
+  (main-prompt.md §2 — отказ/пробел не подменяется благоприятной оценкой;
+  см. ``_space_weather_status``).
+- FN-32 (геометрия) и FN-39 (``ratio_to_background``/пороги/подключение, см.
+  :func:`_mmod_mechanism_assessment`) реализуют Механизм 2 (MMOD):
+  ``mechanisms[*]`` с ``mechanism="mmod"`` несёт настоящую оценку
+  (``status`` — ``ok``, ``missing_data`` или ``source_error``, не всегда
+  ``not_implemented``).
 
 По той же причине ``mode in {historical_analysis, historical_forecast}``
 сейчас не может дать результат: строгий historical режим требует
@@ -47,6 +53,7 @@ from referencing import Registry, Resource
 
 from src.api.schemas import ALGORITHM_VERSION, CalculationRequest, iso_utc
 from src.config import Settings
+from src.domain.mmod import background as mmod_background
 from src.domain.orbit.propagate import (
     PropagationError,
     elements_age_hours,
@@ -67,6 +74,7 @@ from src.domain.spaceweather.observed_classifier import (
     observed_proton_samples_from_records,
 )
 from src.domain.windows import WindowCandidate, excluded_windows, recommend
+from src.sources import mmod as mmod_source
 from src.sources import noaa_3day_forecast as noaa_3day_source
 from src.sources import orbit
 from src.sources import swpc as swpc_source
@@ -237,18 +245,33 @@ def fetch_and_store_orbit(
         )
     except orbit.OrbitSourceQuotaError as exc:
         return _orbit_fetch_failed(
-            conn, registry, now=now, norad_id=norad_id, outcome="error_quota",
-            exc=exc, quota_limited=True,
+            conn,
+            registry,
+            now=now,
+            norad_id=norad_id,
+            outcome="error_quota",
+            exc=exc,
+            quota_limited=True,
         )
     except orbit.OrbitSourceError as exc:
         return _orbit_fetch_failed(
-            conn, registry, now=now, norad_id=norad_id, outcome="error_source",
-            exc=exc, quota_limited=False,
+            conn,
+            registry,
+            now=now,
+            norad_id=norad_id,
+            outcome="error_source",
+            exc=exc,
+            quota_limited=False,
         )
     except orbit.CorruptedElementsError as exc:
         return _orbit_fetch_failed(
-            conn, registry, now=now, norad_id=norad_id, outcome="error_corrupted",
-            exc=exc, quota_limited=False,
+            conn,
+            registry,
+            now=now,
+            norad_id=norad_id,
+            outcome="error_corrupted",
+            exc=exc,
+            quota_limited=False,
         )
 
     record = orbit.build_orbital_elements_record(
@@ -405,31 +428,6 @@ def _noaa_3day_attempt_status(
     return registry.get(noaa_3day_source.SOURCE_ID)
 
 
-def _not_implemented_mechanism(mechanism: Literal["mmod"]) -> dict[str, Any]:
-    """Заглушка ``mechanismAssessment`` для механизма без готовой пороговой
-    интерпретации (main-prompt.md §11). С FN-38 (S2-08) применяется только к
-    ``mmod`` — научный гейт нормировки MMOD (FN-32/FN-39) ещё не закрыт, этот
-    механизм по-прежнему честно не имитируется готовым значением.
-    ``space_weather`` с FN-38 строится отдельно, через
-    ``_space_weather_mechanism`` (наблюдение GOES + внешний прогноз NOAA
-    3-Day), и этой заглушкой больше не пользуется.
-    """
-    return {
-        "mechanism": mechanism,
-        "status": "not_implemented",
-        "max_level": None,
-        "exceedance_hours_by_level": None,
-        "coverage_fraction": 0.0,
-        "critical_gap": True,
-        "notes": [
-            "Интерпретация механизма MMOD (main-prompt.md §11, Механизм 2) не "
-            "реализована в этой версии сервиса — оценка не имитируется готовым "
-            "значением."
-        ],
-        "record_ids": [],
-    }
-
-
 def _space_weather_status(
     assessment: ObservedFluxAssessment,
     *,
@@ -584,27 +582,112 @@ def _noaa_3day_config_enabled() -> bool:
         return True
 
 
+def _mmod_mechanism_assessment(
+    conn: sqlite3.Connection,
+    raw_store: RawOriginalStore,
+    *,
+    start_at: datetime,
+    duration_hours: float,
+    now: datetime,
+    log_ctx: dict[str, Any],
+) -> dict[str, Any]:
+    """Реальная оценка Механизма 2 (MMOD) для одного окна — FN-39 (S2-08).
+
+    Закрывает научный gate FN-32: ``ratio_to_background`` даёт
+    ``src.domain.mmod.background`` из уже согласованно отнормированного
+    первичного источника (``sources.yaml#nasa-meo-leo-forecast-2024``), не
+    эвристический коэффициент. Только эта, годовая (2024), линия участвует
+    в численном уровне — геометрия станции (``src.domain.mmod.geometry``,
+    FN-32: экранирование, относительная скорость, ``effective_flux_ratio``)
+    сюда НЕ перемножается (решение владельца задачи FN-39,
+    ``sources.yaml#nasa-meo-leo-forecast-2024`` implementation_note): NASA
+    factor уже worst-case для полностью открытой, обращённой к радианту
+    площадки (не привязан к конкретной траектории станции), а повторное
+    умножение на геометрию исказило бы уже нормированное число. Совместное
+    траекторное объединение с ориентацией конкретной поверхности — вне
+    объёма этой задачи, отдельное развитие ``src/domain/mmod/geometry.py``.
+
+    Реальный `now` этого окружения (2026+) лежит за пределами годового
+    документа NASA (только 2024) — в `mode=current` это ЧЕСТНО даёт
+    ``status="missing_data"``/``critical_gap=True`` (main-prompt.md §2: за
+    пределами данных — не спокойная обстановка), не имитирует уровень.
+    Тесты (``tests/api/``) проверяют ok/conflict/equal/critical_gap
+    сценарии через инъекцию ``now`` внутри обязательного периода
+    01.05–30.06.2024, тем же способом, что и остальные тесты этого модуля.
+    """
+    end_at = start_at + timedelta(hours=duration_hours)
+    try:
+        _record_ids, doc_start, doc_end = mmod_source.ensure_mmod_records_for_window(
+            conn, raw_store, window_start=start_at, window_end=end_at, fetched_at=now
+        )
+        mmod_records = select_as_of(
+            conn, now, source_id=mmod_source.SOURCE_ID, record_kind="forecast"
+        )
+        nodes = mmod_background.background_nodes_from_records(mmod_records)
+        assessment = mmod_background.assess_mmod_background(
+            nodes,
+            window_start=start_at,
+            window_end=end_at,
+            document_grid_start=doc_start,
+            document_grid_end=doc_end,
+        )
+    except Exception as exc:  # noqa: BLE001 — отказ этого источника не должен
+        # обрушивать расчёт целиком (.ai/main-prompt.md §5), тем же
+        # принципом, что и swpc/noaa_3day-блоки выше; бандловый файл не
+        # ходит в сеть, но повреждение/отсутствие файла — тот же класс
+        # отказа источника, не бизнес-ошибка расчёта.
+        error_message = sanitize_unexpected_error(exc)
+        _log("mmod_background_failed", error=error_message, **log_ctx)
+        return {
+            "mechanism": "mmod",
+            "status": "source_error",
+            "max_level": None,
+            "exceedance_hours_by_level": None,
+            "coverage_fraction": 0.0,
+            "critical_gap": True,
+            "notes": [
+                "NASA MEO 2024 LEO forecast: ошибка при получении/оценке "
+                f"({error_message}) — критический пробел, не спокойная обстановка "
+                "(main-prompt.md §2)."
+            ],
+            "record_ids": [],
+        }
+    return {
+        "mechanism": "mmod",
+        "status": assessment.status,
+        "max_level": assessment.max_level,
+        "exceedance_hours_by_level": assessment.exceedance_hours_by_level,
+        "coverage_fraction": assessment.coverage_fraction,
+        "critical_gap": assessment.critical_gap,
+        "notes": list(assessment.notes),
+        "record_ids": list(assessment.record_ids),
+    }
+
+
 def _window(
     window_id: str,
     start_at: datetime,
     duration_hours: float,
     *,
     space_weather_mechanism: dict[str, Any],
+    mmod_mechanism: dict[str, Any],
 ) -> dict[str, Any]:
     """Строит окно без ``excluded_from_comparison``/``exclusion_reason`` —
     эти два поля решает правило доминирования v2 (FN-34,
     ``src.domain.windows``) над ГОТОВЫМ набором окон, см.
     :func:`_apply_window_dominance`, а не эта функция для одного окна в
-    изоляции. ``space_weather_mechanism`` строится заранее вызывающей
-    стороной (:func:`_space_weather_mechanism`) — эта функция лишь собирает
-    окно целиком, не решает уровень/статус механизма."""
+    изоляции. Оба механизма строятся заранее вызывающей стороной —
+    ``space_weather_mechanism`` через :func:`_space_weather_mechanism`
+    (FN-38), ``mmod_mechanism`` через :func:`_mmod_mechanism_assessment`
+    (FN-39) — эта функция лишь собирает окно целиком, не решает
+    уровень/статус ни одного механизма."""
     end_at = start_at + timedelta(hours=duration_hours)
     return {
         "window_id": window_id,
         "start_at": iso_utc(start_at),
         "end_at": iso_utc(end_at),
         "duration_hours": duration_hours,
-        "mechanisms": [space_weather_mechanism, _not_implemented_mechanism("mmod")],
+        "mechanisms": [space_weather_mechanism, mmod_mechanism],
         "lighting": {"requested": False, "status": "not_requested", "note": None},
     }
 
@@ -617,16 +700,20 @@ def _apply_window_dominance(windows: list[dict[str, Any]]) -> dict[str, Any]:
     месте (тот же паттерн, что и остальная сборка результата в этом модуле)
     и возвращает ``recommendation`` для `result`.
 
-    До FN-38 оба механизма (space_weather/mmod) всегда несли
+    До FN-38/FN-39 оба механизма (space_weather/mmod) всегда несли
     ``status = "not_implemented"``/``critical_gap = True``, поэтому это
     неизбежно давало ``all_windows_excluded`` для любого запроса. С FN-38
-    ``space_weather`` может быть ``ok`` (см. ``_space_weather_status``), но
-    ``mmod`` остаётся ``not_implemented``/``critical_gap = True`` до FN-39 —
-    правило предпочтения окон (п.1, main-prompt.md §11) исключает окно при
-    критическом пробеле по ЛЮБОМУ механизму, поэтому сегодня результат этой
-    функции по-прежнему ``all_windows_excluded`` в каждом запросе. Это не
-    захардкожено здесь: как только FN-39 подключит ``mmod``, поведение
-    изменится само собой через то же общее правило, без правок этой функции.
+    ``space_weather`` может быть ``ok`` (см. ``_space_weather_status``), и с
+    FN-39 ``mmod`` тоже может быть ``ok`` (см.
+    :func:`_mmod_mechanism_assessment`) — правило предпочтения окон (п.1,
+    main-prompt.md §11) по-прежнему исключает окно при критическом пробеле
+    по ЛЮБОМУ механизму, но теперь, когда оба покрыты пригодными данными,
+    результат этой функции действительно зависит от обстановки:
+    доминирование, конфликт, равенство или недостаточность оснований (п.2-4
+    того же раздела), а не гарантированный ``all_windows_excluded``. Это не
+    захардкожено здесь — то же общее правило доминирования/tie/conflict
+    отрабатывает одинаково независимо от того, сколько механизмов реально
+    покрыты.
     """
     candidates = [
         WindowCandidate.from_assessments(w["window_id"], w["duration_hours"], w["mechanisms"])
@@ -912,9 +999,9 @@ def _build_current_result(
 
     forecast_records_by_id = {str(r["record_id"]): r for r in forecast_records}
 
-    def _window_forecast_assessment(start_at: datetime, duration_hours: float) -> tuple[
-        list[str], list[str]
-    ]:
+    def _window_forecast_assessment(
+        start_at: datetime, duration_hours: float
+    ) -> tuple[list[str], list[str]]:
         end_at = start_at + timedelta(hours=duration_hours)
         assessment = assess_external_forecast(
             forecast_days, window_start=start_at, window_end=end_at
@@ -1087,6 +1174,23 @@ def _build_current_result(
         request.search_end_at, request.duration_hours
     )
 
+    win_a_mmod = _mmod_mechanism_assessment(
+        conn,
+        raw_store,
+        start_at=request.start_at,
+        duration_hours=request.duration_hours,
+        now=now,
+        log_ctx=log_ctx,
+    )
+    win_b_mmod = _mmod_mechanism_assessment(
+        conn,
+        raw_store,
+        start_at=request.search_end_at,
+        duration_hours=request.duration_hours,
+        now=now,
+        log_ctx=log_ctx,
+    )
+
     win_a_space_weather = _window_observed_mechanism(
         "win-a", request.start_at, request.duration_hours,
         forecast_notes=win_a_forecast_notes, forecast_record_ids=win_a_forecast_record_ids,
@@ -1098,12 +1202,18 @@ def _build_current_result(
 
     windows = [
         _window(
-            "win-a", request.start_at, request.duration_hours,
+            "win-a",
+            request.start_at,
+            request.duration_hours,
             space_weather_mechanism=win_a_space_weather,
+            mmod_mechanism=win_a_mmod,
         ),
         _window(
-            "win-b", request.search_end_at, request.duration_hours,
+            "win-b",
+            request.search_end_at,
+            request.duration_hours,
             space_weather_mechanism=win_b_space_weather,
+            mmod_mechanism=win_b_mmod,
         ),
     ]
     recommendation = _apply_window_dominance(windows)
@@ -1135,6 +1245,30 @@ def _build_current_result(
         )
     ]
 
+    # Манифест MMOD (FN-39) — той же формой, что и forecast_manifest_entries
+    # выше: только записи, ФАКТИЧЕСКИ использованные хотя бы одним окном
+    # (main-prompt.md §3 «манифест собирается фактически использованными
+    # записями»), не весь загруженный набор.
+    mmod_manifest_record_ids = sorted(set(win_a_mmod["record_ids"]) | set(win_b_mmod["record_ids"]))
+    mmod_records_by_id: dict[str, dict[str, Any]] = {}
+    if mmod_manifest_record_ids:
+        mmod_records_by_id = {
+            str(r["record_id"]): r
+            for r in select_as_of(
+                conn, now, source_id=mmod_source.SOURCE_ID, record_kind="forecast"
+            )
+        }
+    mmod_manifest_entries = [
+        {
+            "record_id": record_id,
+            "source_id": mmod_source.SOURCE_ID,
+            "source_version": mmod_records_by_id[record_id]["source_version"],
+            "record_kind": "forecast",
+        }
+        for record_id in mmod_manifest_record_ids
+        if record_id in mmod_records_by_id
+    ]
+
     # Статусы, построенные из СОБСТВЕННОГО исхода именно этой попытки
     # (orbit_fetch.status, swpc_status, noaa_3day_status) — не из общего
     # реестра ни поздним повторным registry.get() (round 1 ревью), ни через
@@ -1149,10 +1283,6 @@ def _build_current_result(
     ]
 
     limitations = [
-        "Интерпретация Механизма 2 (MMOD) не реализована в этой версии сервиса "
-        "(научный гейт нормировки к спорадическому фону не закрыт, FN-32/FN-39) "
-        "— mechanisms[*mmod].status остаётся not_implemented в каждом окне, "
-        "оценка не имитируется готовым значением.",
         "Механизм 1 (космическая погода) сочетает две отдельные величины: "
         "классификацию НАБЛЮДЕНИЯ (поток протонов GOES >=10 МэВ, шкала S NOAA "
         "S1/S2/S3, FN-38) — она даёт mechanisms[*space_weather].status=ok "
@@ -1167,6 +1297,14 @@ def _build_current_result(
         "beyond_horizon для space_weather — «не покрыто», не «спокойно» "
         "(main-prompt.md §4). Геомагнитный модулятор (Kp>=5) и контекст шкалы "
         "R (main-prompt.md §11) в этой версии не подключены.",
+        "Механизм 2 (MMOD, FN-39) вычислен из NASA MEO 'The 2024 meteor "
+        "shower activity forecast for low Earth orbit' — годовой документ, "
+        "покрывающий только 2024-01-01T00:00Z..2025-01-01T06:00Z; запрос вне "
+        "этого диапазона честно даёт critical_gap/missing_data, а не "
+        "спокойную обстановку. Геометрия станции (экранирование Землёй, "
+        "относительная скорость встречи, src/domain/mmod/geometry.py, "
+        "FN-32) в это число НЕ подмешана — NASA-показатель уже worst-case "
+        "для полностью открытой площадки (sources.yaml#nasa-meo-leo-forecast-2024).",
         "Траектория станции рассчитана по SGP4 на предоставленных элементах "
         "(см. orbit.elements_age_hours/is_reconstructed).",
     ]
@@ -1193,6 +1331,7 @@ def _build_current_result(
             },
             *forecast_manifest_entries,
             *observed_manifest_entries,
+            *mmod_manifest_entries,
         ],
         "orbit": {
             "source": "celestrak",
@@ -1278,9 +1417,7 @@ def run_calculation(
             task_id=task_id,
         )
         store_result(conn, result)
-        _log(
-            "result_stored", task_id=task_id, result_id=result["result_id"], mode=result["mode"]
-        )
+        _log("result_stored", task_id=task_id, result_id=result["result_id"], mode=result["mode"])
         return str(result["result_id"])
     except CalculationError as exc:
         _log("job_failed", task_id=task_id, mode=request.mode, code=exc.code, message=exc.message)
@@ -1353,9 +1490,7 @@ def get_all_source_status(*, registry: SourceStatusRegistry) -> list[dict[str, A
     """Статусы всех известных источников без обращения к сети."""
     return [
         _source_status_dict(registry, orbit.SOURCE_ID_CURRENT, config_enabled=True),
-        _source_status_dict(
-            registry, swpc_source.SOURCE_ID, config_enabled=_swpc_config_enabled()
-        ),
+        _source_status_dict(registry, swpc_source.SOURCE_ID, config_enabled=_swpc_config_enabled()),
         _source_status_dict(
             registry, noaa_3day_source.SOURCE_ID, config_enabled=_noaa_3day_config_enabled()
         ),

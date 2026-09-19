@@ -92,7 +92,11 @@ def test_current_mode_full_flow_returns_real_orbit_and_honest_mechanism_gaps(
     # Manifest — только фактически использованная запись (орбита); фикстура
     # потока протонов (10 мая 2024) не пересекается с окном этого запроса
     # (18 сентября 2026), поэтому наблюдение получено, но не использовано —
-    # ни одна запись не попадает в покрытый сегмент ни одного окна.
+    # ни одна запись не попадает в покрытый сегмент ни одного окна. MMOD
+    # (FN-39) не добавляет запись в манифест здесь по той же причине:
+    # CURRENT_REQUEST лежит в 2026 г., вне годового покрытия NASA MEO 2024
+    # (2024-01-01..2025-01-01) — ни одной записи для этого окна не
+    # существует, см. ниже.
     assert len(body["data_manifest"]) == 1
     assert body["data_manifest"][0]["record_id"] == body["orbit"]["record_id"]
     assert body["data_manifest"][0]["record_kind"] == "orbital_elements"
@@ -101,18 +105,33 @@ def test_current_mode_full_flow_returns_real_orbit_and_honest_mechanism_gaps(
     for window in body["windows"]:
         mechanisms = {m["mechanism"]: m for m in window["mechanisms"]}
         assert set(mechanisms) == {"space_weather", "mmod"}
-        # mmod (FN-39 не сделано) остаётся честной заглушкой; space_weather
-        # (FN-38) теперь реально классифицируется — для ЭТОГО окна пригодных
-        # отсчётов наблюдения нет (см. комментарий про manifest выше), но
-        # источник исправен и свеж (фикстура только что «получена»), поэтому
-        # причина — честный пробел покрытия (missing_data), не отказ.
-        assert mechanisms["mmod"]["status"] == "not_implemented"
-        assert mechanisms["space_weather"]["status"] == "missing_data"
-        for assessment in mechanisms.values():
-            assert assessment["max_level"] is None
-            assert assessment["exceedance_hours_by_level"] is None
-            assert assessment["record_ids"] == []
-            assert assessment["critical_gap"] is True
+
+        # space_weather (FN-38) теперь реально классифицируется — для ЭТОГО
+        # окна пригодных отсчётов наблюдения нет (см. комментарий про
+        # manifest выше), но источник исправен и свеж (фикстура только что
+        # «получена»), поэтому причина — честный пробел покрытия
+        # (missing_data), не отказ.
+        space_weather = mechanisms["space_weather"]
+        assert space_weather["status"] == "missing_data"
+        assert space_weather["max_level"] is None
+        assert space_weather["exceedance_hours_by_level"] is None
+        assert space_weather["record_ids"] == []
+        assert space_weather["critical_gap"] is True
+
+        # FN-39: MMOD больше не заглушка not_implemented — реальная оценка
+        # NASA MEO 2024 LEO forecast. CURRENT_REQUEST лежит в 2026 г., вне
+        # годового покрытия документа (только 2024) — честный
+        # critical_gap/missing_data, не имитация уровня и не
+        # not_implemented (main-prompt.md §2 «за пределами данных — не
+        # спокойная обстановка»).
+        mmod = mechanisms["mmod"]
+        assert mmod["status"] == "missing_data"
+        assert mmod["max_level"] is None
+        assert mmod["exceedance_hours_by_level"] is None
+        assert mmod["critical_gap"] is True
+        assert mmod["record_ids"] == []
+        assert any("2024" in note for note in mmod["notes"])
+
         assert window["excluded_from_comparison"] is True
         assert window["exclusion_reason"]
 

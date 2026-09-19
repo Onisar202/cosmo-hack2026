@@ -41,8 +41,21 @@ Mode = Literal["current", "historical_analysis", "historical_forecast"]
 ARCHIVE_START = datetime(2024, 5, 1, 0, 0, 0, tzinfo=timezone.utc)
 ARCHIVE_END = datetime(2024, 6, 30, 23, 59, 59, 999999, tzinfo=timezone.utc)
 
-ALGORITHM_VERSION = "0.3.0"
-"""FN-38 (S2-08): mechanisms[*space_weather] for `current` is no longer always
+ALGORITHM_VERSION = "0.4.0"
+"""FN-39 (S2-08): mechanisms[*mmod] for `current` is no longer always
+not_implemented — src.domain.mmod.background computes ratio_to_background
+from the NASA MEO 2024 LEO forecast (sources.yaml#nasa-meo-leo-forecast-2024)
+against the 1.2/2 thresholds (main-prompt.md §11) and can now yield
+status=ok/missing_data with a real max_level/exceedance_hours_by_level.
+Same identity-changing kind of change as FN-38/FN-34 below: main-prompt.md §3
+requires a version bump whenever the algorithm producing the result changes,
+even for requests where the observable output happens to stay the same (e.g.
+a window outside the NASA MEO 2024 grid, still missing_data before and after
+this bump). With both mandatory mechanisms now real, result.recommendation.status
+for `current` can genuinely differ between requests (selected/tie/
+insufficient_basis/all_windows_excluded) instead of being effectively fixed.
+
+FN-38 (S2-08): mechanisms[*space_weather] for `current` is no longer always
 not_implemented — src.domain.spaceweather.observed_classifier classifies the
 observed GOES proton flux (>=10 MeV, pfu) against the NOAA S-scale
 (main-prompt.md §11) and can now yield status=ok/missing_data/stale_data/

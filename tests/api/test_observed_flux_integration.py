@@ -157,10 +157,17 @@ def test_seeded_full_hour_of_observations_yields_ok_status_via_production_path(
     assert {m["record_id"] for m in observed_manifest} == set(space_weather["record_ids"])
     assert all(m["source_id"] == swpc_source.SOURCE_ID for m in observed_manifest)
 
-    # mmod (FN-39 не сделано) по-прежнему держит окно исключённым из
-    # автоматического сравнения — правило доминирования не меняется здесь.
-    assert win_a["excluded_from_comparison"] is True
-    assert result["recommendation"]["status"] == "all_windows_excluded"
+    # mmod (FN-39) тоже реален и покрывает 2024-05-10 (документ NASA MEO
+    # охватывает весь 2024 год) — с обоими механизмами без критического
+    # пробела win-a участвует в сравнении. win-b (4ч позже, 14:00-15:00) не
+    # засеян наблюдениями GOES — критический пробел space_weather выводит
+    # его из сравнения, поэтому win-a становится рекомендацией.
+    mmod_a = next(m for m in win_a["mechanisms"] if m["mechanism"] == "mmod")
+    assert mmod_a["status"] == "ok"
+    assert mmod_a["critical_gap"] is False
+    assert win_a["excluded_from_comparison"] is False
+    assert result["recommendation"]["status"] == "selected"
+    assert result["recommendation"]["window_id"] == "win-a"
 
 
 def test_frozen_source_with_stale_last_success_yields_stale_data_status(
