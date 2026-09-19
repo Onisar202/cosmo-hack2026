@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -52,6 +53,19 @@ def create_app() -> FastAPI:
     # конкурентный запрос успеет породить гонку за его создание
     # (src/api/service.py:ensure_store_ready).
     ensure_store_ready(settings)
+
+    # Reverse proxy на том же origin (docker/nginx.conf.template) не требует
+    # CORS вовсе — middleware добавляется, только если оператор явно назначил
+    # CORS_ALLOWED_ORIGINS (например, UI и API разнесены по разным доменам).
+    # Пустой список означает "CORS не настроен", а не "разрешить всё".
+    cors_origins = settings.cors_origins()
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_methods=["GET", "POST"],
+            allow_headers=["*"],
+        )
 
     app.include_router(api_router)
 
