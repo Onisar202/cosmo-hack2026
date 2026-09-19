@@ -1,5 +1,16 @@
 import { expect, test } from '@playwright/test'
 
+// Единственные коды ошибок, которые эта проверка принимает как «реальный
+// источник недоступен из текущей сети» (совпадает с
+// tests/integration/test_stage1.py:
+// SOURCE_UNAVAILABLE_ERROR_CODES — src/api/service.py:
+// `f"orbit_{orbit_fetch.outcome}"`, outcome ∈ {"error_source", "error_quota"}).
+// Любой другой код (result_schema_violation, orbit_propagation_failed,
+// internal_error и т.п.) — дефект развёртывания/сервиса, а не отсутствие
+// сети, и обязан ронять проверку, а не маскироваться под неё (round 1
+// ревью PR #21).
+const SOURCE_UNAVAILABLE_ERROR_CODES = new Set(['orbit_error_source', 'orbit_error_quota'])
+
 /**
  * FN-28 (S1-10): сквозная UI-проверка развёрнутого этапа —
  * UI → API → source → store → orbit → result, тем же путём, каким им
@@ -45,11 +56,27 @@ test.describe('FN-28: сквозная проверка развёрнутого
     await expect(errorAlert.or(orbitCard)).toBeVisible({ timeout: 45_000 })
 
     if (await errorAlert.isVisible()) {
+      // Код ошибки виден пользователю текстом в самой форме — «Расчёт
+      // завершился ошибкой ({code})» (web/src/components/CalculationPanel.tsx)
+      // — извлекаем из него, а не гадаем по факту наличия алерта.
+      const alertText = (await errorAlert.textContent()) ?? ''
+      const codeMatch = alertText.match(/\(([\w-]+)\)/)
+      const code = codeMatch?.[1]
+
+      if (!code || !SOURCE_UNAVAILABLE_ERROR_CODES.has(code)) {
+        throw new Error(
+          'Расчёт завершился ошибкой, код которой НЕ входит в список ожидаемых ' +
+            `признаков недоступности источника (${[...SOURCE_UNAVAILABLE_ERROR_CODES].join(', ')}) ` +
+            `— похоже на дефект развёртывания/сервиса, а не отсутствие сети. ` +
+            `Текст ошибки: ${alertText}`,
+        )
+      }
+
       test.skip(
         true,
-        'mode=current завершился ошибкой реального источника (ожидаемо без ' +
-          'сетевого доступа к CelesTrak/NOAA SWPC из этой сети) — см. ' +
-          'README.md «Известное ограничение окружения сборки». Форма честно ' +
+        `mode=current завершился ошибкой реального источника (код ${code}, ` +
+          'ожидаемо без сетевого доступа к CelesTrak/NOAA SWPC из этой сети) — ' +
+          'см. README.md «Известное ограничение окружения сборки». Форма честно ' +
           'показала ошибку, а не благоприятную оценку — это и была проверяемая часть.',
       )
     }

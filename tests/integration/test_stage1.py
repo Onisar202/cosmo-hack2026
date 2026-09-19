@@ -64,6 +64,15 @@ JOB_POLL_TIMEOUT_SECONDS = 60.0
 JOB_POLL_INTERVAL_SECONDS = 0.5
 HEALTH_POLL_TIMEOUT_SECONDS = 60.0
 
+# Единственные коды ошибок job.error.code, которые эта проверка принимает
+# как «реальный источник недоступен из текущей сети» (src/api/service.py:
+# `f"orbit_{orbit_fetch.outcome}"`, outcome ∈ {"error_source", "error_quota"}
+# — см. src/sources/orbit.py). Любой другой код (result_schema_violation,
+# orbit_propagation_failed, internal_error и т.п.) — это дефект развёртывания
+# или сервиса, а не отсутствие сети, и обязан ронять проверку, а не
+# маскироваться под неё (round 1 ревью PR #21).
+SOURCE_UNAVAILABLE_ERROR_CODES = frozenset({"orbit_error_source", "orbit_error_quota"})
+
 
 def _client() -> httpx.Client:
     return httpx.Client(base_url=BASE_URL, timeout=10.0)
@@ -145,11 +154,26 @@ def completed_calculation(base_client: httpx.Client) -> dict[str, Any]:
     job = _wait_for_job(base_client, task_id)
     if job["status"] == "failed":
         error = job.get("error") or {}
+        code = error.get("code")
+        if code not in SOURCE_UNAVAILABLE_ERROR_CODES:
+            # НЕ пропускаем: этот код не входит в известный список признаков
+            # сетевой недоступности источника — это похоже на реальный дефект
+            # развёртывания/сервиса (например повреждённый ответ, ошибка
+            # валидации контракта, внутренняя ошибка), и его обязана поймать
+            # именно эта сквозная проверка, а не потеряться под видом
+            # «источник недоступен» (round 1 ревью PR #21).
+            pytest.fail(
+                "mode=current завершился ошибкой с кодом, который НЕ входит в "
+                f"список ожидаемых признаков недоступности источника "
+                f"{sorted(SOURCE_UNAVAILABLE_ERROR_CODES)!r} — это дефект "
+                f"развёртывания или сервиса, а не отсутствие сети. Полный "
+                f"статус задания: {job!r}"
+            )
         pytest.skip(
             "mode=current завершился отказом источника (ожидаемо, если сеть, в "
             "которой запущена проверка, не пропускает CelesTrak/NOAA SWPC — "
             "см. README.md «Известное ограничение окружения сборки»): "
-            f"code={error.get('code')!r} message={error.get('message')!r}. "
+            f"code={code!r} message={error.get('message')!r}. "
             "Это НЕ означает, что сервис вернул благоприятную оценку при "
             "отказе — job.status == 'failed', не 'done' (main-prompt.md §2)."
         )

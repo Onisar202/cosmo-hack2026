@@ -24,6 +24,13 @@ services:
       STORE_RAW_DIR: data/raw
     volumes:
       - api-data:/app/data
+      # sources.yaml (src/sources/status.py: "изменение файла... действует без
+      # перезапуска") запечён в образ Dockerfile-слоем COPY — без этого
+      # bind mount `enabled: false` для источника пришлось бы вносить пересборкой
+      # образа, что противоречит README.md «Развёртывание»/«отключение
+      # источника без пересборки» (round 1 ревью PR #21). read-only: контейнер
+      # только читает реестр источников, не пишет в него (main-prompt.md §7).
+      - ./sources.yaml:/app/sources.yaml:ro
     ports:
       - "8000:8000"
     healthcheck:
