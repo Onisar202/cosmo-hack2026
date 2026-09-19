@@ -82,20 +82,35 @@ class UnsupportedRecordError(ValueError):
 
 
 class ConflictingObservationsError(ValueError):
-    """После выбора последней версии каждой записи поставщика
-    (``provider_record_id``, по ``fetched_at``) на один и тот же
-    ``observed_at`` всё равно претендуют ДВЕ РАЗНЫЕ записи поставщика —
-    round 1 ревью PR #29: это не то же самое, что позднее исправление той же
-    записи (``ConflictingObservationsError`` не поднимается в этом случае,
-    см. :func:`assess_observed_flux`). Источник — единственный
-    зарегистрированный коннектор ровно одного «первичного» спутника GOES
-    (``sources.yaml`` → ``space_weather[0].independence_note``): задокументированного
-    правила, как выбирать между ДВУМЯ разными спутниками на один и тот же
-    момент, не существует, а произвольный выбор (например «взять большее
-    значение») не был бы обоснован ничем, кроме удобства — main-prompt.md §2
-    требует делать пробел/неоднозначность видимой, а не решать её тихо.
-    Вызывающая сторона (``src/api/service.py``) ловит эту ошибку как отказ
-    обработки — ``status="source_error"``, не благоприятную оценку."""
+    """Две записи не могут быть безопасно сведены к одной, и произвольный
+    выбор (например «взять большее значение») не был бы обоснован ничем,
+    кроме удобства — main-prompt.md §2 требует делать неоднозначность
+    видимой, а не решать её тихо. Два разных случая, оба — round
+    1-2 ревью PR #29:
+
+    1. Две версии ОДНОЙ записи поставщика (``provider_record_id``) завязаны
+       на один и тот же максимальный ``fetched_at``, но несут РАЗНОЕ
+       содержимое (round 2 ревью — до этого выбиралась первая по порядку
+       выборки версия, зависящая от случайного порядка ``record_id``, что
+       могло дать разные уровни для одних и тех же исходных данных в
+       зависимости от порядка возврата ``select_observed_range``).
+    2. После выбора последней версии каждой записи поставщика на один и тот
+       же ``observed_at`` всё равно претендуют ДВЕ РАЗНЫЕ записи поставщика
+       (round 1 ревью) — источник документирован как единственный
+       «первичный» спутник GOES (``sources.yaml`` →
+       ``space_weather[0].independence_note``), задокументированного
+       правила выбора между двумя разными спутниками на один момент нет.
+
+    ``record_ids`` — id конкретных конфликтующих записей (не всей выборки
+    окна) для прослеживаемости (О4, round 2 ревью «идентификаторы
+    конфликтующих наблюдений скрыты»). Вызывающая сторона
+    (``src/api/service.py``) ловит эту ошибку как отказ обработки —
+    ``status="source_error"``, не благоприятную оценку, и показывает именно
+    эти id в предупреждении и в ``data_manifest``."""
+
+    def __init__(self, message: str, *, record_ids: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.record_ids = record_ids
 
 
 def classify_level(value: float) -> str:
@@ -260,7 +275,7 @@ def assess_observed_flux(
     window_duration = window_end - window_start
     hold = timedelta(seconds=hold_seconds)
 
-    # round 1 ревью PR #29: два разных шага, не один.
+    # round 1-2 ревью PR #29: два разных шага, не один.
     #
     # 1) Версионирование — сначала для КАЖДОЙ записи поставщика
     # (``provider_record_id`` — у этого источника кодирует и спутник, и
@@ -272,11 +287,33 @@ def assess_observed_flux(
     # версию в выборке ``select_observed_range`` (в отличие от
     # ``select_as_of``, здесь нет ``published_at``, чтобы отсечь это в SQL) —
     # старое завышенное значение продолжало бы давать ложный S3.
-    latest_by_provider: dict[str, ObservedProtonSample] = {}
+    #
+    # round 2 ревью: группировка по ``provider_record_id`` целиком, а не
+    # последовательное сравнение "текущий максимум vs следующий", — при
+    # НЕСКОЛЬКИХ версиях с ОДИНАКОВЫМ максимальным ``fetched_at`` прежний код
+    # молча оставлял первую встреченную по порядку выборки (зависящему от
+    # случайного ``record_id`` при равенстве ``observed_at``/``fetched_at``
+    # в ORDER BY ``select_observed_range``) — один и тот же набор исходных
+    # данных мог дать разные уровни в зависимости от порядка возврата.
+    # Теперь при таком совпадении с РАЗНЫМ содержимым — явная ошибка, не
+    # угадывание; при полностью одинаковом содержимом (тот же отсчёт дважды)
+    # выбор между ними не имеет значения, и это не ошибка.
+    by_provider: dict[str, list[ObservedProtonSample]] = {}
     for sample in samples:
-        current = latest_by_provider.get(sample.provider_record_id)
-        if current is None or sample.fetched_at > current.fetched_at:
-            latest_by_provider[sample.provider_record_id] = sample
+        by_provider.setdefault(sample.provider_record_id, []).append(sample)
+
+    latest_by_provider: dict[str, ObservedProtonSample] = {}
+    for provider_record_id, group in by_provider.items():
+        max_fetched_at = max(s.fetched_at for s in group)
+        tied = [s for s in group if s.fetched_at == max_fetched_at]
+        if len(tied) > 1 and len({(s.value, s.quality) for s in tied}) > 1:
+            raise ConflictingObservationsError(
+                f"provider_record_id={provider_record_id!r} has {len(tied)} versions tied "
+                f"at fetched_at={max_fetched_at.isoformat()} with different content "
+                f"({[(s.value, s.quality) for s in tied]!r}) — no rule to prefer one",
+                record_ids=tuple(s.record_id for s in tied),
+            )
+        latest_by_provider[provider_record_id] = tied[0]
 
     # 2) Только теперь, после версионирования, проверяется коллизия по
     # ``observed_at`` между РАЗНЫМИ записями поставщика (например два разных
@@ -293,7 +330,8 @@ def assess_observed_flux(
             raise ConflictingObservationsError(
                 f"observed_at={sample.observed_at.isoformat()} has two conflicting "
                 f"provider records ({existing.provider_record_id!r} and "
-                f"{sample.provider_record_id!r}) with no documented rule to prefer one"
+                f"{sample.provider_record_id!r}) with no documented rule to prefer one",
+                record_ids=(existing.record_id, sample.record_id),
             )
         by_moment[sample.observed_at] = sample
 

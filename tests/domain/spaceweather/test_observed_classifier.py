@@ -346,11 +346,72 @@ def test_conflicting_provider_records_at_the_same_observed_at_raise() -> None:
         ),
     ]
 
-    with pytest.raises(ConflictingObservationsError):
+    with pytest.raises(ConflictingObservationsError) as excinfo:
         assess_observed_flux(
             samples, window_start=WINDOW_START, window_end=WINDOW_START.replace(minute=5),
             now=LONG_AFTER_WINDOW, hold_seconds=300.0,
         )
+    # round 2 ревью PR #29 (⚠️): id конкретных конфликтующих записей должны
+    # быть прослеживаемы вызывающей стороной, не только текст сообщения.
+    assert set(excinfo.value.record_ids) == {"low", "high"}
+
+
+def test_two_versions_tied_at_fetched_at_with_different_content_raise() -> None:
+    """round 2 ревью PR #29 (🚨): раньше при СОВПАДАЮЩЕМ максимальном
+    ``fetched_at`` двух версий одной записи выбиралась первая по порядку
+    выборки — зависящая от случайного порядка (в проде — от ``record_id``
+    в ``ORDER BY`` ``select_observed_range``), а не от содержимого. Один и
+    тот же набор исходных данных мог дать то ли ``background``, то ли
+    ``S3`` в зависимости от порядка. Теперь это явная ошибка, не угадывание
+    по порядку."""
+    tied_at = WINDOW_START.replace(minute=30)
+    version_a = _sample(
+        observed_at=WINDOW_START, value=5.0, record_id="a",
+        provider_record_id="18:2024-05-10T12:00:00+00:00", fetched_at=tied_at,
+    )
+    version_b = _sample(
+        observed_at=WINDOW_START, value=1000.0, record_id="b",
+        provider_record_id="18:2024-05-10T12:00:00+00:00", fetched_at=tied_at,
+    )
+
+    with pytest.raises(ConflictingObservationsError) as excinfo:
+        assess_observed_flux(
+            [version_a, version_b], window_start=WINDOW_START,
+            window_end=WINDOW_START.replace(minute=5),
+            now=LONG_AFTER_WINDOW, hold_seconds=300.0,
+        )
+    assert set(excinfo.value.record_ids) == {"a", "b"}
+
+    # Порядок появления в выборке не должен влиять на исход.
+    with pytest.raises(ConflictingObservationsError):
+        assess_observed_flux(
+            [version_b, version_a], window_start=WINDOW_START,
+            window_end=WINDOW_START.replace(minute=5),
+            now=LONG_AFTER_WINDOW, hold_seconds=300.0,
+        )
+
+
+def test_two_identical_versions_tied_at_fetched_at_do_not_raise() -> None:
+    """Тот же отсчёт, случайно попавший в выборку дважды с одинаковым
+    содержимым (например повторная вставка идемпотентного fetch_and_store),
+    — не конфликт: выбор между двумя идентичными версиями не имеет
+    значения, поднимать ошибку не за что."""
+    tied_at = WINDOW_START.replace(minute=30)
+    version_a = _sample(
+        observed_at=WINDOW_START, value=15.0, record_id="a",
+        provider_record_id="18:2024-05-10T12:00:00+00:00", fetched_at=tied_at,
+    )
+    version_b = _sample(
+        observed_at=WINDOW_START, value=15.0, record_id="b",
+        provider_record_id="18:2024-05-10T12:00:00+00:00", fetched_at=tied_at,
+    )
+
+    assessment = assess_observed_flux(
+        [version_a, version_b], window_start=WINDOW_START,
+        window_end=WINDOW_START.replace(minute=5),
+        now=LONG_AFTER_WINDOW, hold_seconds=300.0,
+    )
+    assert assessment.max_level == "S1"
 
 
 def test_rejects_naive_window_or_now() -> None:

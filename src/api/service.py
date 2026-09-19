@@ -61,6 +61,7 @@ from src.domain.spaceweather.external_forecast import (
     external_forecast_days_from_records,
 )
 from src.domain.spaceweather.observed_classifier import (
+    ConflictingObservationsError,
     ObservedFluxAssessment,
     assess_observed_flux,
     observed_proton_samples_from_records,
@@ -928,9 +929,38 @@ def _build_current_result(
     # (sources.yaml), select_as_of здесь неприменим.
     observed_records_by_id: dict[str, dict[str, Any]] = {}
 
+    def _observation_processing_failed_mechanism(
+        window_id: str, error_detail: str, *, record_ids: list[str],
+        forecast_notes: list[str], forecast_record_ids: list[str],
+    ) -> dict[str, Any]:
+        # round 2 ревью PR #29 (⚠️ «остаётся непрослеживаемой»): отдельное
+        # предупреждение с window_id/record_ids (тот же паттерн, что и
+        # существующие warnings этой функции — space-weather-{outcome_code}
+        # выше), не только notes самого mechanismAssessment — и то, и другое
+        # ссылается на конкретные id, не на факт отказа вообще.
+        warnings.append(
+            {
+                "code": "space-weather-observation-processing-error",
+                "severity": "advisory",
+                "mechanism": "space_weather",
+                "message": (
+                    f"Классификация наблюдения GOES не построена для окна {window_id}: "
+                    f"{error_detail}."
+                ),
+                "record_ids": record_ids,
+                "fetch_attempt_id": swpc_attempt_id,
+                "window_id": window_id,
+            }
+        )
+        return _space_weather_error_mechanism(
+            f"Классификация наблюдения GOES не построена: {error_detail}.",
+            extra_notes=forecast_notes,
+            extra_record_ids=list(forecast_record_ids) + record_ids,
+        )
+
     def _window_observed_mechanism(
-        start_at: datetime, duration_hours: float, *, forecast_notes: list[str],
-        forecast_record_ids: list[str],
+        window_id: str, start_at: datetime, duration_hours: float, *,
+        forecast_notes: list[str], forecast_record_ids: list[str],
     ) -> dict[str, Any]:
         end_at = start_at + timedelta(hours=duration_hours)
         cfg = swpc_cfg
@@ -940,12 +970,16 @@ def _build_current_result(
             # попытки расчёта, поэтому честный отказ обработки, а не расчёт
             # на запасных/угаданных числах (main-prompt.md §7 «пороги... в
             # конфиге, не в коде», §2 «отказ не подменяется правдоподобной
-            # оценкой»).
+            # оценкой»). Уже покрыто отдельным warning'ом выше (при отказе
+            # самой попытки получения, см. swpc_fetch_errored) — здесь
+            # никаких записей нет вовсе, второе предупреждение было бы
+            # дубликатом.
             return _space_weather_error_mechanism(
                 "Классификация наблюдения GOES не построена: конфигурация "
                 "источника (sources.yaml) недоступна для этой попытки расчёта.",
                 extra_notes=forecast_notes, extra_record_ids=forecast_record_ids,
             )
+
         try:
             records = select_observed_range(
                 conn,
@@ -954,27 +988,52 @@ def _build_current_result(
                 start_at=start_at - timedelta(seconds=cfg.ttl_seconds),
                 end_at=end_at,
             )
+        except Exception as exc:  # noqa: BLE001 — сама выборка не удалась
+            # (например недоступное хранилище) — записей нет вовсе, не
+            # только их обработка; текст маскируется как непредвиденное
+            # исключение (main-prompt.md §7).
+            error_detail = sanitize_unexpected_error(exc)
+            _log("swpc_observation_selection_failed", error=error_detail, **log_ctx)
+            return _observation_processing_failed_mechanism(
+                window_id, error_detail, record_ids=[],
+                forecast_notes=forecast_notes, forecast_record_ids=forecast_record_ids,
+            )
+
+        for record in records:
+            observed_records_by_id[str(record["record_id"])] = record
+
+        try:
             samples = observed_proton_samples_from_records(records)
             assessment = assess_observed_flux(
                 samples, window_start=start_at, window_end=end_at, now=now,
                 hold_seconds=cfg.ttl_seconds,
             )
-        except Exception as exc:  # noqa: BLE001 — round 1 ревью PR #29 (⚠️):
-            # повреждённая сохранённая запись, несовместимая нормализация или
-            # неразрешимый конфликт версий (ConflictingObservationsError) —
-            # явный отказ обработки (status="source_error"), а не тихое
-            # схлопывание в обычный missing_data, которое выглядело бы как
-            # «данных для окна и правда нет» (main-prompt.md §2 — три разных
-            # состояния, не два).
+        except ConflictingObservationsError as exc:
+            # round 2 ревью PR #29 (⚠️): сообщение построено этим же модулем
+            # из provider_record_id/fetched_at/наблюдаемых значений — не из
+            # сырого ответа источника, поэтому показывается как есть, не
+            # маскируется sanitize_unexpected_error (та защищает от утечки
+            # секретов из НЕИЗВЕСТНЫХ исключений, не от собственных доменных
+            # ошибок); id конкретных конфликтующих записей — из exc.record_ids,
+            # не всей выборки окна.
+            return _observation_processing_failed_mechanism(
+                window_id, str(exc), record_ids=list(exc.record_ids),
+                forecast_notes=forecast_notes, forecast_record_ids=forecast_record_ids,
+            )
+        except Exception as exc:  # noqa: BLE001 — повреждённая нормализация
+            # записи (неожиданная форма payload_json и т.п.) — неизвестное
+            # исключение, текст маскируется; конкретный повреждённый
+            # record_id этот блок не выделяет (round 2 ревью отметил это как
+            # желательное дальнейшее улучшение, не обязательное), но весь
+            # набор ID, ЗАТРОНУТЫХ этой попыткой обработки, остаётся видимым
+            # — уже не «где-то в логе», а в warnings/data_manifest.
             error_detail = sanitize_unexpected_error(exc)
             _log("swpc_observation_processing_failed", error=error_detail, **log_ctx)
-            return _space_weather_error_mechanism(
-                f"Классификация наблюдения GOES не построена: {error_detail}.",
-                extra_notes=forecast_notes, extra_record_ids=forecast_record_ids,
+            return _observation_processing_failed_mechanism(
+                window_id, error_detail,
+                record_ids=sorted({str(r["record_id"]) for r in records}),
+                forecast_notes=forecast_notes, forecast_record_ids=forecast_record_ids,
             )
-
-        for record in records:
-            observed_records_by_id[str(record["record_id"])] = record
 
         status = _space_weather_status(
             assessment,
@@ -996,11 +1055,11 @@ def _build_current_result(
     )
 
     win_a_space_weather = _window_observed_mechanism(
-        request.start_at, request.duration_hours,
+        "win-a", request.start_at, request.duration_hours,
         forecast_notes=win_a_forecast_notes, forecast_record_ids=win_a_forecast_record_ids,
     )
     win_b_space_weather = _window_observed_mechanism(
-        request.search_end_at, request.duration_hours,
+        "win-b", request.search_end_at, request.duration_hours,
         forecast_notes=win_b_forecast_notes, forecast_record_ids=win_b_forecast_record_ids,
     )
 

@@ -364,6 +364,7 @@ def test_conflicting_satellite_records_yield_source_error_not_missing_data(
     window_start = datetime(2024, 5, 10, 10, 0, tzinfo=UTC)
 
     conn = connect_store(settings.store_db_path)
+    conflicting_record_ids: list[str] = []
     try:
         for satellite in ("18", "99"):
             sample = swpc_source.SwpcSample(
@@ -385,7 +386,7 @@ def test_conflicting_satellite_records_yield_source_error_not_missing_data(
                 "integral-protons-1-day.json",
                 fetched_at=window_start,
             )
-            insert_record(conn, raw_store, record_input)
+            conflicting_record_ids.append(insert_record(conn, raw_store, record_input))
     finally:
         conn.close()
 
@@ -418,3 +419,20 @@ def test_conflicting_satellite_records_yield_source_error_not_missing_data(
     space_weather = next(m for m in win_a["mechanisms"] if m["mechanism"] == "space_weather")
     assert space_weather["status"] == "source_error"
     assert space_weather["max_level"] is None
+
+    # round 2 ревью PR #29 (⚠️ «id конфликтующих наблюдений скрыты»): сама
+    # ошибка обработки и id конкретных конфликтующих записей должны быть
+    # прослеживаемы — не только в логе, но и в warnings/mechanism/manifest
+    # результата.
+    assert set(conflicting_record_ids) <= set(space_weather["record_ids"])
+    processing_warning = next(
+        w for w in result["warnings"]
+        if w["code"] == "space-weather-observation-processing-error"
+    )
+    assert processing_warning["window_id"] == "win-a"
+    assert set(conflicting_record_ids) <= set(processing_warning["record_ids"])
+
+    observed_manifest_ids = {
+        m["record_id"] for m in result["data_manifest"] if m["record_kind"] == "observation"
+    }
+    assert set(conflicting_record_ids) <= observed_manifest_ids
